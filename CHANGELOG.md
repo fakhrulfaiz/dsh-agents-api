@@ -9,4 +9,4 @@ Detailed write-ups live under [`changes/`](changes/).
 - Park Host `execute` until the client posts `agent.session.input.tool_result` (legacy `function_call_output` accepted).
 - Emit `agent.session.requires_action` and populate `required_actions`.
 - Reject MCP / web_search / deferred function tools at create time.
-- See [changes/2026-09-18-mount-function-tools.md](changes/2026-09-18-mount-function-tools.md).
+- See [docs/changes/2026-09-18-mount-function-tools.md](docs/changes/2026-09-18-mount-function-tools.md).
