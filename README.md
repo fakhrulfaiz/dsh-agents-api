@@ -25,28 +25,43 @@ Serve the [OpenAI Agents API](https://developers.openai.com/api/docs/guides/agen
 <a id="use-this-package"></a>
 ## Use this package
 
-Mount the plugin beside `dsh-host-webserver`, `dsh-session`, and `dsh-agent` (the loop factory must already be registered), then point the OpenAI client `baseURL` at that server.
+Mount the plugin beside `dsh-host-webserver`, `dsh-session`, `dsh-agent`, and `dsh-agent-default-model` (the loop factory must already be registered), then point the OpenAI client `baseURL` at that server. Session create takes the Host **provider** from `ctx.agentDefaultModel.currentSelection()` and the **model** id from the Agents API `agent.model`.
 
-### Install into a profile
+### Install from GitHub
 
-From this source checkout, add the package to a dedicated base-backed profile. Do not add it to the shipped `web` profile: that profile already owns `id: webserver`.
+Use this when you want the package in a profile without editing its source. Create a dedicated base-backed profile first. Do not add it to the shipped `web` profile: that profile already owns `id: webserver`.
 
 ```sh
 pnpm dsh plugin --profile agents add github:fakhrulfaiz/dsh-agents-api
 pnpm dsh plugin --profile agents remove @fakhrulfaiz/dsh-agents-api
 ```
 
-If pnpm blocks the git `prepare` build, allow it in the profile's `pnpm-workspace.yaml`:
+If pnpm blocks the git `prepare` / `tsdown` build, allow it in the profile's `pnpm-workspace.yaml`, then re-run `add`:
 
 ```yaml
 allowBuilds:
   '@fakhrulfaiz/dsh-agents-api': true
 ```
 
-Then re-run the `add`. Create a dedicated base-backed profile first; do not add this to the shipped `web` profile (that profile already owns `id: webserver`).
-
 The CLI initializes the profile when needed. The patch inserts `dsh-host-webserver` on `0.0.0.0:3080` (`id: webserver`) and this plugin at prefix `/v1` (`id: agents-api`, empty `apiKey`). A later profile patch may replace either row's complete config.
 
+### Develop from a local checkout
+
+Use this when you are changing this package. Point the profile at a local tree (absolute path, or a path relative to the DeepSeek Harness checkout that runs `pnpm dsh`).
+
+From a DeepSeek Harness checkout that contains `packages/experimental/agents-api`:
+
+```sh
+pnpm dsh plugin --profile agents add ./packages/experimental/agents-api
+```
+
+From any clone of this repository:
+
+```sh
+pnpm dsh plugin --profile agents add /absolute/path/to/dsh-agents-api
+```
+
+After you edit `src/`, run `pnpm build` in the package directory (or let install run `prepare`), then restart the profile. A `link:` dependency in the profile's `package.json` means profile runs load that local tree; a `github:` dependency means they load the remote commit until you `add` again.
 ### When to choose it
 
 Choose it for OpenAI Agents API clients that need REST plus SSE against a local Host. Use [`dsh-acp`](../../acp/acp/README.md) for Agent Client Protocol stdio, and [`dsh-sdk-jsonrpc-server`](../../sdk/server/README.md) for the first-party JSON-RPC SDK. This gateway does not implement Assistants v2 `/v1/threads`.
@@ -96,7 +111,7 @@ Requests should send `OpenAI-Beta: agents=v1`. Official routes under the configu
 
 The plugin is a function plugin (`name` / `inject` / `Config` / `apply`, no default export). `apply` registers a prefix handler through `ctx.effect` and fans `session/event` into Agents API SSE events plus a live item list. `/agents/sessions` is matched before `/agents/:agent_id` so the literal `sessions` segment is never captured as an agent id.
 
-Each session calls `ctx.agents.create` with a `sess_*` id (the ACP create path), then `followup` or `steer`. Saved agents live only in this process; session-local inline agents are materialized without appearing in `GET /agents`. Item listing accumulates from live `session/event` records and does not read historical Session logs.
+Each session calls `ctx.agents.create` with a `sess_*` id (the ACP create path), `agentOptions.provider` from `agentDefaultModel`, and `agentOptions.model` from the wire agent, then `followup` or `steer`. Saved agents live only in this process; session-local inline agents are materialized without appearing in `GET /agents`. Item listing accumulates from live `session/event` records and does not read historical Session logs. A `turn/end` with `reason.kind === 'error'` becomes `agent.session.turn.failed`; other ends become `agent.session.turn.completed`.
 
 | File | Role |
 |---|---|

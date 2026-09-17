@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { AgentStore, materializeAgent } from './agent-store.ts'
@@ -189,10 +190,17 @@ export class AgentsGateway {
 
     const sessionId = SessionId(`sess_${randomUUID().replaceAll('-', '')}`)
     try {
+      const defaults = this.ctx.agentDefaultModel.currentSelection()
       const handle = await this.ctx.agents.create({
         sessionId,
         meta: { cwd },
-        agentOptions: { model: resolved.model },
+        agentOptions: {
+          provider: defaults.provider,
+          model: resolved.model,
+          ...(defaults.reasoningEffort === undefined
+            ? {}
+            : { reasoningEffort: defaults.reasoningEffort }),
+        },
       })
       this.handles.set(sessionId, handle)
     } catch (error: unknown) {

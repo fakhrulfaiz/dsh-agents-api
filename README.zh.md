@@ -25,28 +25,43 @@ kind: "package-bundle"
 <a id="use-this-package"></a>
 ## 使用本包
 
-将本插件与 `dsh-host-webserver`、`dsh-session` 和 `dsh-agent` 一起挂载（循环工厂必须已经注册），然后把 OpenAI 客户端的 `baseURL` 指向该服务器。
+将本插件与 `dsh-host-webserver`、`dsh-session`、`dsh-agent` 和 `dsh-agent-default-model` 一起挂载（循环工厂必须已经注册），然后把 OpenAI 客户端的 `baseURL` 指向该服务器。创建会话时，Host 的 **provider** 取自 `ctx.agentDefaultModel.currentSelection()`，**model** id 取自 Agents API 的 `agent.model`。
 
-### 安装进 profile
+### 从 GitHub 安装
 
-从本源码检出把它加到专用的、基于 base 的 profile。不要加到随附的 `web` profile：该 profile 已经拥有 `id: webserver`。
+当你要把本包装进 profile、又不改它的源码时用这条路径。先创建专用的、基于 base 的 profile。不要加到随附的 `web` profile：该 profile 已经拥有 `id: webserver`。
 
 ```sh
 pnpm dsh plugin --profile agents add github:fakhrulfaiz/dsh-agents-api
 pnpm dsh plugin --profile agents remove @fakhrulfaiz/dsh-agents-api
 ```
 
-如果 pnpm 拦截了 git 的 `prepare` 构建，在 profile 的 `pnpm-workspace.yaml` 中允许它：
+如果 pnpm 拦截了 git 的 `prepare` / `tsdown` 构建，在 profile 的 `pnpm-workspace.yaml` 中允许它，然后重新运行 `add`：
 
 ```yaml
 allowBuilds:
   '@fakhrulfaiz/dsh-agents-api': true
 ```
 
-然后重新运行 `add`。先创建专用的、基于 base 的 profile；不要加到随附的 `web` profile（该 profile 已经拥有 `id: webserver`）。
-
 CLI 会在需要时初始化 profile。patch 插入监听 `0.0.0.0:3080` 的 `dsh-host-webserver`（`id: webserver`），以及前缀 `/v1` 的本插件（`id: agents-api`，空 `apiKey`）。后续 profile patch 可以替换任一行的完整配置。
 
+### 从本地检出开发
+
+当你要改本包时用这条路径。把 profile 指到本地树（绝对路径，或相对运行 `pnpm dsh` 的 DeepSeek Harness 检出的路径）。
+
+若 DeepSeek Harness 检出里已有 `packages/experimental/agents-api`：
+
+```sh
+pnpm dsh plugin --profile agents add ./packages/experimental/agents-api
+```
+
+从本仓库的任意克隆：
+
+```sh
+pnpm dsh plugin --profile agents add /absolute/path/to/dsh-agents-api
+```
+
+编辑 `src/` 之后，在包目录运行 `pnpm build`（或让安装跑 `prepare`），然后重启 profile。profile 的 `package.json` 里若是 `link:` 依赖，运行会加载该本地树；若是 `github:` 依赖，则会加载远程提交，直到你再次 `add`。
 ### 何时选择它
 
 当 OpenAI Agents API 客户端需要针对本地 Host 的 REST 加 SSE 时选择它。Agent Client Protocol stdio 请用 [`dsh-acp`](../../acp/acp/README.zh.md)，第一方 JSON-RPC SDK 请用 [`dsh-sdk-jsonrpc-server`](../../sdk/server/README.zh.md)。本网关不实现 Assistants v2 的 `/v1/threads`。
@@ -96,7 +111,7 @@ CLI 会在需要时初始化 profile。patch 插入监听 `0.0.0.0:3080` 的 `ds
 
 本插件是函数插件（`name` / `inject` / `Config` / `apply`，无 default export）。`apply` 通过 `ctx.effect` 注册前缀处理器，并把 `session/event` 扇出为 Agents API SSE 事件以及实时条目列表。`/agents/sessions` 在 `/agents/:agent_id` 之前匹配，因此字面量 `sessions` 段不会被当成 agent id。
 
-每个会话以 `sess_*` id 调用 `ctx.agents.create`（ACP 创建路径），然后 `followup` 或 `steer`。已保存 agent 只存在于本进程；会话本地内联 agent 会物化，但不会出现在 `GET /agents`。条目列表从实时 `session/event` 记录累积，不读取历史 Session 日志。
+每个会话以 `sess_*` id 调用 `ctx.agents.create`（ACP 创建路径），`agentOptions.provider` 来自 `agentDefaultModel`，`agentOptions.model` 来自线上 agent，然后 `followup` 或 `steer`。已保存 agent 只存在于本进程；会话本地内联 agent 会物化，但不会出现在 `GET /agents`。条目列表从实时 `session/event` 记录累积，不读取历史 Session 日志。`reason.kind === 'error'` 的 `turn/end` 变成 `agent.session.turn.failed`；其他结束变成 `agent.session.turn.completed`。
 
 | 文件 | 职责 |
 |---|---|

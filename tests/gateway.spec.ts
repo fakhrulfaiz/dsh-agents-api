@@ -60,6 +60,9 @@ function fakeContext(options?: { failCreate?: boolean; failFollowup?: boolean; f
     sessions: {
       get: (id: string) => sessions.get(id),
     },
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }),
+    },
   } as unknown as Context
   return { ctx, agents }
 }

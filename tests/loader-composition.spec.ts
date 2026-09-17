@@ -57,6 +57,9 @@ describe('real Loader composition', () => {
           },
           get: (id: string) => agents.get(id),
         } as never)
+        ctx.provide('agentDefaultModel', {
+          currentSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }),
+        } as never)
       },
     }
     context = new Context()

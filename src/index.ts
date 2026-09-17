@@ -18,6 +18,7 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { AgentStore } from './agent-store.ts'
 import { bridgeSessionEvent } from './bridge.ts'
@@ -38,7 +39,7 @@ export * from './gateway.ts'
 export const name = 'agents-api'
 
 /** Host services required before routes can register. */
-export const inject = ['webServer', 'sessions', 'agents']
+export const inject = ['webServer', 'sessions', 'agents', 'agentDefaultModel']
 
 /** Plugin configuration. */
 export interface Config {
@@ -56,7 +57,7 @@ export const Config: z<Config> = z.object({
 
 /**
  * Register the Agents API prefix route and Session-event bridge.
- * @param ctx - plugin context with `webServer`, `sessions`, and `agents`.
+ * @param ctx - plugin context with `webServer`, `sessions`, `agents`, and `agentDefaultModel`.
  * @param config - optional API key and path prefix.
  */
 export function apply(ctx: Context, config: Config = {}): void {

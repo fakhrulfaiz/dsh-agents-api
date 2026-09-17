@@ -69,18 +69,38 @@ export function bridgeSessionEvent(
   }
 
   if (event.type === 'turn/end') {
-    const data = event.data as { usage?: TokenUsage }
+    const data = event.data as {
+      usage?: TokenUsage
+      reason?: { kind: string; error?: { message?: string; code?: string } }
+    }
     const usage = toOAIUsage(data.usage)
-    const completed = registry.completeTurn(sessionId, turnId, usage)
-    if (completed) {
-      registry.emit(sessionId, {
-        type: 'agent.session.turn.completed',
-        event_id: mintEventId(),
-        session_id: sessionId,
-        turn_id: turnId,
-        turn: completed,
-        ...(completed.usage ? { usage: completed.usage } : {}),
+    if (data.reason?.kind === 'error') {
+      const failed = registry.failTurn(sessionId, turnId, {
+        code: data.reason.error?.code ?? 'UNKNOWN',
+        message: data.reason.error?.message ?? 'turn failed',
       })
+      if (failed) {
+        registry.emit(sessionId, {
+          type: 'agent.session.turn.failed',
+          event_id: mintEventId(),
+          session_id: sessionId,
+          turn_id: turnId,
+          turn: failed,
+          ...(usage ? { usage } : {}),
+        })
+      }
+    } else {
+      const completed = registry.completeTurn(sessionId, turnId, usage)
+      if (completed) {
+        registry.emit(sessionId, {
+          type: 'agent.session.turn.completed',
+          event_id: mintEventId(),
+          session_id: sessionId,
+          turn_id: turnId,
+          turn: completed,
+          ...(completed.usage ? { usage: completed.usage } : {}),
+        })
+      }
     }
     registry.emit(sessionId, {
       type: 'agent.session.idle',
