@@ -3,7 +3,7 @@ description: "可安装的实验性 profile 层，为已经使用 agents=v1 的�
 kind: "package-bundle"
 ---
 
-# @deepseek-ai/dsh-experimental-agents-api
+# @fakhrulfaiz/dsh-agents-api
 
 [English](README.md) | 中文
 
@@ -32,9 +32,18 @@ kind: "package-bundle"
 从本源码检出把它加到专用的、基于 base 的 profile。不要加到随附的 `web` profile：该 profile 已经拥有 `id: webserver`。
 
 ```sh
-pnpm dsh plugin --profile agents add ./packages/experimental/agents-api
-pnpm dsh plugin --profile agents remove @deepseek-ai/dsh-experimental-agents-api
+pnpm dsh plugin --profile agents add github:fakhrulfaiz/dsh-agents-api
+pnpm dsh plugin --profile agents remove @fakhrulfaiz/dsh-agents-api
 ```
+
+如果 pnpm 拦截了 git 的 `prepare` 构建，在 profile 的 `pnpm-workspace.yaml` 中允许它：
+
+```yaml
+allowBuilds:
+  '@fakhrulfaiz/dsh-agents-api': true
+```
+
+然后重新运行 `add`。先创建专用的、基于 base 的 profile；不要加到随附的 `web` profile（该 profile 已经拥有 `id: webserver`）。
 
 CLI 会在需要时初始化 profile。patch 插入监听 `0.0.0.0:3080` 的 `dsh-host-webserver`（`id: webserver`），以及前缀 `/v1` 的本插件（`id: agents-api`，空 `apiKey`）。后续 profile patch 可以替换任一行的完整配置。
 
@@ -49,7 +58,7 @@ CLI 会在需要时初始化 profile。patch 插入监听 `0.0.0.0:3080` 的 `ds
   config:
     host: '127.0.0.1'
     port: 3080
-- name: '@deepseek-ai/dsh-experimental-agents-api'
+- name: '@fakhrulfaiz/dsh-agents-api'
   config:
     apiKey: ''
     prefix: '/v1'
@@ -60,7 +69,7 @@ CLI 会在需要时初始化 profile。patch 插入监听 `0.0.0.0:3080` 的 `ds
 | `apiKey` | `''` | `Authorization` 中要求的 Bearer 令牌；空字符串关闭鉴权 |
 | `prefix` | `/v1` | 每条 Agents API 路由的 URL 前缀 |
 
-生成的 [配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-experimental-agents-api) 是每个已接受字段及其 JSDoc 的完整来源。
+生成的 [配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-agents-api) 是每个已接受字段及其 JSDoc 的完整来源。
 
 请求应发送 `OpenAI-Beta: agents=v1`。在已配置前缀下的官方路由：
 

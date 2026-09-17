@@ -28,7 +28,7 @@ afterEach(async () => {
 
 describe('real Loader composition', () => {
   it('serves POST /v1/agents on a real WebServer', { timeout: 60_000 }, async () => {
-    root = await mkdtemp(join(tmpdir(), 'dsh-experimental-agents-api-loader-'))
+    root = await mkdtemp(join(tmpdir(), 'dsh-agents-api-loader-'))
     const configPath = join(root, 'cordis.yml')
     await writeFile(configPath, [
       '- name: fixture-dependencies',
@@ -36,7 +36,7 @@ describe('real Loader composition', () => {
       '  config:',
       "    host: '127.0.0.1'",
       '    port: 0',
-      "- name: '@deepseek-ai/dsh-experimental-agents-api'",
+      "- name: '@fakhrulfaiz/dsh-agents-api'",
       '  config:',
       "    prefix: '/v1'",
       '',
@@ -66,7 +66,7 @@ describe('real Loader composition', () => {
     const modules = new Map<string, unknown>([
       ['fixture-dependencies', dependencies],
       ['@deepseek-ai/dsh-host-webserver', WebServer],
-      ['@deepseek-ai/dsh-experimental-agents-api', AgentsApi],
+      ['@fakhrulfaiz/dsh-agents-api', AgentsApi],
     ])
     context.loader.internal = {
       version: 'v2',

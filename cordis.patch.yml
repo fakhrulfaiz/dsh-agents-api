@@ -10,7 +10,7 @@
         port: 3080
 
     - id: agents-api
-      name: '@deepseek-ai/dsh-experimental-agents-api'
+      name: '@fakhrulfaiz/dsh-agents-api'
       config:
         apiKey: ''
         prefix: '/v1'

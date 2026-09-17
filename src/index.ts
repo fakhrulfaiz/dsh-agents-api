@@ -10,7 +10,7 @@
  *
  * Reference: https://developers.openai.com/api/docs/guides/agents-api
  *
- * @module @deepseek-ai/dsh-experimental-agents-api
+ * @module @fakhrulfaiz/dsh-agents-api
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'

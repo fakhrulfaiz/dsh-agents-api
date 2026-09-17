@@ -3,7 +3,7 @@ description: "Installable experimental profile layer that serves the OpenAI Agen
 kind: "package-bundle"
 ---
 
-# @deepseek-ai/dsh-experimental-agents-api
+# @fakhrulfaiz/dsh-agents-api
 
 English | [中文](README.zh.md)
 
@@ -32,9 +32,18 @@ Mount the plugin beside `dsh-host-webserver`, `dsh-session`, and `dsh-agent` (th
 From this source checkout, add the package to a dedicated base-backed profile. Do not add it to the shipped `web` profile: that profile already owns `id: webserver`.
 
 ```sh
-pnpm dsh plugin --profile agents add ./packages/experimental/agents-api
-pnpm dsh plugin --profile agents remove @deepseek-ai/dsh-experimental-agents-api
+pnpm dsh plugin --profile agents add github:fakhrulfaiz/dsh-agents-api
+pnpm dsh plugin --profile agents remove @fakhrulfaiz/dsh-agents-api
 ```
+
+If pnpm blocks the git `prepare` build, allow it in the profile's `pnpm-workspace.yaml`:
+
+```yaml
+allowBuilds:
+  '@fakhrulfaiz/dsh-agents-api': true
+```
+
+Then re-run the `add`. Create a dedicated base-backed profile first; do not add this to the shipped `web` profile (that profile already owns `id: webserver`).
 
 The CLI initializes the profile when needed. The patch inserts `dsh-host-webserver` on `0.0.0.0:3080` (`id: webserver`) and this plugin at prefix `/v1` (`id: agents-api`, empty `apiKey`). A later profile patch may replace either row's complete config.
 
@@ -49,7 +58,7 @@ Choose it for OpenAI Agents API clients that need REST plus SSE against a local 
   config:
     host: '127.0.0.1'
     port: 3080
-- name: '@deepseek-ai/dsh-experimental-agents-api'
+- name: '@fakhrulfaiz/dsh-agents-api'
   config:
     apiKey: ''
     prefix: '/v1'
@@ -60,7 +69,7 @@ Choose it for OpenAI Agents API clients that need REST plus SSE against a local 
 | `apiKey` | `''` | Bearer token required in `Authorization`; empty string disables auth |
 | `prefix` | `/v1` | URL prefix for every Agents API route |
 
-The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-experimental-agents-api) is the exhaustive source for every accepted field and its JSDoc.
+The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-agents-api) is the exhaustive source for every accepted field and its JSDoc.
 
 Requests should send `OpenAI-Beta: agents=v1`. Official routes under the configured prefix:
 
