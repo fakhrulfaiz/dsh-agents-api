@@ -5,6 +5,8 @@ kind: "package-bundle"
 
 # @fakhrulfaiz/dsh-agents-api
 
+English | [中文](README.zh.md)
+
 ## Summary
 
 Serve the [OpenAI Agents API](https://developers.openai.com/api/docs/guides/agents-api) from a DeepSeek Harness Host so an OpenAI SDK or cURL client can create saved agents, open `sess_*` sessions, stream turn events, and send follow-up or cancel input. Choose it when the client already speaks `OpenAI-Beta: agents=v1`. The package is experimental and installable: it is not part of the shipped `web`, `headless`, `acp`, or `sdk` profiles. The Host profile still owns tools, sandboxing, and the model route; this plugin maps HTTP onto `ctx.agents.create`, `followup`, `steer`, and `cancel`.
