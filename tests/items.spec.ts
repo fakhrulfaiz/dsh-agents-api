@@ -37,7 +37,7 @@ describe('itemsFromEvent', () => {
       callId: 'c2',
       arguments: '{"q":1}',
     }), 'turn_1')
-    expect(fn).toMatchObject([{ type: 'function_call', name: 'lookup', call_id: 'c2', arguments: { q: 1 } }])
+    expect(fn).toMatchObject([{ type: 'function_call', name: 'lookup', call_id: 'c2', arguments: { q: 1 }, status: 'in_progress' }])
 
     const result = itemsFromEvent(event('tool/result', {
       message: {
@@ -45,7 +45,15 @@ describe('itemsFromEvent', () => {
         content: [{ type: 'tool-result', toolCallId: 'c2', content: [{ type: 'text', text: 'done' }] }],
       },
     }), 'turn_1')
-    expect(result).toMatchObject([{ type: 'function_call_output', call_id: 'c2', output: 'done' }])
+    expect(result).toMatchObject([{ type: 'function_call_output', call_id: 'c2', output: 'done', status: 'completed' }])
+
+    const failed = itemsFromEvent(event('tool/result', {
+      message: {
+        source: { kind: 'tool', callId: 'c3' },
+        content: [{ type: 'tool-result', toolCallId: 'c3', isError: true, content: [{ type: 'text', text: 'boom' }] }],
+      },
+    }), 'turn_1')
+    expect(failed).toMatchObject([{ type: 'function_call_output', call_id: 'c3', status: 'failed', error: 'boom' }])
   })
 
   it('falls back when call identities are missing and ignores other events', () => {

@@ -364,7 +364,7 @@ export interface OAICancelInputEvent {
   type: 'agent.session.input.cancel'
 }
 
-/** Return a custom function result. */
+/** Return a custom function result (legacy Agents API input name). */
 export interface OAIFunctionCallOutputInputEvent {
   type: 'agent.session.input.function_call_output'
   turn_id?: string
@@ -372,11 +372,33 @@ export interface OAIFunctionCallOutputInputEvent {
   output: unknown
 }
 
+/**
+ * Return a custom function result (current Agents API input name).
+ *
+ * Official docs: https://developers.openai.com/api/docs/guides/agents-api/tools/functions
+ */
+export type OAIToolResultInputEvent =
+  | {
+    type: 'agent.session.input.tool_result'
+    turn_id: string
+    call_id: string
+    success: true
+    output: unknown
+  }
+  | {
+    type: 'agent.session.input.tool_result'
+    turn_id: string
+    call_id: string
+    success: false
+    error: string
+  }
+
 /** Input event accepted by `POST /v1/agents/sessions/{session_id}/events`. */
 export type OAIInputEvent =
   | OAISendMessageInputEvent
   | OAICancelInputEvent
   | OAIFunctionCallOutputInputEvent
+  | OAIToolResultInputEvent
 
 /** Body for `POST /v1/agents/sessions/{session_id}/events`. */
 export interface PostSessionEventsBody {

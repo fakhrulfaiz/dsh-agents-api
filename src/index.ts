@@ -34,6 +34,9 @@ export * from './http.ts'
 export * from './input.ts'
 export * from './bridge.ts'
 export * from './gateway.ts'
+export * from './errors.ts'
+export * from './pending-function-calls.ts'
+export * from './mount-function-tools.ts'
 
 /** Cordis plugin name. */
 export const name = 'agents-api'

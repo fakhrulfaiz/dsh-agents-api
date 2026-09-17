@@ -119,6 +119,8 @@ Each session calls `ctx.agents.create` with a `sess_*` id (the ACP create path),
 | [`src/agent-store.ts`](src/agent-store.ts) | Saved-agent CRUD |
 | [`src/items.ts`](src/items.ts) | One Session event to saved items |
 | [`src/bridge.ts`](src/bridge.ts) | Session events to Agents API output events |
+| [`src/pending-function-calls.ts`](src/pending-function-calls.ts) | Parked client function-tool waiters and `requires_action` |
+| [`src/mount-function-tools.ts`](src/mount-function-tools.ts) | Wire `type: "function"` → scoped Host tool registration |
 | [`cordis.patch.yml`](cordis.patch.yml) | Insert list for webserver and this plugin |
 
 </details>
@@ -142,11 +144,15 @@ Each session calls `ctx.agents.create` with a `sess_*` id (the ACP create path),
 
 #### What the model sees
 
-Each non-empty `input` string or `input_text` part from `POST /agents/sessions` and from `agent.session.input.message` becomes one Host user message (`source.kind: user`). An `agent.session.input.function_call_output` event is also submitted as a user follow-up that names the `call_id` and serializes the output.
+Each non-empty `input` string or `input_text` part from `POST /agents/sessions` and from `agent.session.input.message` becomes one Host user message (`source.kind: user`).
+
+Wire `type: "function"` tools on `agent.tools` are mounted as scoped Host tools. When the model calls one, the Host parks `execute`, the session status becomes `requires_action`, and `required_actions` lists the pending call. Post `agent.session.input.tool_result` (or the legacy alias `agent.session.input.function_call_output`) with the matching `call_id` to complete the Host tool and continue the turn. That path appends a real Host `tool/result`; it does not submit a user follow-up.
+
+Profile tools from the Host composition stay available and stack with wire functions. A same-name scoped wire tool shadows the profile global for that session.
 
 #### Token effect
 
-Those user messages remain in the Session until ordinary compaction replaces or removes that history.
+Those user messages and tool results remain in the Session until ordinary compaction replaces or removes that history.
 
 #### KV Cache effect
 
@@ -159,11 +165,10 @@ Follow-up and steering append to the existing Session. They do not replace the r
 - **Experimental opt-in layer** — shipped `web` / `headless` / `acp` / `sdk` profiles do not include this package; add it to a dedicated base-backed profile.
 - **Do not stack onto the shipped web profile** — that profile already inserts `id: webserver`; this patch inserts the same id.
 - **`openai_hosted` does not provision an OpenAI sandbox** — the Host uses `process.cwd()` unless `environment.type` is `self_hosted` with an absolute `workspace_directory`.
-- **Function results are follow-up text** — `agent.session.input.function_call_output` does not append a Host `tool/result` event.
+- **Only `type: "function"` tools are mounted** — MCP, `web_search`, `programmatic_tool_calling`, `tool_search`, and `defer_loading` are rejected at create time; use the Host profile for those capabilities.
 - **Session setting updates stay on the Agents API resource** — `POST /agents/sessions/{id}` records `model`, `reasoning.effort`, and `service_tier` for later reads; it does not retarget the live Host agent.
 - **Saved agents are process-local** — `GET /agents` lists agents created in this process; they are not durable across restart.
 - **SSE does not replay** — after disconnect, retrieve the session and `GET .../items`; the event stream only emits from subscribe time.
-- **Agent `tools` are stored, not mounted** — MCP, web search, and function tool objects on the agent resource do not add Host tools; the profile composition owns those.
 
 <a id="dev-note"></a>
 ### Dev Note

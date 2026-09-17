@@ -12,10 +12,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type {} from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { AgentStore, materializeAgent } from './agent-store.ts'
 import { mintEventId } from './bridge.ts'
+import { AgentsApiRequestError } from './errors.ts'
 import {
   badRequest,
   errorMessage,
@@ -28,6 +30,8 @@ import {
   routeParam,
 } from './http.ts'
 import { overlayAgent, userTextFromInput } from './input.ts'
+import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
+import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { SessionRegistry } from './session-registry.ts'
 import { writeEvent, writeSSEHeaders } from './sse.ts'
 import type {
@@ -35,7 +39,9 @@ import type {
   CreateSessionParams,
   OAIAgent,
   OAIEnvironmentConfig,
+  OAIFunctionTool,
   OAIInputEvent,
+  OAIToolResultInputEvent,
   PostSessionEventsBody,
   UpdateAgentParams,
   UpdateSessionParams,
@@ -55,6 +61,7 @@ interface Route {
 /** Request dispatcher registered on `ctx.webServer`. */
 export class AgentsGateway {
   private readonly handles = new Map<string, AgentHandle>()
+  private readonly pendingBySession = new Map<string, PendingFunctionCalls>()
   private readonly routes: Route[]
 
   /**
@@ -141,6 +148,11 @@ export class AgentsGateway {
       badRequest(res, 'Field "model" is required')
       return
     }
+    const toolError = validateMountableTools(body.tools ?? [])
+    if (toolError) {
+      badRequest(res, toolError)
+      return
+    }
     json(res, 200, this.agentStore.create(body))
   }
 
@@ -163,6 +175,13 @@ export class AgentsGateway {
   private async updateAgent(req: IncomingMessage, res: ServerResponse, params: Record<string, string>): Promise<void> {
     const agentId = routeParam(params, 'agent_id')
     const body = await readBody(req) as unknown as UpdateAgentParams
+    if (body.tools !== undefined && body.tools !== null) {
+      const toolError = validateMountableTools(body.tools)
+      if (toolError) {
+        badRequest(res, toolError)
+        return
+      }
+    }
     const updated = this.agentStore.update(agentId, body)
     if (!updated) {
       notFound(res, `Agent "${agentId}" not found`)
@@ -188,7 +207,18 @@ export class AgentsGateway {
     const cwd = this.resolveCwd(body.environment, res)
     if (cwd === undefined) return
 
+    const toolError = validateMountableTools(resolved.tools)
+    if (toolError) {
+      badRequest(res, toolError)
+      return
+    }
+
     const sessionId = SessionId(`sess_${randomUUID().replaceAll('-', '')}`)
+    const pending = new PendingFunctionCalls(sessionId, this.sessionRegistry)
+    const functionTools = resolved.tools.filter(
+      (tool): tool is OAIFunctionTool => tool.type === 'function',
+    )
+
     try {
       const defaults = this.ctx.agentDefaultModel.currentSelection()
       const handle = await this.ctx.agents.create({
@@ -201,9 +231,19 @@ export class AgentsGateway {
             ? {}
             : { reasoningEffort: defaults.reasoningEffort }),
         },
+        setup: (agentCtx) => {
+          mountFunctionTools(
+            agentCtx,
+            functionTools,
+            pending,
+            () => this.sessionRegistry.getCurrentTurn(sessionId)?.id ?? 'turn_default',
+          )
+        },
       })
       this.handles.set(sessionId, handle)
+      this.pendingBySession.set(sessionId, pending)
     } catch (error: unknown) {
+      pending.rejectAll(new Error('session create failed'))
       json(res, 500, {
         error: {
           type: 'server_error',
@@ -308,6 +348,8 @@ export class AgentsGateway {
       notFound(res, `Session "${sessionId}" not found`)
       return
     }
+    this.pendingBySession.get(sessionId)?.rejectAll(new Error(`Session "${sessionId}" was deleted`))
+    this.pendingBySession.delete(sessionId)
     this.sessionRegistry.delete(sessionId)
     const handle = this.handles.get(sessionId)
     this.handles.delete(sessionId)
@@ -334,6 +376,16 @@ export class AgentsGateway {
         await this.applyInputEvent(sessionId, evt)
       }
     } catch (error: unknown) {
+      if (error instanceof AgentsApiRequestError) {
+        json(res, error.status, {
+          error: {
+            type: 'invalid_request_error',
+            message: error.message,
+            code: error.code,
+          },
+        })
+        return
+      }
       json(res, 500, {
         error: {
           type: 'server_error',
@@ -361,7 +413,11 @@ export class AgentsGateway {
       unsubscribe()
     })
     const session = this.sessionRegistry.project(state)
-    const type = state.status === 'in_progress' ? 'agent.session.in_progress' : 'agent.session.idle'
+    const type = state.status === 'requires_action'
+      ? 'agent.session.requires_action'
+      : state.status === 'in_progress'
+        ? 'agent.session.in_progress'
+        : 'agent.session.idle'
     writeEvent(res, type, { type, event_id: mintEventId(), session })
     return Promise.resolve()
   }
@@ -437,6 +493,7 @@ export class AgentsGateway {
         return
       }
       case 'agent.session.input.cancel': {
+        this.pendingBySession.get(sessionId)?.rejectAll(new Error('turn cancelled'))
         const agent = this.ctx.agents.get(SessionId(sessionId))
         agent?.cancel({ kind: 'user' }, { keepInbox: true })
         const turn = this.sessionRegistry.getCurrentTurn(sessionId)
@@ -452,16 +509,57 @@ export class AgentsGateway {
         }
         return
       }
+      case 'agent.session.input.tool_result': {
+        this.applyToolResult(sessionId, evt)
+        return
+      }
       case 'agent.session.input.function_call_output': {
         const output = typeof evt.output === 'string' ? evt.output : JSON.stringify(evt.output)
-        await this.triggerTurn(
-          SessionId(sessionId),
-          `Function output for ${evt.call_id}: ${output}`,
-        )
+        this.applyToolResult(sessionId, {
+          type: 'agent.session.input.tool_result',
+          turn_id: evt.turn_id ?? this.sessionRegistry.getCurrentTurn(sessionId)?.id ?? '',
+          call_id: evt.call_id,
+          success: true,
+          output,
+        })
         return
       }
       default:
         return
+    }
+  }
+
+  private applyToolResult(sessionId: string, evt: OAIToolResultInputEvent): void {
+    const pending = this.pendingBySession.get(sessionId)
+    if (!pending?.has(evt.call_id)) {
+      throw new AgentsApiRequestError(
+        `No pending function call with call_id "${evt.call_id}"`,
+        400,
+        'unknown_call_id',
+      )
+    }
+    if (evt.turn_id) {
+      const current = this.sessionRegistry.getCurrentTurn(sessionId)
+      if (current && current.id !== evt.turn_id) {
+        throw new AgentsApiRequestError(
+          `turn_id "${evt.turn_id}" does not match the open turn "${current.id}"`,
+          400,
+          'turn_mismatch',
+        )
+      }
+    }
+    const outcome = evt.success
+      ? {
+        success: true as const,
+        output: typeof evt.output === 'string' ? evt.output : JSON.stringify(evt.output),
+      }
+      : { success: false as const, error: evt.error }
+    if (!pending.complete(evt.call_id, outcome)) {
+      throw new AgentsApiRequestError(
+        `No pending function call with call_id "${evt.call_id}"`,
+        400,
+        'unknown_call_id',
+      )
     }
   }
 
@@ -475,8 +573,11 @@ export class AgentsGateway {
           source: { kind: 'user' },
         })
         const state = this.sessionRegistry.get(sessionId)
-        if (state?.status === 'in_progress') agent.steer(message)
-        else agent.followup(message)
+        if (state?.status === 'in_progress' || state?.status === 'requires_action') {
+          agent.steer(message)
+        } else {
+          agent.followup(message)
+        }
         resolve()
       } catch (error) {
         reject(error instanceof Error ? error : new Error(errorMessage(error)))

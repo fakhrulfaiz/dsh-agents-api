@@ -348,6 +348,30 @@ export class SessionRegistry {
     }
   }
 
+  /**
+   * Replace `required_actions` and derive session status for parked function calls.
+   *
+   * When actions are non-empty the session is `requires_action`. When they clear
+   * while a turn is still open the session returns to `in_progress`; otherwise
+   * idle/failed are left unchanged.
+   *
+   * @param sessionId - session id.
+   * @param actions - pending function (or other) required actions.
+   * @returns the projected session, or `undefined` when missing.
+   */
+  syncRequiredActions(sessionId: string, actions: readonly OAIRequiredAction[]): OAIAgentSession | undefined {
+    const s = this.sessions.get(sessionId)
+    if (!s) return undefined
+    s.required_actions = [...actions]
+    s.last_active_at = Math.floor(Date.now() / 1000)
+    if (actions.length > 0) {
+      s.status = 'requires_action'
+    } else if (s.currentTurnId !== undefined && s.status === 'requires_action') {
+      s.status = 'in_progress'
+    }
+    return this.project(s)
+  }
+
   private finishTurn(
     sessionId: string,
     turnId: string,

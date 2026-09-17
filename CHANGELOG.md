@@ -1,0 +1,12 @@
+# Changelog
+
+All notable changes to `@fakhrulfaiz/dsh-agents-api` are recorded here.
+Detailed write-ups live under [`changes/`](changes/).
+
+## 2026-09-18 — Mount wire function tools
+
+- Mount `agent.tools` entries of `type: "function"` as scoped Host tools.
+- Park Host `execute` until the client posts `agent.session.input.tool_result` (legacy `function_call_output` accepted).
+- Emit `agent.session.requires_action` and populate `required_actions`.
+- Reject MCP / web_search / deferred function tools at create time.
+- See [changes/2026-09-18-mount-function-tools.md](changes/2026-09-18-mount-function-tools.md).
