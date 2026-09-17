@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to `@fakhrulfaiz/dsh-agents-api` are recorded here.
-Detailed write-ups live under [`changes/`](changes/).
+Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
 ## 2026-09-18 — Mount wire function tools
 
