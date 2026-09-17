@@ -1,0 +1,14 @@
+---
+description: Always update CHANGELOG.md and docs/changes for shipped work
+alwaysApply: true
+---
+
+# Changelog required
+
+When changing this package, always update:
+
+- `CHANGELOG.md` (dated section + bullets)
+- `docs/changes/YYYY-MM-DD-<slug>.md` for non-trivial changes
+- `docs/README.md` index row for each new change note
+
+Do not leave changelog updates for a follow-up commit.
