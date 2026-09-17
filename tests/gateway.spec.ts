@@ -31,12 +31,22 @@ interface FakeAgent {
 function fakeContext(options?: { failCreate?: boolean; failFollowup?: boolean; failDispose?: boolean }): {
   ctx: Context
   agents: Map<string, FakeAgent>
+  registeredTools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }>
 } {
   const agents = new Map<string, FakeAgent>()
   const sessions = new Map<string, { id: string }>()
+  const registeredTools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }> = []
   const ctx = {
     agents: {
-      create: async ({ sessionId }: { sessionId: string }) => {
+      create: async ({
+        sessionId,
+        setup,
+      }: {
+        sessionId: string
+        setup?: (agentCtx: {
+          tools: { register: (definition: { name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }) => () => void }
+        }) => void | Promise<void>
+      }) => {
         if (options?.failCreate) throw new Error('factory failed')
         const agent: FakeAgent = {
           id: sessionId,
@@ -48,6 +58,16 @@ function fakeContext(options?: { failCreate?: boolean; failFollowup?: boolean; f
         }
         agents.set(sessionId, agent)
         sessions.set(sessionId, { id: sessionId })
+        if (setup) {
+          await setup({
+            tools: {
+              register: (definition) => {
+                registeredTools.push(definition)
+                return () => undefined
+              },
+            },
+          })
+        }
         return {
           agent,
           dispose: vi.fn(async () => {
@@ -64,7 +84,7 @@ function fakeContext(options?: { failCreate?: boolean; failFollowup?: boolean; f
       currentSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }),
     },
   } as unknown as Context
-  return { ctx, agents }
+  return { ctx, agents, registeredTools }
 }
 
 async function listen(handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>): Promise<string> {
@@ -83,8 +103,9 @@ function gateway(apiKey = '', options?: { failCreate?: boolean; failFollowup?: b
   store: AgentStore
   registry: SessionRegistry
   agents: Map<string, FakeAgent>
+  registeredTools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }>
 } {
-  const { ctx, agents } = fakeContext(options)
+  const { ctx, agents, registeredTools } = fakeContext(options)
   const store = new AgentStore()
   const registry = new SessionRegistry()
   const api = new AgentsGateway(ctx, apiKey, '/v1', store, registry)
@@ -93,6 +114,7 @@ function gateway(apiKey = '', options?: { failCreate?: boolean; failFollowup?: b
     store,
     registry,
     agents,
+    registeredTools,
   }
 }
 
@@ -244,7 +266,7 @@ describe('AgentsGateway', () => {
       body: JSON.stringify({
         events: [{ type: 'agent.session.input.function_call_output', call_id: 'c1', output: { ok: true } }],
       }),
-    })).status).toBe(200)
+    })).status).toBe(400)
 
     expect((await fetch(`${root}/v1/agents/sessions/${sessionId}/events`, {
       method: 'POST',
@@ -345,12 +367,11 @@ describe('AgentsGateway', () => {
         events: [
           { type: 'agent.session.input.message', input: [{ role: 'user', content: [] }] },
           { type: 'agent.session.input.not_a_real_event' },
-          { type: 'agent.session.input.function_call_output', call_id: 'c1', output: 'plain' },
           { type: 'agent.session.input.cancel' },
         ],
       }),
     })).status).toBe(200)
-    expect(agents.get(idle.id)?.followup).toHaveBeenCalled()
+    expect(agents.get(idle.id)?.followup).not.toHaveBeenCalled()
     expect(agents.get(idle.id)?.cancel).toHaveBeenCalledOnce()
     expect((await fetch(`${root}/v1/agents/sessions/${idle.id}`, {
       method: 'POST',
@@ -552,5 +573,102 @@ describe('AgentsGateway', () => {
       method: 'POST',
       body: '{}',
     })).status).toBe(200)
+  })
+
+  it('mounts wire function tools and completes them via tool_result', async () => {
+    const { base, registry, registeredTools } = gateway()
+    const root = await base
+    expect((await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agent: {
+          model: 'deepseek-chat',
+          tools: [{ type: 'web_search' }],
+        },
+      }),
+    })).status).toBe(400)
+
+    const created = await (await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agent: {
+          model: 'deepseek-chat',
+          tools: [{
+            type: 'function',
+            name: 'get_weather',
+            description: 'Weather lookup',
+            parameters: {
+              type: 'object',
+              properties: { city: { type: 'string' } },
+              required: ['city'],
+            },
+          }],
+        },
+      }),
+    })).json() as { id: string }
+    expect(registeredTools.map(tool => tool.name)).toEqual(['get_weather'])
+
+    const turn = registry.createTurn(created.id)!
+    const events: unknown[] = []
+    registry.subscribe(created.id, (evt) => {
+      events.push(evt)
+    })
+
+    const controller = new AbortController()
+    const wait = registeredTools[0]!.execute(
+      { city: 'SF' },
+      { callId: 'call_weather', signal: controller.signal },
+    )
+    await Promise.resolve()
+    expect(registry.get(created.id)?.status).toBe('requires_action')
+    expect(registry.get(created.id)?.required_actions).toMatchObject([{
+      type: 'function_call',
+      call_id: 'call_weather',
+      name: 'get_weather',
+    }])
+    expect(events.some(evt => (evt as { type: string }).type === 'agent.session.requires_action')).toBe(true)
+
+    expect((await fetch(`${root}/v1/agents/sessions/${created.id}/events`, {
+      method: 'POST',
+      body: JSON.stringify({
+        events: [{
+          type: 'agent.session.input.tool_result',
+          turn_id: turn.id,
+          call_id: 'call_weather',
+          success: true,
+          output: JSON.stringify({ temp: 68 }),
+        }],
+      }),
+    })).status).toBe(200)
+    await expect(wait).resolves.toBe('{"temp":68}')
+    expect(registry.get(created.id)?.status).toBe('in_progress')
+    expect(registry.get(created.id)?.required_actions).toEqual([])
+  })
+
+  it('accepts legacy function_call_output as a tool_result alias', async () => {
+    const { base, registry, registeredTools } = gateway()
+    const root = await base
+    const created = await (await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agent: {
+          model: 'deepseek-chat',
+          tools: [{ type: 'function', name: 'ping' }],
+        },
+      }),
+    })).json() as { id: string }
+    registry.createTurn(created.id)
+    const wait = registeredTools[0]!.execute({}, {
+      callId: 'call_ping',
+      signal: new AbortController().signal,
+    })
+    await Promise.resolve()
+    expect((await fetch(`${root}/v1/agents/sessions/${created.id}/events`, {
+      method: 'POST',
+      body: JSON.stringify({
+        events: [{ type: 'agent.session.input.function_call_output', call_id: 'call_ping', output: 'pong' }],
+      }),
+    })).status).toBe(200)
+    await expect(wait).resolves.toBe('pong')
   })
 })

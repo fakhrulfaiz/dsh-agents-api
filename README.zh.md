@@ -121,6 +121,8 @@ pnpm dsh plugin --profile agents add /absolute/path/to/dsh-agents-api
 | [`src/agent-store.ts`](src/agent-store.ts) | 已保存 agent 的 CRUD |
 | [`src/items.ts`](src/items.ts) | 一条 Session 事件到已保存条目 |
 | [`src/bridge.ts`](src/bridge.ts) | Session 事件到 Agents API 输出事件 |
+| [`src/pending-function-calls.ts`](src/pending-function-calls.ts) | 停住的客户端函数工具等待与 `requires_action` |
+| [`src/mount-function-tools.ts`](src/mount-function-tools.ts) | 线缆 `type: "function"` → 作用域 Host 工具注册 |
 | [`cordis.patch.yml`](cordis.patch.yml) | 插入 webserver 与本插件的列表 |
 
 </details>
@@ -144,11 +146,15 @@ pnpm dsh plugin --profile agents add /absolute/path/to/dsh-agents-api
 
 #### 模型看到什么
 
-`POST /agents/sessions` 以及 `agent.session.input.message` 中每个非空 `input` 字符串或 `input_text` 部分会成为一条 Host 用户消息（`source.kind: user`）。`agent.session.input.function_call_output` 事件也会作为用户跟进提交，其中包含 `call_id` 名称并序列化输出。
+`POST /agents/sessions` 以及 `agent.session.input.message` 中每个非空 `input` 字符串或 `input_text` 部分会成为一条 Host 用户消息（`source.kind: user`）。
+
+`agent.tools` 上的线缆 `type: "function"` 工具会挂载为作用域 Host 工具。模型调用时，Host 会停住 `execute`，会话状态变为 `requires_action`，`required_actions` 列出待处理调用。用匹配的 `call_id` 提交 `agent.session.input.tool_result`（或旧别名 `agent.session.input.function_call_output`）以完成 Host 工具并继续该 turn。该路径追加真实的 Host `tool/result`，不会提交用户跟进。
+
+Host profile 组合中的工具仍然可用，并与线缆函数工具叠加。同名时，作用域线缆工具会遮蔽该会话的 profile 全局工具。
 
 #### Token 影响
 
-这些用户消息会留在 Session 中，直到普通 compaction 替换或移除该历史。
+这些用户消息与工具结果会留在 Session 中，直到普通 compaction 替换或移除该历史。
 
 #### KV Cache 影响
 
@@ -161,11 +167,10 @@ pnpm dsh plugin --profile agents add /absolute/path/to/dsh-agents-api
 - **实验性 opt-in 层** — 随附的 `web` / `headless` / `acp` / `sdk` profile 不包含本包；把它加到专用的、基于 base 的 profile。
 - **不要叠到随附的 web profile 上** — 该 profile 已经插入 `id: webserver`；本 patch 插入同一个 id。
 - **`openai_hosted` 不会开通 OpenAI 沙箱** — 除非 `environment.type` 为 `self_hosted` 且 `workspace_directory` 为绝对路径，Host 使用 `process.cwd()`。
-- **函数结果是跟进文本** — `agent.session.input.function_call_output` 不会追加 Host `tool/result` 事件。
+- **只挂载 `type: "function"` 工具** — MCP、`web_search`、`programmatic_tool_calling`、`tool_search` 与 `defer_loading` 在创建时被拒绝；这些能力请用 Host profile。
 - **会话设置更新留在 Agents API 资源上** — `POST /agents/sessions/{id}` 记录 `model`、`reasoning.effort` 和 `service_tier` 供后续读取；它不会改道实时 Host agent。
 - **已保存 agent 是进程本地的** — `GET /agents` 列出本进程创建的 agent；它们在重启后不持久。
 - **SSE 不回放** — 断开后请读取会话并 `GET .../items`；事件流只从订阅时刻开始发出。
-- **Agent `tools` 只存储、不挂载** — agent 资源上的 MCP、web search 与 function 工具对象不会添加 Host 工具；由 profile 组合拥有那些工具。
 
 <a id="dev-note"></a>
 ### 开发备注

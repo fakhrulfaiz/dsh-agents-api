@@ -102,7 +102,7 @@ export function itemsFromEvent(event: SessionEvent, turnId: string): OAISessionI
       name,
       call_id: callId,
       arguments: args,
-      status: 'completed',
+      status: 'in_progress',
       turn_id: turnId,
     }
     return [fnItem]
@@ -115,29 +115,31 @@ export function itemsFromEvent(event: SessionEvent, turnId: string): OAISessionI
         source?: { kind?: string; callId?: string }
         content?: unknown
       }
+      error?: unknown
     }
     const message = data.message
+    const firstBlock = Array.isArray(message?.content)
+      ? message.content[0] as { toolCallId?: string; content?: unknown; isError?: boolean } | undefined
+      : undefined
     const callId = String(
       message?.source?.kind === 'tool'
         ? message.source.callId
         : message?.callId
-          ?? (Array.isArray(message?.content)
-            ? (message.content[0] as { toolCallId?: string } | undefined)?.toolCallId
-            : undefined)
+          ?? firstBlock?.toolCallId
           ?? `call_${String(event.seq)}`,
     )
     const output = textFromContent(
-      Array.isArray(message?.content)
-        ? (message.content[0] as { content?: unknown } | undefined)?.content ?? message.content
-        : message?.content,
+      firstBlock?.content ?? message?.content,
     )
+    const isError = firstBlock?.isError === true || data.error !== undefined
     const fnOutItem: OAIFunctionCallOutputItem = {
       id: `item_fn_out_${String(event.seq)}`,
       type: 'function_call_output',
       call_id: callId,
       output,
-      status: 'completed',
+      status: isError ? 'failed' : 'completed',
       turn_id: turnId,
+      ...(isError ? { error: output || 'tool failed' } : {}),
     }
     return [fnOutItem]
   }
