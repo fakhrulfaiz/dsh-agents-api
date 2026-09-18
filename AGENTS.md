@@ -1,4 +1,4 @@
-# Agent rules — @fakhrulfaiz/dsh-agents-api
+# Agent rules — @deepseek-ai/dsh-experimental-agents-api
 
 ## Changelog is mandatory
 
