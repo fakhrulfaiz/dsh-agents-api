@@ -114,6 +114,25 @@ export interface OAITextConfig {
   verbosity?: 'low' | 'medium' | 'high'
 }
 
+/**
+ * DSH extension: per-session Host tool mask mapped to `agentCtx.tools.restrict()`.
+ * Omitted or `null` leaves every Host profile tool visible.
+ */
+export interface OAIHostToolsConfig {
+  /** Keep only these Host tool names (intersect with `deny` when both are set). */
+  allow?: string[] | null
+  /** Hide these Host tool names from the model and execution. */
+  deny?: string[] | null
+}
+
+/** One Host tool schema from `GET /agents/tools`. */
+export interface OAIHostToolCatalogEntry {
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+  source: 'host'
+}
+
 /** Saved or session-local agent configuration. */
 export interface OAIAgent {
   id: string
@@ -125,6 +144,8 @@ export interface OAIAgent {
   model: string
   metadata: Record<string, string>
   tools: OAIToolConfig[]
+  /** DSH extension: Host profile tool allow/deny mask. */
+  host_tools?: OAIHostToolsConfig | null
   multi_agent?: OAIMultiAgentConfig | null
   reasoning?: OAIReasoningConfig | null
   service_tier?: ServiceTier | null
@@ -138,6 +159,7 @@ export interface CreateAgentParams {
   instructions?: string | null
   metadata?: Record<string, string> | null
   tools?: OAIToolConfig[] | null
+  host_tools?: OAIHostToolsConfig | null
   multi_agent?: OAIMultiAgentConfig | null
   reasoning?: OAIReasoningConfig | null
   service_tier?: ServiceTier | null
@@ -151,6 +173,7 @@ export interface UpdateAgentParams {
   instructions?: string | null
   metadata?: Record<string, string> | null
   tools?: OAIToolConfig[] | null
+  host_tools?: OAIHostToolsConfig | null
   multi_agent?: OAIMultiAgentConfig | null
   reasoning?: OAIReasoningConfig | null
   service_tier?: ServiceTier | null

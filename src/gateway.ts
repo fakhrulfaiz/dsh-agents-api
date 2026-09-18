@@ -1,9 +1,9 @@
 /**
  * HTTP dispatcher for the OpenAI Agents API.
  *
- * Route order is load-bearing: `/agents/sessions` is matched before
- * `/agents/:agent_id` so the literal `sessions` segment is never captured as
- * an agent id.
+ * Route order is load-bearing: `/agents/sessions` and `/agents/tools` are
+ * matched before `/agents/:agent_id` so those literal segments are never
+ * captured as an agent id.
  */
 
 import { isAbsolute } from 'node:path'
@@ -30,6 +30,7 @@ import {
   routeParam,
 } from './http.ts'
 import { overlayAgent, userTextFromInput } from './input.ts'
+import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { SessionRegistry } from './session-registry.ts'
@@ -81,6 +82,7 @@ export class AgentsGateway {
     this.routes = [
       { method: 'POST', pattern: '/agents', handler: (req, res) => this.createAgent(req, res) },
       { method: 'GET', pattern: '/agents', handler: (_req, res, url) => this.listAgents(res, url) },
+      { method: 'GET', pattern: '/agents/tools', handler: (_req, res) => this.listHostTools(res) },
       { method: 'POST', pattern: '/agents/sessions', handler: (req, res, url) => this.createSession(req, res, url) },
       { method: 'GET', pattern: '/agents/sessions', handler: (_req, res, url) => this.listSessions(res, url) },
       { method: 'POST', pattern: '/agents/sessions/:session_id/events', handler: (req, res, _url, params) => this.postEvents(req, res, params) },
@@ -153,11 +155,27 @@ export class AgentsGateway {
       badRequest(res, toolError)
       return
     }
+    const hostToolsError = validateHostTools(body.host_tools)
+    if (hostToolsError) {
+      badRequest(res, hostToolsError)
+      return
+    }
     json(res, 200, this.agentStore.create(body))
   }
 
   private listAgents(res: ServerResponse, url: URL): Promise<void> {
     json(res, 200, this.agentStore.list(listQuery(url)))
+    return Promise.resolve()
+  }
+
+  private listHostTools(res: ServerResponse): Promise<void> {
+    const data = this.ctx.tools.schemas().map(schema => ({
+      name: schema.name,
+      description: schema.description,
+      parameters: schema.parameters,
+      source: 'host' as const,
+    }))
+    json(res, 200, { object: 'list', data })
     return Promise.resolve()
   }
 
@@ -179,6 +197,13 @@ export class AgentsGateway {
       const toolError = validateMountableTools(body.tools)
       if (toolError) {
         badRequest(res, toolError)
+        return
+      }
+    }
+    if (body.host_tools !== undefined) {
+      const hostToolsError = validateHostTools(body.host_tools)
+      if (hostToolsError) {
+        badRequest(res, hostToolsError)
         return
       }
     }
@@ -212,6 +237,11 @@ export class AgentsGateway {
       badRequest(res, toolError)
       return
     }
+    const hostToolsError = validateHostTools(resolved.host_tools)
+    if (hostToolsError) {
+      badRequest(res, hostToolsError)
+      return
+    }
 
     const sessionId = SessionId(`sess_${randomUUID().replaceAll('-', '')}`)
     const pending = new PendingFunctionCalls(sessionId, this.sessionRegistry)
@@ -232,6 +262,7 @@ export class AgentsGateway {
             : { reasoningEffort: defaults.reasoningEffort }),
         },
         setup: (agentCtx) => {
+          applyHostToolsRestrict(agentCtx, resolved.host_tools)
           mountFunctionTools(
             agentCtx,
             functionTools,

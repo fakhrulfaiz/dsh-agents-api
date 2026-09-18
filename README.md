@@ -138,7 +138,7 @@ Follow-up and steering append to the existing Session. They do not replace the r
 
 #### What the model sees
 
-Wire `type: "function"` tools on `agent.tools` mount as scoped Host tools; a model call parks Host `execute`, sets session status to `requires_action`, and lists the pending call in `required_actions` until the client posts `agent.session.input.tool_result` (or legacy `agent.session.input.function_call_output`) with the matching `call_id`, which appends a real Host `tool/result` rather than a user follow-up. Profile tools remain available and stack with wire functions; a same-name scoped wire tool shadows the profile global for that session.
+Wire `type: "function"` tools on `agent.tools` mount as scoped Host tools; a model call parks Host `execute`, sets session status to `requires_action`, and lists the pending call in `required_actions` until the client posts `agent.session.input.tool_result` (or legacy `agent.session.input.function_call_output`) with the matching `call_id`, which appends a real Host `tool/result` rather than a user follow-up. Profile tools remain available and stack with wire functions; a same-name scoped wire tool shadows the profile global for that session. `GET /agents/tools` lists Host schemas; `host_tools.allow` / `host_tools.deny` mask them for the session via `tools.restrict()`.
 
 #### Token effect
 
@@ -156,6 +156,9 @@ Completing a parked function call appends to the existing Session prefix; it doe
 - **Do not stack onto the shipped web profile** — that profile already inserts `id: webserver`; this patch inserts the same id.
 - `openai_hosted` **does not provision an OpenAI sandbox** — the Host uses `process.cwd()` unless `environment.type` is `self_hosted` with an absolute `workspace_directory`.
 - **Only** `type: "function"` **tools are mounted** — MCP, `web_search`, `programmatic_tool_calling`, `tool_search`, and `defer_loading` are rejected at create time; use the Host profile for those capabilities.
+- **Wire function turns need a client tool result** — after `requires_action`, post `agent.session.input.tool_result` (or legacy `function_call_output`); the gateway does not invent outputs.
+- **Host tool catalog and masks** — `GET /agents/tools` lists profile tools; `host_tools.allow` / `host_tools.deny` filter them per session via Host `tools.restrict()` ([HTTP API](docs/http-api.md#host-tool-catalog-and-masks)).
+- **Host scheduler Symbol identity** — if a function-call item appears and the session fails with `Cannot read properties of undefined (reading 'prepare')`, the Host `@deepseek-ai/dsh-tools` scheduler key must be `Symbol.for` so source and built copies match; see [HTTP API](docs/http-api.md#host-scheduler-key-prepare-failures) and [change note](docs/changes/2026-09-18-tool-scheduler-symbol.md).
 - **Session setting updates stay on the Agents API resource** — `POST /agents/sessions/{id}` records `model`, `reasoning.effort`, and `service_tier` for later reads; it does not retarget the live Host agent.
 - **Saved agents are process-local** — `GET /agents` lists agents created in this process; they are not durable across restart.
 - **SSE does not replay** — after disconnect, retrieve the session and `GET .../items`; the event stream only emits from subscribe time.

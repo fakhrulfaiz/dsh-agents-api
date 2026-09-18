@@ -32,10 +32,12 @@ function fakeContext(options?: { failCreate?: boolean; failFollowup?: boolean; f
   ctx: Context
   agents: Map<string, FakeAgent>
   registeredTools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }>
+  restrictCalls: Array<{ allow?: readonly string[]; deny?: readonly string[] }>
 } {
   const agents = new Map<string, FakeAgent>()
   const sessions = new Map<string, { id: string }>()
   const registeredTools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }> = []
+  const restrictCalls: Array<{ allow?: readonly string[]; deny?: readonly string[] }> = []
   const ctx = {
     agents: {
       create: async ({
@@ -44,7 +46,10 @@ function fakeContext(options?: { failCreate?: boolean; failFollowup?: boolean; f
       }: {
         sessionId: string
         setup?: (agentCtx: {
-          tools: { register: (definition: { name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }) => () => void }
+          tools: {
+            register: (definition: { name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }) => () => void
+            restrict: (filter: { allow?: readonly string[]; deny?: readonly string[] }) => () => void
+          }
         }) => void | Promise<void>
       }) => {
         if (options?.failCreate) throw new Error('factory failed')
@@ -65,6 +70,13 @@ function fakeContext(options?: { failCreate?: boolean; failFollowup?: boolean; f
                 registeredTools.push(definition)
                 return () => undefined
               },
+              restrict: (filter) => {
+                if (filter.deny?.includes('missing_host_tool') || filter.allow?.includes('missing_host_tool')) {
+                  throw new Error('tools.restrict() names unknown global tool "missing_host_tool"; known global tools: web_search, web_fetch')
+                }
+                restrictCalls.push(filter)
+                return () => undefined
+              },
             },
           })
         }
@@ -80,11 +92,17 @@ function fakeContext(options?: { failCreate?: boolean; failFollowup?: boolean; f
     sessions: {
       get: (id: string) => sessions.get(id),
     },
+    tools: {
+      schemas: () => [
+        { name: 'web_search', description: 'Search the web', parameters: { type: 'object', properties: {} } },
+        { name: 'web_fetch', description: 'Fetch a URL', parameters: { type: 'object', properties: { url: { type: 'string' } } } },
+      ],
+    },
     agentDefaultModel: {
       currentSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }),
     },
   } as unknown as Context
-  return { ctx, agents, registeredTools }
+  return { ctx, agents, registeredTools, restrictCalls }
 }
 
 async function listen(handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>): Promise<string> {
@@ -104,8 +122,9 @@ function gateway(apiKey = '', options?: { failCreate?: boolean; failFollowup?: b
   registry: SessionRegistry
   agents: Map<string, FakeAgent>
   registeredTools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }>
+  restrictCalls: Array<{ allow?: readonly string[]; deny?: readonly string[] }>
 } {
-  const { ctx, agents, registeredTools } = fakeContext(options)
+  const { ctx, agents, registeredTools, restrictCalls } = fakeContext(options)
   const store = new AgentStore()
   const registry = new SessionRegistry()
   const api = new AgentsGateway(ctx, apiKey, '/v1', store, registry)
@@ -115,6 +134,7 @@ function gateway(apiKey = '', options?: { failCreate?: boolean; failFollowup?: b
     registry,
     agents,
     registeredTools,
+    restrictCalls,
   }
 }
 
@@ -670,5 +690,73 @@ describe('AgentsGateway', () => {
       }),
     })).status).toBe(200)
     await expect(wait).resolves.toBe('pong')
+  })
+
+  it('lists Host tools and applies host_tools restrict on session create', async () => {
+    const { base, restrictCalls, store } = gateway()
+    const root = await base
+
+    const catalog = await (await fetch(`${root}/v1/agents/tools`)).json() as {
+      object: string
+      data: Array<{ name: string; source: string }>
+    }
+    expect(catalog.object).toBe('list')
+    expect(catalog.data.map(tool => tool.name)).toEqual(['web_search', 'web_fetch'])
+    expect(catalog.data.every(tool => tool.source === 'host')).toBe(true)
+
+    // Literal /agents/tools must not be captured as an agent id.
+    expect((await fetch(`${root}/v1/agents/tools`)).status).toBe(200)
+
+    expect((await fetch(`${root}/v1/agents`, {
+      method: 'POST',
+      body: JSON.stringify({ model: 'deepseek-chat', host_tools: {} }),
+    })).status).toBe(400)
+
+    const saved = await (await fetch(`${root}/v1/agents`, {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        name: 'masked',
+        host_tools: { deny: ['web_search'] },
+      }),
+    })).json() as { id: string; host_tools: { deny: string[] } }
+    expect(saved.host_tools).toEqual({ deny: ['web_search'] })
+    expect(store.get(saved.id)?.host_tools).toEqual({ deny: ['web_search'] })
+
+    expect((await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agent_id: saved.id,
+        environment: { type: 'none' },
+      }),
+    })).status).toBe(200)
+    expect(restrictCalls).toEqual([{ deny: ['web_search'] }])
+
+    expect((await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agent: {
+          model: 'deepseek-chat',
+          host_tools: { allow: ['web_fetch'], deny: ['web_search'] },
+        },
+        environment: { type: 'none' },
+      }),
+    })).status).toBe(200)
+    expect(restrictCalls.at(-1)).toEqual({ allow: ['web_fetch'], deny: ['web_search'] })
+
+    const unknown = await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agent: {
+          model: 'deepseek-chat',
+          host_tools: { deny: ['missing_host_tool'] },
+        },
+        environment: { type: 'none' },
+      }),
+    })
+    expect(unknown.status).toBe(500)
+    expect(await unknown.json()).toMatchObject({
+      error: { message: expect.stringContaining('missing_host_tool') },
+    })
   })
 })
