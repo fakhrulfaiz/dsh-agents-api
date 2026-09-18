@@ -30,6 +30,8 @@ describe('AgentStore', () => {
     expect(store.update(agent.id, { metadata: { b: '3' } })?.metadata).toEqual({ b: '3' })
     expect(store.update(agent.id, { metadata: null, tools: null })?.metadata).toEqual({})
     expect(store.update(agent.id, { tools: [{ type: 'web_search' }] })?.tools).toEqual([{ type: 'web_search' }])
+    expect(store.update(agent.id, { host_tools: { deny: ['web_search'] } })?.host_tools).toEqual({ deny: ['web_search'] })
+    expect(store.update(agent.id, { host_tools: null })?.host_tools).toBeNull()
     expect(store.list({ limit: 20 }).data).toHaveLength(2)
     expect(store.delete(agent.id)).toBe(true)
     expect(store.get(agent.id)).toBeUndefined()

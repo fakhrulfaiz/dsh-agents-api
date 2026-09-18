@@ -57,6 +57,7 @@ describe('overlayAgent', () => {
       name: 'n',
       metadata: { k: 'v' },
       tools: [{ type: 'web_search' }],
+      host_tools: { deny: ['bash'] },
       multi_agent: { enabled: true },
       reasoning: { effort: 'low' },
       service_tier: 'flex',
@@ -65,9 +66,11 @@ describe('overlayAgent', () => {
     expect(overlaid.model).toBe('deepseek-v4-flash')
     expect(overlaid.instructions).toBe('override')
     expect(overlaid.name).toBe('n')
+    expect(overlaid.host_tools).toEqual({ deny: ['bash'] })
     expect(overlaid.id).toBe(base.id)
     expect(overlayAgent(base, { metadata: null, tools: null }).tools).toEqual([])
     expect(overlayAgent(base, {}).instructions).toBe('base')
+    expect(overlayAgent(base, { host_tools: null }).host_tools).toBeNull()
   })
 })
 

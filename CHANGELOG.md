@@ -3,6 +3,20 @@
 All notable changes to `@deepseek-ai/dsh-experimental-agents-api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-09-18 — Host tool catalog and restrict
+
+- Add `GET /agents/tools` for the live Host profile catalog (`source: "host"`).
+- Add DSH extension `host_tools: { allow?, deny? }` on agents and session overlays; apply via `tools.restrict()` at session create.
+- Reject empty `host_tools: {}`; unknown names fail when restrict runs.
+- Inject `tools` so `GET /agents/tools` can call `ctx.tools.schemas()` (missing inject threw; webserver answered empty HTTP 400).
+- See [docs/changes/2026-09-18-host-tools-catalog.md](docs/changes/2026-09-18-host-tools-catalog.md).
+
+## 2026-09-18 — Host tool scheduler Symbol docs
+
+- Document the wire-function `prepare` failure when Host `@deepseek-ai/dsh-tools` loads both `src` and `lib` under a per-module `Symbol` scheduler key.
+- Point maintainers at `Symbol.for('@deepseek-ai/dsh-tools.scheduler')` ownership in `dsh-tools`, and keep the client `tool_result` contract separate.
+- See [docs/changes/2026-09-18-tool-scheduler-symbol.md](docs/changes/2026-09-18-tool-scheduler-symbol.md).
+
 ## 2026-09-18 — README install vs develop
 
 - Document `dsh plugin add` as the default install path; keep local-checkout develop and rebuild steps separate.

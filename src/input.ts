@@ -87,6 +87,7 @@ export function overlayAgent(base: OAIAgent, overlay: SessionAgentParams): OAIAg
     instructions: overlay.instructions !== undefined ? overlay.instructions : base.instructions,
     metadata: overlay.metadata === undefined ? base.metadata : (overlay.metadata ?? {}),
     tools: overlay.tools === undefined ? base.tools : (overlay.tools ?? []),
+    ...(overlay.host_tools !== undefined ? { host_tools: overlay.host_tools } : {}),
     ...(overlay.multi_agent !== undefined ? { multi_agent: overlay.multi_agent } : {}),
     ...(overlay.reasoning !== undefined ? { reasoning: overlay.reasoning } : {}),
     ...(overlay.service_tier !== undefined ? { service_tier: overlay.service_tier } : {}),

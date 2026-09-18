@@ -12,12 +12,13 @@ import type { CreateAgentParams, OAIAgent, OAIListResponse, UpdateAgentParams } 
  * @param params - create or update fields.
  * @returns spreadable optional properties.
  */
-function optionalAgentFields(params: CreateAgentParams | UpdateAgentParams): Pick<OAIAgent, 'multi_agent' | 'reasoning' | 'service_tier' | 'text'> {
+function optionalAgentFields(params: CreateAgentParams | UpdateAgentParams): Pick<OAIAgent, 'multi_agent' | 'reasoning' | 'service_tier' | 'text' | 'host_tools'> {
   return {
     ...(params.multi_agent !== undefined ? { multi_agent: params.multi_agent } : {}),
     ...(params.reasoning !== undefined ? { reasoning: params.reasoning } : {}),
     ...(params.service_tier !== undefined ? { service_tier: params.service_tier } : {}),
     ...(params.text !== undefined ? { text: params.text } : {}),
+    ...(params.host_tools !== undefined ? { host_tools: params.host_tools } : {}),
   }
 }
 
