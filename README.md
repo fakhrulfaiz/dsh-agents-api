@@ -1,6 +1,5 @@
 ---
-
-## description: "Installable experimental profile layer that serves the OpenAI Agents API over REST and SSE for applications that already speak agents=v1."
+description: "Installable experimental profile layer that serves the OpenAI Agents API over REST and SSE for applications that already speak agents=v1."
 kind: "package-bundle"
 
 # @deepseek-ai/dsh-experimental-agents-api
