@@ -1,7 +1,24 @@
 # Changelog
 
-All notable changes to `@fakhrulfaiz/dsh-agents-api` are recorded here.
+All notable changes to `@deepseek-ai/dsh-experimental-agents-api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
+
+## 2026-09-18 — README install vs develop
+
+- Document `dsh plugin add` as the default install path; keep local-checkout develop and rebuild steps separate.
+- Clarify that Host `tsconfig` wiring is monorepo build-only, not required for profile install.
+
+## 2026-09-18 — Monorepo Host integration
+
+- Publish as `@deepseek-ai/dsh-experimental-agents-api` and register in `tsconfig.host.json`.
+- Build through the repository Host aggregate instead of a package-local `tsdown` prepare.
+
+## 2026-09-18 — Package README reshape
+
+- Slim the package README to the DeepSeek Harness `package-bundle` form.
+- Move HTTP route and wire detail to [`docs/http-api.md`](docs/http-api.md).
+- Fix the local install path to `./packages/experimental/dsh-agents-api`.
+- See [docs/changes/2026-09-18-readme-reshape.md](docs/changes/2026-09-18-readme-reshape.md).
 
 ## 2026-09-18 — Agent changelog rule
 
