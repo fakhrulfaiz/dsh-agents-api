@@ -25,7 +25,10 @@ describe('bridgeSessionEvent', () => {
     })
 
     bridgeSessionEvent('sess_1', event('turn/start', { turn: 1 }), registry)
-    bridgeSessionEvent('sess_1', event('user/message', { content: [{ type: 'text', text: 'hi' }] }), registry)
+    bridgeSessionEvent('sess_1', event('user/message', {
+      content: [{ type: 'text', text: 'hi' }],
+      source: { kind: 'user' },
+    }), registry)
     bridgeSessionEvent('sess_1', event('assistant/message', {
       message: { content: [{ type: 'text', text: 'ok' }] },
       stream: [{ type: 'text-chunks', texts: ['o', 'k'] }],
