@@ -231,9 +231,10 @@ export class AgentsGateway {
     return Promise.resolve()
   }
 
-  private listHostTools(res: ServerResponse, url: URL): Promise<void> {
+  private async listHostTools(res: ServerResponse, url: URL): Promise<void> {
     const sessionId = url.searchParams.get('session_id')
-    let data = this.ctx.tools.schemas().map(schema => ({
+    const schemas = await this.hostToolSchemas()
+    let data = schemas.map(schema => ({
       name: schema.name,
       description: schema.description,
       parameters: schema.parameters,
@@ -249,6 +250,31 @@ export class AgentsGateway {
     }
     json(res, 200, { object: 'list', data })
     return Promise.resolve()
+  }
+
+  /**
+   * Schemas a new session can call.
+   *
+   * The web profile keeps model-facing tools on the default agent preset, so
+   * the global `schemas()` view is empty. The preset's standing scope is that
+   * list. Profiles without a preset roster keep the global registry.
+   */
+  private async hostToolSchemas(): Promise<ReturnType<Context['tools']['schemas']>> {
+    const get = (this.ctx as { get?: (name: string) => unknown }).get
+    if (typeof get === 'function') {
+      try {
+        const presets = get.call(this.ctx, 'agentPresets') as {
+          standingKeyFor?: (id?: string) => Promise<unknown>
+        } | undefined
+        if (presets !== undefined && typeof presets.standingKeyFor === 'function') {
+          const scope = await presets.standingKeyFor()
+          return this.ctx.tools.schemas(scope as never)
+        }
+      } catch {
+        // No preset roster, or the default preset did not mount.
+      }
+    }
+    return this.ctx.tools.schemas()
   }
 
   private getAgent(res: ServerResponse, params: Record<string, string>): Promise<void> {
