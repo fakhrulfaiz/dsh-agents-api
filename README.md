@@ -48,14 +48,13 @@ Point the OpenAI client `baseURL` at the web server plus the prefix (for example
 
 ### Develop in this repository
 
-When you change this package's source, rebuild the Host aggregate and restart the profile that linked it:
+When you change this package's source, restart the profile that linked it. `pnpm dsh` loads `src/entry.js`, which re-exports the TypeScript source, so there is no `lib/` build step.
 
 ```sh
-pnpm run build
 pnpm dsh --profile web
 ```
 
-A `link:` dependency from `dsh plugin add ./packages/experimental/dsh_agents_api` loads that tree. Registry or GitHub installs load the published package and do not need monorepo `tsconfig` edits. The Host `tsconfig` reference and path alias exist only so in-tree tests and `pnpm run build` typecheck this package; they are not part of profile install.
+A `link:` dependency from `dsh plugin add ./packages/experimental/dsh_agents_api` loads that tree. You do not add a path alias or write `lib/index.js`.
 
 ### What you get
 
