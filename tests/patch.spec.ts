@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest'
 import '../src/index.ts'
 
 describe('dsh-agents-api bundle', () => {
-  it('declares a webserver plus agents-api insert over base', () => {
+  it('registers agents-api on the profile webserver without inserting a second one', () => {
     const root = fileURLToPath(new URL('..', import.meta.url))
     const manifest = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')) as {
       dependencies?: Record<string, string>
@@ -18,8 +18,7 @@ describe('dsh-agents-api bundle', () => {
       '@deepseek-ai/schemastery': 'workspace:^',
     })
     const patch = readFileSync(resolve(root, 'cordis.patch.yml'), 'utf8')
-    expect(patch).toContain('id: webserver')
-    expect(patch).toContain("name: '@deepseek-ai/dsh-host-webserver'")
+    expect(patch).not.toContain('- id: webserver')
     expect(patch).toContain('id: agents-api')
     expect(patch).toContain("name: '@deepseek-ai/dsh-experimental-agents-api'")
     expect(patch).toContain("prefix: '/v1'")

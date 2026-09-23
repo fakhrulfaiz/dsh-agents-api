@@ -4,6 +4,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { validateMcpTool } from './mount-mcp-tools.ts'
 import type { PendingFunctionCalls } from './pending-function-calls.ts'
 import type { OAIFunctionTool, OAIToolConfig } from './types.ts'
 
@@ -18,16 +19,22 @@ const EMPTY_OBJECT_SCHEMA: Record<string, unknown> = {
  * @returns an error message, or `undefined` when every entry is mountable.
  */
 export function validateMountableTools(tools: readonly OAIToolConfig[]): string | undefined {
-  for (const tool of tools) {
-    if (tool.type !== 'function') {
-      return `Unsupported agent.tools entry type "${tool.type}"; only type "function" is mounted`
+  for (const [index, tool] of tools.entries()) {
+    if (tool.type === 'function') {
+      if (typeof tool.name !== 'string' || tool.name === '') {
+        return 'Each type "function" tool requires a non-empty name'
+      }
+      if (tool.defer_loading === true) {
+        return `Function tool "${tool.name}" sets defer_loading; tool_search is not supported`
+      }
+      continue
     }
-    if (typeof tool.name !== 'string' || tool.name === '') {
-      return 'Each type "function" tool requires a non-empty name'
+    if (tool.type === 'mcp') {
+      const mcpError = validateMcpTool(tool, index)
+      if (mcpError !== undefined) return mcpError
+      continue
     }
-    if (tool.defer_loading === true) {
-      return `Function tool "${tool.name}" sets defer_loading; tool_search is not supported`
-    }
+    return `Unsupported agent.tools entry type "${tool.type}"; only type "function" and "mcp" are mounted`
   }
   return undefined
 }

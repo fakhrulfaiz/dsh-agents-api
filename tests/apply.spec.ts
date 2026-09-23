@@ -4,7 +4,7 @@ import { apply } from '../src/index.ts'
 
 describe('apply', () => {
   it('registers the prefix handler and ignores events for unknown sessions', () => {
-    const listeners: Array<(session: { id: string }, event: { type: string; seq: number; time: number; data: unknown }) => void> = []
+    const listeners: Array<(session: { id: string; header?: { origin?: string; parentSession?: string } }, event: { type: string; seq: number; time: number; data: unknown }) => void> = []
     const register = vi.fn(() => () => {})
     const ctx = {
       on(_name: string, fn: (typeof listeners)[number]) {
@@ -18,8 +18,8 @@ describe('apply', () => {
     }
     apply(ctx as unknown as Context)
     apply(ctx as unknown as Context, { apiKey: 'k', prefix: '/v1' })
-    expect(register).toHaveBeenCalledTimes(2)
-    expect(listeners).toHaveLength(2)
-    listeners[0]!({ id: 'missing' }, { type: 'turn/start', seq: 1, time: 1, data: {} })
+    expect(register).toHaveBeenCalledTimes(4)
+    expect(listeners).toHaveLength(4)
+    listeners[0]!({ id: 'missing', header: {} }, { type: 'turn/start', seq: 1, time: 1, data: {} })
   })
 })

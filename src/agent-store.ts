@@ -45,9 +45,45 @@ export function materializeAgent(params: CreateAgentParams): OAIAgent {
   }
 }
 
-/** In-memory saved-agent directory. */
+/** Disk writer for saved agents. Absent means RAM only. */
+export interface AgentPersistence {
+  put(agent: OAIAgent): Promise<void>
+  remove(id: string): Promise<void>
+}
+
+/** In-memory saved-agent directory. Optionally writes through to disk. */
 export class AgentStore {
   private readonly agents = new Map<string, OAIAgent>()
+  private persistence: AgentPersistence | undefined
+  private pending: Promise<void> = Promise.resolve()
+
+  /**
+   * Attach a disk writer. Later creates, updates, and deletes flush through it.
+   * @param persistence - durable agent writer, or omitted to stay in RAM.
+   */
+  bindPersistence(persistence: AgentPersistence | undefined): void {
+    this.persistence = persistence
+  }
+
+  /**
+   * Replace memory with agents loaded from disk. Does not write them back.
+   * @param agents - records from the data directory.
+   */
+  load(agents: Iterable<OAIAgent>): void {
+    this.agents.clear()
+    for (const agent of agents) this.agents.set(agent.id, agent)
+  }
+
+  /**
+   * Wait until queued disk writes finish.
+   */
+  async settled(): Promise<void> {
+    await this.pending
+  }
+
+  private enqueue(work: () => Promise<void>): void {
+    this.pending = this.pending.then(work, work)
+  }
 
   /**
    * Save a new agent and return it.
@@ -57,6 +93,10 @@ export class AgentStore {
   create(params: CreateAgentParams): OAIAgent {
     const agent = materializeAgent(params)
     this.agents.set(agent.id, agent)
+    if (this.persistence) {
+      const persist = this.persistence
+      this.enqueue(() => persist.put(agent))
+    }
     return agent
   }
 
@@ -90,6 +130,10 @@ export class AgentStore {
       ...optionalAgentFields(params),
     }
     this.agents.set(id, updated)
+    if (this.persistence) {
+      const persist = this.persistence
+      this.enqueue(() => persist.put(updated))
+    }
     return updated
   }
 
@@ -99,7 +143,12 @@ export class AgentStore {
    * @returns whether the agent existed.
    */
   delete(id: string): boolean {
-    return this.agents.delete(id)
+    const removed = this.agents.delete(id)
+    if (removed && this.persistence) {
+      const persist = this.persistence
+      this.enqueue(() => persist.remove(id))
+    }
+    return removed
   }
 
   /**

@@ -7,9 +7,26 @@ describe('validateMountableTools', () => {
   it('accepts function tools and rejects unsupported entries', () => {
     expect(validateMountableTools([])).toBeUndefined()
     expect(validateMountableTools([{ type: 'function', name: 'a' }])).toBeUndefined()
+    expect(validateMountableTools([{
+      type: 'mcp',
+      server_label: 'docs',
+      transport: { type: 'http', server_url: 'https://example.com/mcp' },
+    }])).toBeUndefined()
     expect(validateMountableTools([{ type: 'web_search' }])).toMatch(/web_search/)
     expect(validateMountableTools([{ type: 'function', name: '' }])).toMatch(/non-empty name/)
     expect(validateMountableTools([{ type: 'function', name: 'a', defer_loading: true }])).toMatch(/defer_loading/)
+    expect(validateMountableTools([{
+      type: 'mcp',
+      server_label: 'docs',
+      credential_id: 'cred',
+      transport: { type: 'http', server_url: 'https://example.com/mcp' },
+    }])).toMatch(/credential_id/)
+    expect(validateMountableTools([{
+      type: 'mcp',
+      server_label: 'docs',
+      connection_origin: 'service',
+      transport: { type: 'stdio', command: 'echo' },
+    }])).toMatch(/connection_origin/)
   })
 })
 
