@@ -28,23 +28,23 @@ Serve the [OpenAI Agents API](https://developers.openai.com/api/docs/guides/agen
 
 ### Install into a profile
 
-The default path is `dsh plugin add` on a profile that already runs the web app. The browser and the Agents API then share that webserver: the UI stays on the web origin, and clients call the same host and port with `/v1`. This patch does not insert a second `id: webserver`.
+Add this package with `dsh plugin add` on the shipped `web` profile. That profile already runs `@deepseek-ai/dsh-base` and `@deepseek-ai/dsh-web-app`. The command writes the profile for you; do not edit `~/.dsh` by hand. The browser and the Agents API then share that webserver: the UI stays on the web origin, and clients call the same host and port with `/v1`. This patch does not insert a second `id: webserver`.
 
 ```sh
-pnpm dsh plugin --profile agents add @deepseek-ai/dsh-experimental-agents-api
-pnpm dsh --profile agents
+pnpm dsh plugin --profile web add @deepseek-ai/dsh-experimental-agents-api
+pnpm dsh --profile web
 ```
 
-The `agents` profile bundle list is `@deepseek-ai/dsh-base`, `@deepseek-ai/dsh-web-app`, then this package. Web owns the bind (default `127.0.0.1:3080`). This plugin adds `/v1` and `/health` on that server.
+Web owns the bind (default `127.0.0.1:3080`). This plugin adds `/v1` and `/health` on that server.
 
-From this source checkout, point `add` at the package directory instead of the registry name:
+From a harness checkout, clone this repo at `packages/experimental/dsh_agents_api` and point `add` at that directory:
 
 ```sh
-pnpm dsh plugin --profile agents add ./packages/experimental/dsh-agents-api
-pnpm dsh plugin --profile agents remove @deepseek-ai/dsh-experimental-agents-api
+pnpm dsh plugin --profile web add ./packages/experimental/dsh_agents_api
+pnpm dsh plugin --profile web remove @deepseek-ai/dsh-experimental-agents-api
 ```
 
-The CLI initializes the profile when needed. Point the OpenAI client `baseURL` at the web server plus the prefix (for example `http://127.0.0.1:3080/v1`). Session create takes the Host provider from `ctx.agentDefaultModel.currentSelection()` and the model id from the Agents API `agent.model`.
+Point the OpenAI client `baseURL` at the web server plus the prefix (for example `http://127.0.0.1:3080/v1`). Session create takes the Host provider from `ctx.agentDefaultModel.currentSelection()` and the model id from the Agents API `agent.model`.
 
 ### Develop in this repository
 
@@ -52,10 +52,10 @@ When you change this package's source, rebuild the Host aggregate and restart th
 
 ```sh
 pnpm run build
-pnpm dsh --profile agents
+pnpm dsh --profile web
 ```
 
-A `link:` dependency from `dsh plugin add ./packages/experimental/dsh-agents-api` loads that tree. Registry or GitHub installs load the published package and do not need monorepo `tsconfig` edits. The Host `tsconfig` reference and path alias exist only so in-tree tests and `pnpm run build` typecheck this package; they are not part of profile install.
+A `link:` dependency from `dsh plugin add ./packages/experimental/dsh_agents_api` loads that tree. Registry or GitHub installs load the published package and do not need monorepo `tsconfig` edits. The Host `tsconfig` reference and path alias exist only so in-tree tests and `pnpm run build` typecheck this package; they are not part of profile install.
 
 ### What you get
 
