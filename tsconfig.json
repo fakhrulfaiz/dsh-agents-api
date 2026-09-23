@@ -27,7 +27,13 @@
       "path": "../../core/session"
     },
     {
+      "path": "../../core/system-prompt"
+    },
+    {
       "path": "../../core/tools"
+    },
+    {
+      "path": "../../mcp/mcp-client"
     },
     {
       "path": "../../host/webserver"

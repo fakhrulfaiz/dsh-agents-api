@@ -6,6 +6,12 @@
  * Reference: https://developers.openai.com/api/docs/guides/agents-api
  */
 
+import type {
+  OAILocalEnvironment,
+  OAISandboxEnvironment,
+  OAISandboxSessionEnvironment,
+} from './environment-types.ts'
+
 /** Conversation roles accepted on input messages. */
 export type Role = 'user' | 'assistant' | 'system'
 /** Session lifecycle reported on `agent.session` resources. */
@@ -64,14 +70,26 @@ export interface OAIProgrammaticToolCallingTool {
   enabled?: boolean
 }
 
+/** Streamable HTTP transport for a wire MCP server. */
+export interface OAIMcpHttpTransport {
+  type: 'http'
+  server_url: string
+  headers?: Record<string, string>
+}
+
+/** Stdio transport for a wire MCP server. */
+export interface OAIMcpStdioTransport {
+  type: 'stdio'
+  command: string
+  args?: string[]
+  env?: Record<string, string>
+}
+
 /** MCP server connection declared on an agent. */
 export interface OAIMcpTool {
   type: 'mcp'
   server_label: string
-  transport: {
-    type: 'http' | 'stdio'
-    server_url?: string
-  }
+  transport: OAIMcpHttpTransport | OAIMcpStdioTransport
   allowed_tools?: string[] | null
   required?: boolean
   connection_origin?: 'service' | 'environment'
@@ -207,6 +225,9 @@ export type OAIEnvironmentConfig =
   | OAINoneEnvironment
   | OAISelfHostedEnvironment
   | OAIOpenAIHostedEnvironment
+  | OAILocalEnvironment
+  | OAISandboxEnvironment
+  | OAISandboxSessionEnvironment
 
 /** Action the application must complete before work can continue. */
 export type OAIRequiredAction =

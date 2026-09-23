@@ -1,14 +1,8 @@
-# OpenAI Agents API HTTP gateway over dsh-base.
-# Inserted after the base layer. Host and port are deployment fallbacks;
-# a later profile patch may replace this row's complete config.
+# OpenAI Agents API routes on the profile webserver.
+# This patch does not insert a second webserver. The web app bundle owns
+# `id: webserver`; this plugin registers `/v1` and `/health` on that server.
 
 - insert:
-    - id: webserver
-      name: '@deepseek-ai/dsh-host-webserver'
-      config:
-        host: '0.0.0.0'
-        port: 3080
-
     - id: agents-api
       name: '@deepseek-ai/dsh-experimental-agents-api'
       config:

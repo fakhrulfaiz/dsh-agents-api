@@ -10,6 +10,11 @@ import { AgentsGateway } from '../src/gateway.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
 import { badRequest, json, notFound, readBody } from '../src/http.ts'
 
+vi.mock('@deepseek-ai/dsh-mcp-client', () => ({
+  Config: (input: Record<string, unknown>) => ({ ...input }),
+  name: 'mcp-client',
+}))
+
 const servers: Server[] = []
 
 afterEach(async () => {
@@ -28,16 +33,25 @@ interface FakeAgent {
   cancel: ReturnType<typeof vi.fn>
 }
 
-function fakeContext(options?: { failCreate?: boolean; failFollowup?: boolean; failDispose?: boolean }): {
+function fakeContext(options?: {
+  failCreate?: boolean
+  failFollowup?: boolean
+  failDispose?: boolean
+  omitSystemPrompt?: boolean
+}): {
   ctx: Context
   agents: Map<string, FakeAgent>
   registeredTools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }>
   restrictCalls: Array<{ allow?: readonly string[]; deny?: readonly string[] }>
+  promptSections: Array<{ name: string; order: number; text: string }>
+  pluginCalls: Array<Record<string, unknown>>
 } {
   const agents = new Map<string, FakeAgent>()
   const sessions = new Map<string, { id: string }>()
   const registeredTools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }> = []
   const restrictCalls: Array<{ allow?: readonly string[]; deny?: readonly string[] }> = []
+  const promptSections: Array<{ name: string; order: number; text: string }> = []
+  const pluginCalls: Array<Record<string, unknown>> = []
   const ctx = {
     agents: {
       create: async ({
@@ -46,9 +60,13 @@ function fakeContext(options?: { failCreate?: boolean; failFollowup?: boolean; f
       }: {
         sessionId: string
         setup?: (agentCtx: {
+          get: (name: string) => unknown
+          systemPrompt?: { section: (section: { name: string; order: number; text: string }) => void }
+          plugin: (plugin: unknown, config: Record<string, unknown>) => Promise<void>
           tools: {
             register: (definition: { name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }) => () => void
             restrict: (filter: { allow?: readonly string[]; deny?: readonly string[] }) => () => void
+            guard: (fn: (exec: { name: string }) => string | undefined) => () => void
           }
         }) => void | Promise<void>
       }) => {
@@ -64,7 +82,19 @@ function fakeContext(options?: { failCreate?: boolean; failFollowup?: boolean; f
         agents.set(sessionId, agent)
         sessions.set(sessionId, { id: sessionId })
         if (setup) {
+          const systemPrompt = options?.omitSystemPrompt
+            ? undefined
+            : {
+                section: (section: { name: string; order: number; text: string }) => {
+                  promptSections.push(section)
+                },
+              }
           await setup({
+            get: (name: string) => name === 'systemPrompt' ? systemPrompt : undefined,
+            ...(systemPrompt === undefined ? {} : { systemPrompt }),
+            plugin: async (_plugin, config) => {
+              pluginCalls.push(config)
+            },
             tools: {
               register: (definition) => {
                 registeredTools.push(definition)
@@ -77,6 +107,7 @@ function fakeContext(options?: { failCreate?: boolean; failFollowup?: boolean; f
                 restrictCalls.push(filter)
                 return () => undefined
               },
+              guard: () => () => undefined,
             },
           })
         }
@@ -102,7 +133,7 @@ function fakeContext(options?: { failCreate?: boolean; failFollowup?: boolean; f
       currentSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }),
     },
   } as unknown as Context
-  return { ctx, agents, registeredTools, restrictCalls }
+  return { ctx, agents, registeredTools, restrictCalls, promptSections, pluginCalls }
 }
 
 async function listen(handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>): Promise<string> {
@@ -116,15 +147,22 @@ async function listen(handler: (req: IncomingMessage, res: ServerResponse) => Pr
   return `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`
 }
 
-function gateway(apiKey = '', options?: { failCreate?: boolean; failFollowup?: boolean; failDispose?: boolean }): {
+function gateway(apiKey = '', options?: {
+  failCreate?: boolean
+  failFollowup?: boolean
+  failDispose?: boolean
+  omitSystemPrompt?: boolean
+}): {
   base: Promise<string>
   store: AgentStore
   registry: SessionRegistry
   agents: Map<string, FakeAgent>
   registeredTools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }>
   restrictCalls: Array<{ allow?: readonly string[]; deny?: readonly string[] }>
+  promptSections: Array<{ name: string; order: number; text: string }>
+  pluginCalls: Array<Record<string, unknown>>
 } {
-  const { ctx, agents, registeredTools, restrictCalls } = fakeContext(options)
+  const { ctx, agents, registeredTools, restrictCalls, promptSections, pluginCalls } = fakeContext(options)
   const store = new AgentStore()
   const registry = new SessionRegistry()
   const api = new AgentsGateway(ctx, apiKey, '/v1', store, registry)
@@ -135,6 +173,8 @@ function gateway(apiKey = '', options?: { failCreate?: boolean; failFollowup?: b
     agents,
     registeredTools,
     restrictCalls,
+    promptSections,
+    pluginCalls,
   }
 }
 
@@ -757,6 +797,113 @@ describe('AgentsGateway', () => {
     expect(unknown.status).toBe(500)
     expect(await unknown.json()).toMatchObject({
       error: { message: expect.stringContaining('missing_host_tool') },
+    })
+  })
+
+  it('mounts agent instructions onto the Host system prompt', async () => {
+    const { base, promptSections } = gateway()
+    const root = await base
+    expect((await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agent: { model: 'deepseek-chat', instructions: '  be brief  ' },
+      }),
+    })).status).toBe(200)
+    expect(promptSections).toEqual([{
+      name: 'agents-api:instructions',
+      order: 10,
+      text: 'be brief',
+    }])
+
+    promptSections.length = 0
+    expect((await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agent: { model: 'deepseek-chat', instructions: '   ' },
+      }),
+    })).status).toBe(200)
+    expect(promptSections).toEqual([])
+  })
+
+  it('fails session create when instructions need a missing system prompt', async () => {
+    const { base } = gateway('', { omitSystemPrompt: true })
+    const root = await base
+    const response = await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agent: { model: 'deepseek-chat', instructions: 'be brief' },
+      }),
+    })
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({
+      error: { message: expect.stringContaining('systemPrompt') },
+    })
+  })
+
+  it('rejects unsupported MCP tools and mounts a client-supplied server', async () => {
+    const { base, pluginCalls } = gateway()
+    const root = await base
+    expect((await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agent: {
+          model: 'deepseek-chat',
+          tools: [{
+            type: 'mcp',
+            server_label: 'docs',
+            credential_id: 'cred',
+            transport: { type: 'http', server_url: 'https://example.com/mcp' },
+          }],
+        },
+      }),
+    })).status).toBe(400)
+
+    const cwd = process.cwd()
+    expect((await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agent: {
+          model: 'deepseek-chat',
+          tools: [{
+            type: 'mcp',
+            server_label: 'docs',
+            transport: {
+              type: 'http',
+              server_url: 'https://example.com/mcp',
+              headers: { Authorization: 'Bearer t' },
+            },
+          }],
+        },
+      }),
+    })).status).toBe(200)
+    expect(pluginCalls).toEqual([expect.objectContaining({
+      transport: 'streamable-http',
+      serverName: 'docs',
+      url: 'https://example.com/mcp',
+      headers: { Authorization: 'Bearer t' },
+    })])
+
+    pluginCalls.length = 0
+    expect((await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agent: {
+          model: 'deepseek-chat',
+          tools: [{
+            type: 'mcp',
+            server_label: 'local',
+            required: false,
+            transport: { type: 'stdio', command: 'echo', args: ['hi'] },
+          }],
+        },
+      }),
+    })).status).toBe(200)
+    expect(pluginCalls[0]).toMatchObject({
+      transport: 'stdio',
+      serverName: 'local',
+      command: 'echo',
+      cwd,
+      failOnStartupError: false,
     })
   })
 })

@@ -110,11 +110,20 @@ export function normalizePath(pathname: string): string {
 export function matchRoute(pattern: string, pathname: string): Record<string, string> | null {
   const pParts = pattern.split('/').filter(Boolean)
   const aParts = pathname.split('/').filter(Boolean)
-  if (pParts.length !== aParts.length) return null
+  const splat = pParts.at(-1)?.startsWith('*') === true
+  if (splat) {
+    if (aParts.length < pParts.length) return null
+  } else if (pParts.length !== aParts.length) {
+    return null
+  }
   const params: Record<string, string> = {}
   for (const [i, p] of pParts.entries()) {
-    // oxlint-disable-next-line typescript/no-non-null-assertion -- equal-length splits index in range
-    const a = aParts[i]!
+    if (p.startsWith('*')) {
+      params[p.slice(1)] = aParts.slice(i).map(part => decodeURIComponent(part)).join('/')
+      return params
+    }
+    const a = aParts[i]
+    if (a === undefined) return null
     if (p.startsWith(':')) {
       params[p.slice(1)] = decodeURIComponent(a)
     } else if (p !== a) {

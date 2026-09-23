@@ -21,9 +21,15 @@ export function writeSSEHeaders(res: Pick<ServerResponse, 'setHeader'> & { flush
  * @param event - event type name.
  * @param data - JSON object or pre-serialized payload.
  */
-export function writeEvent(res: ServerResponse, event: string, data: object | string): void {
+export function writeEvent(
+  res: ServerResponse,
+  event: string,
+  data: object | string,
+  id?: number,
+): void {
   const payload = typeof data === 'string' ? data : JSON.stringify(data)
-  res.write(`event: ${event}\ndata: ${payload}\n\n`)
+  const idLine = id === undefined ? '' : `id: ${String(id)}\n`
+  res.write(`${idLine}event: ${event}\ndata: ${payload}\n\n`)
 }
 
 /**
