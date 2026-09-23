@@ -8,9 +8,16 @@ function event(type: SessionEvent['type'], data: unknown, seq = 1): SessionEvent
 
 describe('itemsFromEvent', () => {
   it('projects user, assistant, shell, function, and result events', () => {
-    expect(itemsFromEvent(event('user/message', { content: [{ type: 'text', text: 'hi' }] }), 'turn_1')).toMatchObject([
+    expect(itemsFromEvent(event('user/message', {
+      content: [{ type: 'text', text: 'hi' }],
+      source: { kind: 'user' },
+    }), 'turn_1')).toMatchObject([
       { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
     ])
+    expect(itemsFromEvent(event('user/message', {
+      content: [{ type: 'text', text: '<system-reminder>workspace</system-reminder>' }],
+      source: { kind: 'plugin' },
+    }), 'turn_1')).toEqual([])
 
     const assistant = itemsFromEvent(event('assistant/message', {
       message: { content: [{ type: 'text', text: 'ok' }] },

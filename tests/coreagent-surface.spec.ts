@@ -220,7 +220,10 @@ describe('CoreAgent routes on the plugin gateway', () => {
     })
     const body = await session.json() as { id: string }
     bridgeChildSessionEvent(body.id, 'child_1', event('turn/start', { turn: 1 }), registry)
-    bridgeChildSessionEvent(body.id, 'child_1', event('user/message', { content: [{ type: 'text', text: 'child' }] }, 2), registry)
+    bridgeChildSessionEvent(body.id, 'child_1', event('user/message', {
+      content: [{ type: 'text', text: 'child' }],
+      source: { kind: 'user' },
+    }, 2), registry)
     bridgeChildSessionEvent(body.id, 'child_1', event('turn/end', {}), registry)
     const parentItems = await fetch(`${root}/v1/agents/sessions/${body.id}/items`)
     expect((await parentItems.json() as { data: unknown[] }).data).toEqual([])

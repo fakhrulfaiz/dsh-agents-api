@@ -27,7 +27,10 @@ const SHELL_TOOLS = new Set(['bash', 'pwsh', 'terminal'])
  */
 export function itemsFromEvent(event: SessionEvent, turnId: string): OAISessionItem[] {
   if (event.type === 'user/message') {
-    const text = textFromContent((event.data as { content?: unknown }).content)
+    const data = event.data as { content?: unknown; source?: { kind?: string } }
+    // Workspace instructions and runtime snapshots are plugin input, not the client's message.
+    if (data.source?.kind !== 'user') return []
+    const text = textFromContent(data.content)
     const item: OAIMessageItem = {
       id: `item_msg_${String(event.seq)}`,
       type: 'message',
