@@ -52,7 +52,6 @@ import type {
   OAIHostToolsConfig,
   OAIInputEvent,
   OAIToolResultInputEvent,
-  PostSessionEventsBody,
   UpdateAgentParams,
   UpdateSessionParams,
 } from './types.ts'
@@ -371,6 +370,7 @@ export class AgentsGateway {
             : { reasoningEffort: defaults.reasoningEffort }),
         },
         setup: async (agentCtx) => {
+          await mountDefaultPreset(agentCtx)
           mountAgentInstructions(agentCtx, resolved.instructions)
           applyHostToolsRestrict(agentCtx, resolved.host_tools)
           mountFunctionTools(
@@ -472,7 +472,7 @@ export class AgentsGateway {
         })
       })
     }
-    json(res, 200, oaiSession)
+    json(res, 200, this.sessionPayload(sessionId) ?? { ...oaiSession, session: oaiSession, items: [], turns: [] })
   }
 
   private listSessions(res: ServerResponse, url: URL): Promise<void> {
@@ -534,9 +534,9 @@ export class AgentsGateway {
       notFound(res, `Session "${sessionId}" not found`)
       return
     }
-    const body = await readBody(req) as unknown as PostSessionEventsBody
+    const body = await readBody(req)
     try {
-      for (const evt of body.events ?? []) {
+      for (const evt of inputEventsFromBody(body)) {
         await this.applyInputEvent(sessionId, evt)
       }
     } catch (error: unknown) {
@@ -559,7 +559,25 @@ export class AgentsGateway {
       })
       return
     }
-    json(res, 200, { object: 'agent.session.events', status: 'accepted' })
+    const payload = this.sessionPayload(sessionId)
+    json(res, 200, payload ?? { session: this.sessionRegistry.project(state), items: [], turns: [] })
+  }
+
+  /** Session plus the items and turns CoreWork reads after create and follow-up. */
+  private sessionPayload(sessionId: string): {
+    session: ReturnType<SessionRegistry['project']>
+    items: ReturnType<SessionRegistry['listItems']>['data']
+    turns: ReturnType<SessionRegistry['listTurns']>['data']
+  } | undefined {
+    const session = this.sessionRegistry.getOAISession(sessionId)
+    if (!session) return undefined
+    const page = { limit: 100, order: 'asc' as const }
+    return {
+      ...session,
+      session,
+      items: this.sessionRegistry.listItems(sessionId, page).data,
+      turns: this.sessionRegistry.listTurns(sessionId, page).data,
+    }
   }
 
   private streamEvents(req: IncomingMessage, res: ServerResponse, params: Record<string, string>): Promise<void> {
@@ -1090,6 +1108,40 @@ export class AgentsGateway {
       }
     })
   }
+}
+
+/**
+ * Mount the profile's default agent preset so the session sees its tools.
+ * A profile without `agentPresets` keeps the global tool layer.
+ * @param agentCtx - agent-scoped context from `agents.create` setup.
+ */
+async function mountDefaultPreset(agentCtx: Context): Promise<void> {
+  const get = (agentCtx as { get?: (name: string) => unknown }).get
+  if (typeof get !== 'function') return
+  let presets: { mount?: (ctx: Context) => Promise<unknown> } | undefined
+  try {
+    presets = get.call(agentCtx, 'agentPresets') as typeof presets
+  } catch {
+    return
+  }
+  if (presets === undefined || typeof presets.mount !== 'function') return
+  await presets.mount(agentCtx)
+}
+
+/**
+ * Accept CoreAgent's event list, a single input event, or a bare `{ input }`.
+ * @param body - POST /events JSON.
+ */
+function inputEventsFromBody(body: Record<string, unknown>): OAIInputEvent[] {
+  if (Array.isArray(body['events'])) return body['events'] as OAIInputEvent[]
+  const type = body['type']
+  if (typeof type === 'string' && type.startsWith('agent.session.input.')) {
+    return [body as unknown as OAIInputEvent]
+  }
+  if ('input' in body) {
+    return [{ type: 'agent.session.input.message', input: body['input'] } as OAIInputEvent]
+  }
+  return []
 }
 
 /**
