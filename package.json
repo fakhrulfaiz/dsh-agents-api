@@ -11,12 +11,12 @@
     "directory": "packages/experimental/dsh-agents-api"
   },
   "type": "module",
-  "main": "lib/index.js",
-  "types": "lib/types/index.d.ts",
+  "main": "./src/entry.js",
+  "types": "./src/index.ts",
   "exports": {
     ".": {
-      "types": "./lib/types/index.d.ts",
-      "default": "./lib/index.js"
+      "types": "./src/index.ts",
+      "default": "./src/entry.js"
     },
     "./src/*": "./src/*",
     "./package.json": "./package.json",
