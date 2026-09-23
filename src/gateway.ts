@@ -359,11 +359,12 @@ export class AgentsGateway {
 
     try {
       const defaults = this.ctx.agentDefaultModel.currentSelection()
+      const provider = await providerForModel(this.ctx, resolved.model, defaults.provider)
       const handle = await this.ctx.agents.create({
         sessionId,
         meta: { cwd },
         agentOptions: {
-          provider: defaults.provider,
+          provider,
           model: resolved.model,
           ...(defaults.reasoningEffort === undefined
             ? {}
@@ -1108,6 +1109,44 @@ export class AgentsGateway {
       }
     })
   }
+}
+
+/**
+ * Provider that owns `model`. The profile default is used when it lists the
+ * model, or when no catalog is available. Otherwise the first configured
+ * provider that lists the id is used, so a CoreWork model string is not sent
+ * to an unrelated default route.
+ * @param ctx - host context that may expose `llm`.
+ * @param model - model id from the session agent.
+ * @param fallback - `agentDefaultModel` provider.
+ */
+async function providerForModel(ctx: Context, model: string, fallback: string): Promise<string> {
+  const get = (ctx as { get?: (name: string) => unknown }).get
+  if (typeof get !== 'function') return fallback
+  let llm: {
+    listProviders?: () => ReadonlyArray<{ id: string }>
+    listModels?: (provider: string) => Promise<ReadonlyArray<{ id: string }>>
+  } | undefined
+  try {
+    llm = get.call(ctx, 'llm') as typeof llm
+  } catch {
+    return fallback
+  }
+  if (llm === undefined || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
+    return fallback
+  }
+  const ids = llm.listProviders().map(provider => provider.id)
+  const ordered = ids.includes(fallback) ? [fallback, ...ids.filter(id => id !== fallback)] : ids
+  for (const provider of ordered) {
+    let models: ReadonlyArray<{ id: string }>
+    try {
+      models = await llm.listModels(provider)
+    } catch {
+      continue
+    }
+    if (models.some(row => row.id === model)) return provider
+  }
+  return fallback
 }
 
 /**
