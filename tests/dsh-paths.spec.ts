@@ -44,12 +44,16 @@ describe('buildDeclarationPaths', () => {
     expect(buildDeclarationPaths(root, sourcePaths, new Set(['@x/a'])).missing).toEqual([])
   })
 
-  it('warns about skipped aliases and does not require wildcard declarations', () => {
+  it('warns once about a skipped alias that resolves an imported specifier and stays silent for unrelated ones', () => {
     const warnings: string[] = []
     const result = buildDeclarationPaths(
       '/dsh',
-      { '@x/flat': ['./packages/flat/index.ts'], '@x/wild/*': ['./packages/wild/src/*'] },
-      new Set(['@x/flat', '@x/wild/*']),
+      {
+        '@x/flat': ['./packages/flat/index.ts'],
+        '@x/unrelated/*': ['./packages/*/examples/index.ts'],
+        '@x/wild/*': ['./packages/wild/src/*'],
+      },
+      new Set(['@x/flat', '@x/wild/sub']),
       (message) => warnings.push(message),
     )
     expect(warnings).toEqual([expect.stringContaining('@x/flat')])

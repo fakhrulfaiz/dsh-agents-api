@@ -28,6 +28,13 @@ export function declarationTarget(dshRoot: string, target: string): string | und
   return join(pkgDir, 'lib', 'types', ...rest)
 }
 
+/** Whether a `paths` key (exact or with one `*`) resolves the module specifier. */
+function aliasMatches(alias: string, specifier: string): boolean {
+  const star = alias.indexOf('*')
+  if (star < 0) return alias === specifier
+  return specifier.startsWith(alias.slice(0, star)) && specifier.endsWith(alias.slice(star + 1))
+}
+
 /** Declaration-path mapping and the declaration files it expects but did not find. */
 export interface DeclarationPaths {
   paths: Record<string, string[]>
@@ -40,7 +47,7 @@ export interface DeclarationPaths {
  * @param dshRoot - DSH checkout directory.
  * @param sourcePaths - `compilerOptions.paths` of DSH's `tsconfig.base.json`.
  * @param required - Alias names this repository imports; their declaration files must exist.
- * @param warn - Receives one line per alias skipped because its target has no `src` segment or has a wildcard before it.
+ * @param warn - Receives one line per skipped alias (target without a `src` segment or with a wildcard before it) that would resolve a specifier in `required`; unrelated skipped aliases stay silent.
  * @returns The mapping, plus `missing` listing required aliases whose declaration file does not exist.
  */
 export function buildDeclarationPaths(
@@ -55,7 +62,9 @@ export function buildDeclarationPaths(
   for (const [alias, targets] of Object.entries(sourcePaths)) {
     const mapped = targets.map((target) => declarationTarget(root, target))
     if (mapped.some((target) => target === undefined)) {
-      warn(`link-dsh: skipping alias ${alias}: target has no src segment or a wildcard before it`)
+      if ([...required].some((specifier) => aliasMatches(alias, specifier))) {
+        warn(`link-dsh: skipping alias ${alias}: target has no src segment or a wildcard before it`)
+      }
       continue
     }
     const declared = mapped as string[]
