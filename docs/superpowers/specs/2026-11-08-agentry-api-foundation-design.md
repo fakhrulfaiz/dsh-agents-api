@@ -25,7 +25,7 @@ Multi-user isolation (beyond `owner` columns and filters), per-session cloud san
 
 - Rename the repository to `agentry-api` and the package to `@agentry/api`. Update `README.md`, `cordis.patch.yml`, `docs/`, and the client smokes in `agents-api-client`.
 - DSH packages (`cordis`, `dsh-agent`, `dsh-agent-default-model`, `dsh-host-webserver`, `dsh-llm`, `dsh-mcp-client`, `dsh-session`, `dsh-session-query`, `dsh-config-editor`, `dsh-system-prompt`, `dsh-tools`) are `peerDependencies` supplied by the host DSH install. Replace the current `workspace:^` ranges with ranges that the pinned tag satisfies.
-- Development typecheck and tests resolve DSH imports through TypeScript `paths` to a pinned checkout, located by the `DSH_ROOT` environment variable (default `../deepseek-harness`). A `scripts/check-dsh-pin.ts` script fails when that checkout is not at the tag named in `dsh.pin` (a one-line file in the repository root).
+- Development typecheck and tests resolve DSH imports through TypeScript `paths` to a pinned checkout, located by the `DSH_ROOT` environment variable (required; no default, because `../deepseek-harness` is the live master checkout, not the pin). A `scripts/check-dsh-pin.ts` script fails when that checkout is not at the tag named in `dsh.pin` (a one-line file in the repository root).
 - Restore `CHANGELOG.md` (carried over from the stale copy in `deepseek-harness/packages/experimental/agents-api`) and the Agent Note on parked function tools into `docs/changes/`. Then delete the stale copy.
 - The package entry point is built `lib/index.js` (tsdown). Remove the `./src/*` export and `src/entry.js`.
 

@@ -6,16 +6,17 @@
  *   (`lib/types`), so `tsc` checks only this repository's files. DSH must have run
  *   `pnpm run build:artifacts`.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
+import { buildDeclarationPaths } from './dsh-paths.ts'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const dshRoot = process.env['DSH_ROOT']
 if (!dshRoot) {
-  console.error('DSH_ROOT is not set. Point it at a checkout of the pinned DSH tag (see dsh.pin).')
+  console.error('DSH_ROOT is not set. Run `export DSH_ROOT=/path/to/dsh-pinned` (a checkout of the tag in dsh.pin).')
   process.exit(1)
 }
 const base = join(resolve(dshRoot), 'tsconfig.base.json')
@@ -26,21 +27,21 @@ if (!existsSync(base)) {
 const write = (name: string, value: unknown) =>
   writeFile(join(repoRoot, name), `${JSON.stringify(value, null, 2)}\n`)
 
+const srcDir = join(repoRoot, 'src')
+const imported = new Set<string>()
+for (const file of readdirSync(srcDir).filter((name) => name.endsWith('.ts'))) {
+  for (const match of readFileSync(join(srcDir, file), 'utf8').matchAll(/from '(@deepseek-ai\/[^']+)'/g)) {
+    imported.add(match[1]!)
+  }
+}
+
 const parsed = ts.parseConfigFileTextToJson(base, readFileSync(base, 'utf8'))
 const sourcePaths: Record<string, string[]> = parsed.config?.compilerOptions?.paths ?? {}
-const declarationPaths = Object.fromEntries(
-  Object.entries(sourcePaths)
-    .filter(([, targets]) => targets.every((target) => !target.split('/src')[0]!.includes('*')))
-    .map(([name, targets]) => [
-    name,
-    targets.map((target) => {
-      const absolute = join(resolve(dshRoot), target)
-      const [pkgDir] = absolute.split(/\/src(?:\/|$)/)
-      if (absolute.endsWith('/*')) return `${pkgDir}/lib/types/*`
-      return `${pkgDir}/lib/types/index.d.ts`
-    }),
-  ]),
-)
+const { paths, missing } = buildDeclarationPaths(dshRoot, sourcePaths, imported)
+if (missing.length > 0) {
+  console.error(`DSH declarations are missing for ${missing.join(', ')}. Run \`pnpm run build:artifacts\` in ${dshRoot}.`)
+  process.exit(1)
+}
 
 await write('tsconfig.dsh.json', { extends: base })
-await write('tsconfig.dsh.types.json', { compilerOptions: { paths: declarationPaths } })
+await write('tsconfig.dsh.types.json', { compilerOptions: { paths } })

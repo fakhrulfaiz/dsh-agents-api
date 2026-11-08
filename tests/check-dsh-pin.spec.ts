@@ -10,7 +10,7 @@ const exec = promisify(execFile)
 const roots: string[] = []
 
 async function git(cwd: string, ...args: string[]): Promise<void> {
-  await exec('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd })
+  await exec('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgSign=false', ...args], { cwd })
 }
 
 /** Temporary repo with two commits; the first is tagged `v-test`; `ref` is checked out. */
@@ -46,5 +46,23 @@ describe('checkDshPin', () => {
   it('fails with the pin name when the tag does not exist', async () => {
     const result = await checkDshPin({ dshRoot: await fixtureRepoAt('v-test'), pin: 'v-missing' })
     expect(result).toEqual({ ok: false, reason: expect.stringContaining('v-missing') })
+  })
+
+  it('fails when tracked files in DSH_ROOT are modified', async () => {
+    const dshRoot = await fixtureRepoAt('v-test')
+    await writeFile(join(dshRoot, 'a.txt'), 'changed')
+    const result = await checkDshPin({ dshRoot, pin: 'v-test' })
+    expect(result).toEqual({ ok: false, reason: expect.stringContaining('changes to tracked files') })
+  })
+
+  it('ignores untracked files in DSH_ROOT', async () => {
+    const dshRoot = await fixtureRepoAt('v-test')
+    await writeFile(join(dshRoot, 'untracked.txt'), 'x')
+    expect(await checkDshPin({ dshRoot, pin: 'v-test' })).toEqual({ ok: true })
+  })
+
+  it('fails when DSH_ROOT does not exist', async () => {
+    const result = await checkDshPin({ dshRoot: join(tmpdir(), 'check-dsh-pin-no-such-dir'), pin: 'v-test' })
+    expect(result).toEqual({ ok: false, reason: expect.stringContaining('v-test') })
   })
 })

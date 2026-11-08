@@ -6,7 +6,7 @@ Read this first in every session. It records decisions already made so they are 
 
 **Agentry** is a self-hosted agent product built on [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH). This repository is **Agentry API**: a DSH plugin that serves an **OpenAI Agents API–compatible** HTTP surface (`OpenAI-Beta: agents=v1`) plus an Agentry admin API. Describe it as "OpenAI Agents API–compatible"; never put "OpenAI" in a product or package name.
 
-- The repository folder is still `dsh-agents-api` and `package.json` still names `@deepseek-ai/dsh-experimental-agents-api`; the rename to `agentry-api` / `@agentry/api` is planned, not done.
+- The package is `@agentry/api`. The repository folder is still `dsh-agents-api`; the repository rename to `agentry-api` is pending.
 - Product family: **Agentry API** (this repo), **Agentry Cowork** (separate frontend repo `agentry-web`, not created yet), **Agentry Admin** (inside the frontend).
 
 ## Workspace layout (`~/code`)
@@ -14,7 +14,7 @@ Read this first in every session. It records decisions already made so they are 
 | Path | Role | Rule |
 |---|---|---|
 | `deepseek-harness/` | Upstream DSH checkout | Never edit on `master`. Pin to a release tag. Upstream fixes go in a separate git worktree branch and become upstream PRs. |
-| `deepseek-harness/packages/experimental/agents-api/` | **Stale** old copy of this repo (untracked) | Do not edit. Delete after carrying over its `CHANGELOG.md` and Agent Note. |
+| `dsh-pinned/` | Git worktree of `deepseek-harness` at tag `dsh-v0.2.2-rc.1`, built with `pnpm run build:artifacts` | `DSH_ROOT` points here. Never edit. The stale in-tree copy of this repo was deleted 2026-11-08 after its `CHANGELOG.md` and note were carried over. |
 | `dsh-agents-api/` | **This repo** (future `agentry-api`) | All Agentry API work happens here. |
 | `agents-api-client/` | Python smokes + Streamlit dashboard | Throwaway client; the real frontend replaces it. |
 
@@ -34,8 +34,8 @@ Read this first in every session. It records decisions already made so they are 
 ## Status (update when it changes)
 
 - Design for sub-project 1 (API hardening + admin API) and sub-project 2 (combined profile + VM container) is in progress; the spec will live in `docs/superpowers/specs/`.
-- Known gaps: sessions, items, and turns are memory-only (lost on restart); SSE has no replay; no approval channel for sandbox escalation or user questions over the API; session setting updates do not retarget the live agent; Codebox execution depends on a `dockerSandbox` service that no DSH package provides; `CHANGELOG.md` is missing from this repo (it exists only in the stale copy).
-- Wire function tools: rechecked live on DSH master fcc0ad4 (2026-11-08). The `Symbol.for` `TOOL_RUNTIME_SCHEDULER` workaround is no longer needed; a function-tool turn reaches `requires_action`, accepts `tool_result`, and completes. Verdict `resolved`, see `docs/changes/2026-11-08-tool-scheduler-recheck.md`. The smoke script's default model `deepseek/deepseek-v4.1-flash` is rejected by the DeepSeek API; the plugin passes model names through unchanged.
+- Known gaps: sessions, items, and turns are memory-only (lost on restart); SSE has no replay; no approval channel for sandbox escalation or user questions over the API; session setting updates do not retarget the live agent; Codebox execution depends on a `dockerSandbox` service that no DSH package provides.
+- Wire function tools: rechecked live on DSH master fcc0ad4 (2026-11-08). The `Symbol.for` `TOOL_RUNTIME_SCHEDULER` workaround is no longer needed; a function-tool turn reaches `requires_action`, accepts `tool_result`, and completes. Verdict `resolved` on master and on the pinned tag `dsh-v0.2.2-rc.1`, see `docs/changes/2026-11-08-tool-scheduler-recheck.md`. The smoke script's default model `deepseek/deepseek-v4.1-flash` is rejected by the DeepSeek API; the plugin passes model names through unchanged.
 
 ## Working rules
 

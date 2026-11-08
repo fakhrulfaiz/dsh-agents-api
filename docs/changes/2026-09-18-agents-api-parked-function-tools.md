@@ -1,8 +1,6 @@
-# Agent Note: Parked client function tools on Agents API
+# Parked client function tools on Agents API
 
 Status: implemented
-
-English | [中文](2026-09-18-agents-api-parked-function-tools.zh.md)
 
 ## Problem
 

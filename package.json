@@ -32,14 +32,14 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-agent": ">=0.0.1-0",
-    "@deepseek-ai/dsh-agent-default-model": ">=0.0.1-0",
-    "@deepseek-ai/dsh-host-webserver": ">=0.0.1-0",
-    "@deepseek-ai/dsh-llm": ">=0.0.1-0",
-    "@deepseek-ai/dsh-mcp-client": ">=0.0.1-0",
-    "@deepseek-ai/dsh-session": ">=0.0.1-0",
-    "@deepseek-ai/dsh-system-prompt": ">=0.0.1-0",
-    "@deepseek-ai/dsh-tools": ">=0.0.1-0",
+    "@deepseek-ai/dsh-agent": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-agent-default-model": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-host-webserver": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-mcp-client": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-session": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-system-prompt": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1",
     "@deepseek-ai/cordis": "^4.1.0",
     "@aws-sdk/client-s3": "^3.0.0",
     "@deepseek-ai/schemastery": ">=0.0.1-0"
@@ -60,8 +60,8 @@
   "scripts": {
     "dsh:link": "tsx scripts/link-dsh.ts",
     "check:dsh-pin": "tsx scripts/check-dsh-pin.ts",
-    "typecheck": "pnpm dsh:link && tsc -p tsconfig.typecheck.json",
-    "test": "pnpm dsh:link && vitest run",
-    "build": "pnpm dsh:link && tsdown && tsc -p tsconfig.types.json"
+    "typecheck": "pnpm check:dsh-pin && pnpm dsh:link && tsc -p tsconfig.typecheck.json && tsc -p tsconfig.test.json",
+    "test": "pnpm check:dsh-pin && pnpm dsh:link && vitest run",
+    "build": "pnpm check:dsh-pin && pnpm dsh:link && tsdown && tsc -p tsconfig.types.json"
   }
 }

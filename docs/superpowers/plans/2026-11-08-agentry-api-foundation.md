@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- DSH pin: `dsh-v0.2.2-rc.1`, recorded in `dsh.pin`. Development resolves DSH sources from `$DSH_ROOT` (default `../deepseek-harness`). Create the pinned tree with `git -C ../deepseek-harness worktree add ../dsh-pinned dsh-v0.2.2-rc.1` and export `DSH_ROOT=../dsh-pinned`. Never edit files under `$DSH_ROOT`.
+- DSH pin: `dsh-v0.2.2-rc.1`, recorded in `dsh.pin`. Development resolves DSH sources from `$DSH_ROOT` (required; no default, because `../deepseek-harness` is the live master checkout, not the pin). Create the pinned tree with `git -C ../deepseek-harness worktree add ../dsh-pinned dsh-v0.2.2-rc.1` and export `DSH_ROOT=../dsh-pinned`. Never edit files under `$DSH_ROOT`.
 - DSH packages are `peerDependencies` only; never add them to `dependencies`.
 - Package name `@agentry/api`; the Cordis plugin `name` stays `'agents-api'`; route prefixes `/v1`, `/admin/v1`, and `/health`.
 - Every Agentry-owned row has `owner_id`; a non-admin read of another owner's record returns `404`.

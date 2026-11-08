@@ -48,21 +48,25 @@ Point the OpenAI client `baseURL` at the web server plus the prefix (for example
 
 ### Develop in this repository
 
-This repository builds and tests on its own against a pinned DSH checkout. `dsh.pin` names the DSH tag; check it out (for example as a worktree) and export `DSH_ROOT`:
+This repository builds and tests on its own against a pinned DSH checkout. `dsh.pin` names the DSH tag. Set up the pinned tree once (the artifact build takes several minutes), then work here:
 
 ```sh
 git -C ../deepseek-harness worktree add ../dsh-pinned "$(cat dsh.pin)"
-(cd ../dsh-pinned && pnpm install)
-export DSH_ROOT=$PWD/../dsh-pinned
+(cd ../dsh-pinned && pnpm install && pnpm run build:artifacts)
+export DSH_ROOT=$PWD/../dsh-pinned   # required; no default
 pnpm install
-pnpm check:dsh-pin && pnpm typecheck && pnpm test && pnpm build
+pnpm typecheck && pnpm test && pnpm build
 ```
 
-`pnpm dsh:link` writes the untracked `tsconfig.dsh.json` that extends `$DSH_ROOT/tsconfig.base.json`; `typecheck` and `test` run it first. After a source change, run `pnpm build` and restart the profile that links this package.
+- `DSH_ROOT` is required and is never defaulted: `../deepseek-harness` is the live master checkout, not the pin. `typecheck`, `test`, and `build` first run `pnpm check:dsh-pin`, which fails when the tree is not at the `dsh.pin` tag or has changes to tracked files.
+- `pnpm dsh:link` writes two untracked files: `tsconfig.dsh.json` (extends `$DSH_ROOT/tsconfig.base.json`; vitest resolves DSH sources through it) and `tsconfig.dsh.types.json` (maps DSH packages to their built `lib/types`; it fails when a package this repository imports has no declarations, which means `build:artifacts` was not run). Editors need `pnpm dsh:link` once before `tsconfig.test.json` resolves DSH imports.
+- `typecheck` checks `src` against DSH declarations (`tsconfig.typecheck.json`), then `src`, `tests`, `scripts`, and `vitest.config.ts` (`tsconfig.test.json`).
+- `vitest.config.ts` imports `standardDecoratorPlugin` from DSH's internal `vitest.shared.ts`; check it when bumping the pin.
+- After a source change, run `pnpm build` and restart the profile that links this package.
 
 ### What you get
 
-REST and SSE under the configured prefix (`/v1` by default) for saved agents, sessions, events, items, and turns. Clients should send `OpenAI-Beta: agents=v1`. Follow-ups use `agent.session.input.message`; steering vs a new turn follows Host idle vs in-progress; cancel uses `agent.session.input.cancel`. Wire `type: "function"` tools park Host execution until the client posts a tool result. Non-empty `agent.instructions` and client-supplied `type: "mcp"` tools mount on that same session. Use `[dsh-acp](../../acp/acp/README.md)` for Agent Client Protocol stdio, and `[dsh-sdk-jsonrpc-server](../../sdk/server/README.md)` for the first-party JSON-RPC SDK. This gateway does not implement Assistants v2 `/v1/threads`.
+REST and SSE under the configured prefix (`/v1` by default) for saved agents, sessions, events, items, and turns. Clients should send `OpenAI-Beta: agents=v1`. Follow-ups use `agent.session.input.message`; steering vs a new turn follows Host idle vs in-progress; cancel uses `agent.session.input.cancel`. Wire `type: "function"` tools park Host execution until the client posts a tool result. Non-empty `agent.instructions` and client-supplied `type: "mcp"` tools mount on that same session. Use `[dsh-acp](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/acp/acp/README.md)` for Agent Client Protocol stdio, and `[dsh-sdk-jsonrpc-server](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sdk/server/README.md)` for the first-party JSON-RPC SDK. This gateway does not implement Assistants v2 `/v1/threads`.
 
 
 | Field    | Default | Meaning                                                              |

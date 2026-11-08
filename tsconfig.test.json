@@ -1,0 +1,11 @@
+{
+  "extends": ["./tsconfig.json", "./tsconfig.dsh.types.json"],
+  "compilerOptions": {
+    "rootDir": ".",
+    "composite": false,
+    "incremental": false,
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src", "tests", "scripts", "vitest.config.ts"]
+}
