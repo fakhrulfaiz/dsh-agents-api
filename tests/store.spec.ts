@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import pg from 'pg'
 import { ownerId, type OwnerId } from '../src/auth/authenticator.ts'
 import type { EnvironmentRecord, EnvironmentTemplate } from '../src/environment-types.ts'
+import type { SessionConfig } from '../src/types.ts'
 import { materializeAgent } from '../src/agent-records.ts'
 import { migrate } from '../src/store/migrate.ts'
 import { openPostgresStore } from '../src/store/postgres.ts'
@@ -71,6 +72,7 @@ function sessionRow(id: string, owner: OwnerId, overrides: Partial<SessionIndexR
     lastError: null,
     model: 'deepseek-chat',
     reasoningEffort: null,
+    body: null,
     createdAt: at,
     updatedAt: at,
     ...overrides,
@@ -184,6 +186,24 @@ describe.each(harnesses)('Store contract (%s)', (_name, harness) => {
     expect(await store.sessions.get('sess_1', 'any')).toBeUndefined()
   })
 
+  it('sessions keep the resolved setup in body; rows without one read back null', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    const body: SessionConfig = {
+      agent: materializeAgent({ model: 'deepseek-chat', instructions: 'be brief' }),
+      environment: { type: 'local', workspace_directory: '/w/sess_b' },
+      metadata: { k: 'v' },
+      vault_ids: ['vault_1'],
+    }
+    await store.sessions.insert(sessionRow('sess_b', A, { body }))
+    await store.sessions.insert(sessionRow('sess_n', A))
+    expect((await store.sessions.get('sess_b', A))?.body).toEqual(body)
+    expect((await store.sessions.get('sess_n', A))?.body).toBeNull()
+    const next: SessionConfig = { ...body, metadata: {} }
+    expect((await store.sessions.update('sess_n', A, { body: next }))?.body).toEqual(next)
+    expect((await store.sessions.update('sess_b', A, { status: 'failed' }))?.body).toEqual(body)
+  })
+
   it('sessions.list filters by owner, agent, status, and time, newest first, in disjoint cursor pages', async () => {
     const store = await harness.fresh()
     await store.ensureOwner(A)
@@ -244,19 +264,19 @@ describe.each(harnesses)('Store contract (%s)', (_name, harness) => {
 describe('Postgres migrations', () => {
   it('migrations apply from empty', async () => {
     const url = await postgres!.createDatabase('empty')
-    expect(await migrate(url)).toEqual({ applied: ['0001-initial.sql'] })
+    expect(await migrate(url)).toEqual({ applied: ['0001-initial.sql', '0002-session-config.sql'] })
     expect(await migrate(url)).toEqual({ applied: [] })
   })
 
   it('migrations are idempotent under concurrent start', async () => {
     const url = await postgres!.createDatabase('concurrent')
     const results = await Promise.all([migrate(url), migrate(url)])
-    expect(results.flatMap(result => result.applied)).toEqual(['0001-initial.sql'])
+    expect(results.flatMap(result => result.applied)).toEqual(['0001-initial.sql', '0002-session-config.sql'])
     const client = new pg.Client({ connectionString: url })
     await client.connect()
     try {
       const rows = await client.query<{ name: string }>('select name from schema_migrations')
-      expect(rows.rows.map(row => row.name)).toEqual(['0001-initial.sql'])
+      expect(rows.rows.map(row => row.name)).toEqual(['0001-initial.sql', '0002-session-config.sql'])
     } finally {
       await client.end()
     }

@@ -260,6 +260,17 @@ export interface OAIAgentSession {
 }
 
 /**
+ * Resolved session setup stored on the session index row: what a restart needs
+ * to rebuild the agent. It holds no conversation content.
+ */
+export interface SessionConfig {
+  agent: OAIAgent
+  environment: OAIEnvironmentConfig
+  metadata: Record<string, string>
+  vault_ids: string[]
+}
+
+/**
  * Inline or overlay agent fields on session create.
  * `model` is required when `agent_id` is omitted.
  */

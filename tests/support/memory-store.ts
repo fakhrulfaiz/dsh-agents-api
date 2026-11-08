@@ -35,6 +35,11 @@ function newestFirst(a: SessionIndexRow, b: SessionIndexRow): number {
   return b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)
 }
 
+/** Copy a session row, including its stored setup. */
+function cloneRow(row: SessionIndexRow): SessionIndexRow {
+  return structuredClone(row)
+}
+
 /** Fake `Store`. Set `failure` to make every call reject with it. */
 export class MemoryStore implements Store {
   /** When set, every method rejects with this error. */
@@ -54,24 +59,24 @@ export class MemoryStore implements Store {
       this.#check()
       this.#requireOwner(row.ownerId)
       if (this.#sessions.has(row.id)) throw new Error(`duplicate session ${row.id}`)
-      this.#sessions.set(row.id, { ...row })
+      this.#sessions.set(row.id, cloneRow(row))
     },
     update: async (id, owner, patch: SessionIndexPatch) => {
       this.#check()
       const row = this.#session(id, owner)
       if (row === undefined) return undefined
-      const next: SessionIndexRow = { ...row }
-      for (const key of ['agentId', 'environmentId', 'dshSessionId', 'status', 'lastError', 'model', 'reasoningEffort'] as const) {
+      const next: SessionIndexRow = cloneRow(row)
+      for (const key of ['agentId', 'environmentId', 'dshSessionId', 'status', 'lastError', 'model', 'reasoningEffort', 'body'] as const) {
         if (patch[key] !== undefined) (next as unknown as Record<string, unknown>)[key] = patch[key]
       }
       next.updatedAt = patch.updatedAt ?? new Date()
       this.#sessions.set(id, next)
-      return { ...next }
+      return cloneRow(next)
     },
     get: async (id, owner) => {
       this.#check()
       const row = this.#session(id, owner)
-      return row === undefined ? undefined : { ...row }
+      return row === undefined ? undefined : cloneRow(row)
     },
     delete: async (id, owner) => {
       this.#check()
@@ -89,7 +94,7 @@ export class MemoryStore implements Store {
         .filter(row => q.to === undefined || row.createdAt.getTime() < q.to.getTime())
         .filter(row => after === undefined || newestFirst(row, { ...row, createdAt: after.createdAt, id: after.id }) > 0)
         .sort(newestFirst)
-      const data = rows.slice(0, q.limit).map(row => ({ ...row }))
+      const data = rows.slice(0, q.limit).map(cloneRow)
       const last = data.at(-1)
       return {
         data,
@@ -101,7 +106,7 @@ export class MemoryStore implements Store {
       return [...this.#sessions.values()]
         .filter(row => RESUMABLE_STATUSES.includes(row.status))
         .sort((a, b) => newestFirst(b, a))
-        .map(row => ({ ...row }))
+        .map(cloneRow)
     },
   }
 

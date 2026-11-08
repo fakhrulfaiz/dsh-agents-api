@@ -12,7 +12,7 @@ import pg from 'pg'
 import type { OwnerId } from '../auth/authenticator.ts'
 import type { EnvironmentRecord, EnvironmentTemplate } from '../environment-types.ts'
 import type { ListQuery } from '../http.ts'
-import type { OAIAgent, OAIListResponse } from '../types.ts'
+import type { OAIAgent, OAIListResponse, SessionConfig } from '../types.ts'
 import {
   RESUMABLE_STATUSES,
   decodeSessionCursor,
@@ -54,9 +54,10 @@ const SESSION_PATCH_COLUMNS = {
   lastError: 'last_error',
   model: 'model',
   reasoningEffort: 'reasoning_effort',
+  body: 'body',
 } as const satisfies Record<Exclude<keyof SessionIndexPatch, 'updatedAt'>, string>
 
-const SESSION_COLUMNS = 'id, owner_id, agent_id, environment_id, dsh_session_id, status, last_error, model, reasoning_effort, created_at, updated_at'
+const SESSION_COLUMNS = 'id, owner_id, agent_id, environment_id, dsh_session_id, status, last_error, model, reasoning_effort, body, created_at, updated_at'
 
 interface SessionDbRow {
   id: string
@@ -68,6 +69,7 @@ interface SessionDbRow {
   last_error: string | null
   model: string
   reasoning_effort: string | null
+  body: SessionConfig | Record<string, never>
   created_at: Date
   updated_at: Date
 }
@@ -87,6 +89,7 @@ function sessionFromDb(row: SessionDbRow): SessionIndexRow {
     lastError: row.last_error,
     model: row.model,
     reasoningEffort: row.reasoning_effort,
+    body: 'agent' in row.body ? row.body : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -178,8 +181,8 @@ export async function openPostgresStore(url: string, onIdleClientError?: (error:
     sessions: {
       async insert(row) {
         await pool.query(
-          `insert into sessions (${SESSION_COLUMNS}) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-          [row.id, row.ownerId, row.agentId, row.environmentId, row.dshSessionId, row.status, row.lastError, row.model, row.reasoningEffort, row.createdAt, row.updatedAt],
+          `insert into sessions (${SESSION_COLUMNS}) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+          [row.id, row.ownerId, row.agentId, row.environmentId, row.dshSessionId, row.status, row.lastError, row.model, row.reasoningEffort, row.body === null ? {} : row.body, row.createdAt, row.updatedAt],
         )
       },
       async update(id, owner, patch) {

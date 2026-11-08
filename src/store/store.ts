@@ -10,7 +10,7 @@
 import type { OwnerId } from '../auth/authenticator.ts'
 import type { EnvironmentRecord, EnvironmentTemplate } from '../environment-types.ts'
 import type { ListQuery } from '../http.ts'
-import type { OAIAgent, OAIListResponse, SessionStatus } from '../types.ts'
+import type { OAIAgent, OAIListResponse, SessionConfig, SessionStatus } from '../types.ts'
 
 /** One row of the session index. Model-visible history stays in the DSH Session log. */
 export interface SessionIndexRow {
@@ -23,6 +23,8 @@ export interface SessionIndexRow {
   lastError: string | null
   model: string
   reasoningEffort: string | null
+  /** Resolved setup needed to rebuild the agent on resume; `null` for rows written before migration 0002, which cannot be resumed. */
+  body: SessionConfig | null
   createdAt: Date
   updatedAt: Date
 }
