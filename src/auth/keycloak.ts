@@ -47,11 +47,13 @@ export function createKeycloakAuthenticator(cfg: KeycloakAuthConfig): Authentica
           clockTolerance: cfg.clockToleranceSeconds,
           requiredClaims: ['exp', 'sub'],
         })
+        const sub = payload.sub
+        if (typeof sub !== 'string' || sub === '') return unauthenticated('Token has no subject')
         if (payload['typ'] !== 'Bearer') return unauthenticated('Token is not an access token')
         const claimed = (payload['realm_access'] as { roles?: unknown } | undefined)?.roles
         const names = Array.isArray(claimed) ? claimed : []
         const roles = new Set(KNOWN_ROLES.filter(role => names.includes(role)))
-        return { ok: true, principal: { owner: ownerId(payload.sub as string), roles } }
+        return { ok: true, principal: { owner: ownerId(sub), roles } }
       } catch (error) {
         // jose errors carry a stable `code`; other failures (network) log the error class name. Neither includes the token.
         const code = (error as { code?: unknown }).code

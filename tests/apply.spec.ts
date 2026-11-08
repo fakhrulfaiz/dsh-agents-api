@@ -16,8 +16,8 @@ describe('apply', () => {
       },
       webServer: { register },
     }
-    const auth = { mode: 'development' as const, devKey: { key: 'k', owner: 'dev' } }
-    apply(ctx as unknown as Context, { auth })
+    const auth = { mode: 'development' as const, devKey: { key: 'k', owner: 'dev', admin: true } }
+    apply(ctx as unknown as Context, { auth, prefix: '/v1' })
     apply(ctx as unknown as Context, { auth, prefix: '/v1' })
     expect(register).toHaveBeenCalledTimes(4)
     expect(listeners).toHaveLength(4)

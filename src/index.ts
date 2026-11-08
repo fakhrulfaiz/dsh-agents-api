@@ -66,48 +66,68 @@ export const name = 'agents-api'
 /** Host services required before routes can register. */
 export const inject = ['webServer', 'sessions', 'agents', 'agentDefaultModel', 'tools']
 
-/** Authentication settings. */
-export interface AuthConfig {
-  /** `production` requires `keycloak` and forbids `devKey`; `development` needs `devKey` or `keycloak`. */
-  mode: 'production' | 'development'
-  /** Keycloak realm verification. */
-  keycloak?: {
-    /** Realm issuer URL, matched against the token `iss`; JWKS lives at `${issuer}/protocol/openid-connect/certs`. */
-    issuer: string
-    /** Required token `aud`. */
-    audience: string
-    /** JWKS cache lifetime in seconds (default 600). */
-    jwksTtlSeconds?: number
-    /** Minimum seconds between JWKS refetches caused by an unknown `kid` (default 30). */
-    jwksCooldownSeconds?: number
-    /** Accepted JWS algorithms (default `['RS256']`). */
-    algorithms?: string[]
-    /** Allowed clock skew in seconds (default 5). */
-    clockToleranceSeconds?: number
-  }
-  /** Fixed development bearer key. */
-  devKey?: {
-    key: string
-    /** Owner id the key acts as. */
-    owner: string
-    /** Grant the `agentry-admin` role (default true). */
-    admin?: boolean
-  }
+/** Resolved Keycloak settings: every field present after `Config` defaults. */
+export interface ResolvedKeycloakConfig {
+  issuer: string
+  audience: string
+  jwksTtlSeconds: number
+  jwksCooldownSeconds: number
+  algorithms: string[]
+  clockToleranceSeconds: number
 }
 
-/** Plugin configuration. Omitted backends stay off; env fills them in. */
+/** Resolved `auth` block: `Config` output with defaults applied. */
+export interface ResolvedAuthConfig {
+  mode: 'production' | 'development'
+  keycloak?: ResolvedKeycloakConfig
+  devKey?: { key: string; owner: string; admin: boolean }
+}
+
+/** JWS algorithms accepted in `auth.keycloak.algorithms`. */
+export const ALLOWED_ALGORITHMS: readonly string[] = ['RS256', 'RS384', 'RS512', 'PS256', 'PS384', 'PS512', 'ES256', 'ES384', 'ES512', 'EdDSA']
+
+/** Plugin configuration as written in cordis.yml. Omitted backends stay off; env fills them in. */
 export interface Config extends RuntimeConfigInput {
   /** Authentication. Required: `production` verifies Keycloak tokens, `development` accepts a fixed key. */
-  auth?: AuthConfig
+  auth?: {
+    /** `production` requires `keycloak` and forbids `devKey`; `development` needs `devKey` or `keycloak`. */
+    mode: 'production' | 'development'
+    /** Keycloak realm verification. */
+    keycloak?: {
+      /** Realm issuer URL, matched against the token `iss`; JWKS lives at `${issuer}/protocol/openid-connect/certs`. */
+      issuer: string
+      /** Required token `aud`. */
+      audience: string
+      /** JWKS cache lifetime in seconds (default 600). */
+      jwksTtlSeconds?: number
+      /** Minimum seconds between JWKS refetches caused by an unknown `kid` (default 30). */
+      jwksCooldownSeconds?: number
+      /** Accepted JWS algorithms, non-empty subset of `ALLOWED_ALGORITHMS` (default `['RS256']`). */
+      algorithms?: string[]
+      /** Allowed clock skew in seconds (default 5). */
+      clockToleranceSeconds?: number
+    }
+    /** Fixed development bearer key. */
+    devKey?: {
+      key: string
+      /** Owner id the key acts as. */
+      owner: string
+      /** Grant the `agentry-admin` role (default true). */
+      admin?: boolean
+    }
+  }
   /** API path prefix (default `/v1`). */
   prefix?: string
 }
+
+/** `Config` after validation: `auth` and `prefix` are always present and defaulted. */
+export type ResolvedConfig = Omit<Config, 'auth' | 'prefix'> & { auth: ResolvedAuthConfig; prefix: string }
 
 /** Schemastery types `.default` as the object's value; `null` is how an optional nested object is left absent at runtime. */
 const ABSENT = null as never
 
 /** Validate and default plugin configuration. */
-export const Config: z<Config> = z.transform(z.object({
+export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
   auth: z.object({
     mode: z.union([z.const('production'), z.const('development')]).required(),
     keycloak: z.object({
@@ -143,16 +163,16 @@ export const Config: z<Config> = z.transform(z.object({
     secretAccessKey: z.string(),
   }),
 }), (config) => {
-  validateAuth(config.auth as AuthConfig | undefined)
+  validateAuth(config.auth as ResolvedAuthConfig | undefined)
   return config
-}) as unknown as z<Config>
+}, true) as unknown as z<Config, ResolvedConfig>
 
 /**
  * Check the `auth` block for contradictory or missing settings.
  * @param auth - validated `auth` block.
- * @throws when `auth` is missing, `production` lacks `keycloak` or sets `devKey`, `development` has neither, or `devKey.key` is empty.
+ * @throws when `auth` is missing, `keycloak.algorithms` is empty or names an unsupported algorithm, `production` lacks `keycloak` or sets `devKey`, `development` has neither, or `devKey.key` is empty.
  */
-export function validateAuth(auth: AuthConfig | undefined): void {
+export function validateAuth(auth: ResolvedAuthConfig | undefined): void {
   if (auth === undefined) throw new Error('agents-api: "auth" is required (set auth.mode to production or development)')
   const { mode, keycloak, devKey } = auth
   if (mode === 'production') {
@@ -161,32 +181,25 @@ export function validateAuth(auth: AuthConfig | undefined): void {
   } else if (devKey === undefined && keycloak === undefined) {
     throw new Error('agents-api: auth.mode "development" needs auth.devKey or auth.keycloak')
   }
+  if (keycloak !== undefined) {
+    const unknown = keycloak.algorithms.filter(name => !ALLOWED_ALGORITHMS.includes(name))
+    if (keycloak.algorithms.length === 0) throw new Error('agents-api: auth.keycloak.algorithms must not be empty')
+    if (unknown.length > 0) throw new Error(`agents-api: auth.keycloak.algorithms has unsupported entries: ${unknown.join(', ')}`)
+  }
   if (devKey !== undefined && !devKey.key) throw new Error('agents-api: auth.devKey.key must not be empty')
 }
 
 /**
- * Build the request authenticator from the `auth` block.
- * @param auth - `auth` block; validated here as well.
+ * Build the request authenticator from the resolved `auth` block.
+ * @param auth - `auth` block from `Config` output.
  * @param warn - receives Keycloak rejection diagnostics.
  * @returns Keycloak, the static dev key, or the dev key first and Keycloak as fallback when development sets both.
  */
-export function createAuthenticator(auth: AuthConfig | undefined, warn: (message: string) => void): Authenticator {
+export function createAuthenticator(auth: ResolvedAuthConfig, warn: (message: string) => void): Authenticator {
   validateAuth(auth)
-  const { keycloak, devKey } = auth!
-  const staticKey = devKey === undefined
-    ? undefined
-    : createStaticKeyAuthenticator({ key: devKey.key, owner: devKey.owner, admin: devKey.admin ?? true })
-  const verifier = keycloak === undefined
-    ? undefined
-    : createKeycloakAuthenticator({
-      issuer: keycloak.issuer,
-      audience: keycloak.audience,
-      jwksTtlSeconds: keycloak.jwksTtlSeconds ?? 600,
-      jwksCooldownSeconds: keycloak.jwksCooldownSeconds ?? 30,
-      algorithms: keycloak.algorithms ?? ['RS256'],
-      clockToleranceSeconds: keycloak.clockToleranceSeconds ?? 5,
-      warn,
-    })
+  const { keycloak, devKey } = auth
+  const staticKey = devKey === undefined ? undefined : createStaticKeyAuthenticator(devKey)
+  const verifier = keycloak === undefined ? undefined : createKeycloakAuthenticator({ ...keycloak, warn })
   if (staticKey !== undefined && verifier !== undefined) return firstThen(staticKey, verifier)
   return (staticKey ?? verifier)!
 }
@@ -196,8 +209,8 @@ export function createAuthenticator(auth: AuthConfig | undefined, warn: (message
  * @param ctx - plugin context with `webServer`, `sessions`, `agents`, `agentDefaultModel`, and `tools`.
  * @param config - `auth` block and path prefix.
  */
-export function apply(ctx: Context, config: Config = {}): void {
-  const prefix = config.prefix ?? '/v1'
+export function apply(ctx: Context, config: ResolvedConfig): void {
+  const prefix = config.prefix
   const runtime = resolveRuntimeConfig(config)
   const agentStore = new AgentStore()
   const sessionRegistry = new SessionRegistry()

@@ -125,6 +125,16 @@ describe('keycloak authenticator hardening', () => {
     expect(await auth.authenticate(request(await token(key, { iss: issuer, aud: audience, sub: null })))).toMatchObject(denied)
   })
 
+  it('rejects an empty or non-string sub', async () => {
+    const key = await signer('k1')
+    const { issuer } = await jwksServer(key)
+    const auth = kc(issuer, audience)
+    expect(await auth.authenticate(request(await token(key, { iss: issuer, aud: audience, sub: '' })))).toMatchObject(denied)
+    const numeric = await new SignJWT({ sub: 42 as unknown as string, typ: 'Bearer' }).setProtectedHeader({ alg: 'RS256', kid: 'k1' })
+      .setIssuer(issuer).setAudience(audience).setExpirationTime('5m').sign(key.privateKey)
+    expect(await auth.authenticate(request(numeric))).toMatchObject(denied)
+  })
+
   it('rejects an ID token', async () => {
     const key = await signer('k1')
     const { issuer } = await jwksServer(key)
@@ -201,7 +211,7 @@ describe('requireAnyRole and firstThen', () => {
     const auth = createAuthenticator({
       mode: 'development',
       keycloak: { issuer, audience: 'agentry', jwksTtlSeconds: 600, jwksCooldownSeconds: 0, algorithms: ['RS256'], clockToleranceSeconds: 5 },
-      devKey: { key: 'dev-secret', owner: 'dev' },
+      devKey: { key: 'dev-secret', owner: 'dev', admin: true },
     }, warn)
     expect(await auth.authenticate(request('dev-secret'))).toMatchObject({ ok: true, principal: { owner: 'dev' } })
     expect(await auth.authenticate(request(await token(key, { iss: issuer, aud: 'agentry', sub: 'kc-user', roles: ['agentry-user'] })))).toMatchObject({ ok: true, principal: { owner: 'kc-user' } })
@@ -267,6 +277,12 @@ describe('auth Config', () => {
     expect(Config({ auth: { mode: 'production', keycloak } } as never).auth?.keycloak).toMatchObject({
       jwksTtlSeconds: 600, jwksCooldownSeconds: 30, algorithms: ['RS256'], clockToleranceSeconds: 5,
     })
+  })
+
+  it('rejects empty or unsupported keycloak algorithms', () => {
+    expect(() => Config({ auth: { mode: 'production', keycloak: { ...keycloak, algorithms: [] } } } as never)).toThrow(/algorithms must not be empty/)
+    expect(() => Config({ auth: { mode: 'production', keycloak: { ...keycloak, algorithms: ['RS256', 'HS256', 'none'] } } } as never)).toThrow(/unsupported entries: HS256, none/)
+    expect(Config({ auth: { mode: 'production', keycloak: { ...keycloak, algorithms: ['ES256'] } } } as never).auth?.keycloak?.algorithms).toEqual(['ES256'])
   })
 
   it('rejects an empty devKey.key', () => {
