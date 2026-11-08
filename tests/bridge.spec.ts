@@ -1,89 +1,53 @@
 import { describe, expect, it } from 'vitest'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { materializeAgent } from '../src/agent-records.ts'
-import { bridgeSessionEvent, mintEventId } from '../src/bridge.ts'
+import { bridgeChildSessionEvent, mintEventId } from '../src/bridge.ts'
+import { WireProjector } from '../src/history/projector.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
+import { logEvent } from './support/fake-session-query.ts'
 
-function event(type: SessionEvent['type'], data: unknown, seq = 1): SessionEvent {
-  return { type, seq, time: seq, data } as SessionEvent
+function registryWith(id: string): SessionRegistry {
+  const registry = new SessionRegistry()
+  registry.register(new WireProjector({
+    sessionId: id,
+    createdAt: 1,
+    agent: materializeAgent({ model: 'deepseek-chat' }),
+    environment: { type: 'none' },
+    metadata: {},
+    vaultIds: [],
+  }, false))
+  return registry
 }
 
-describe('bridgeSessionEvent', () => {
+describe('bridgeChildSessionEvent', () => {
   it('mints unique event ids', () => {
     expect(mintEventId().startsWith('evt_')).toBe(true)
     expect(mintEventId()).not.toBe(mintEventId())
   })
 
-  it('ignores unknown sessions and projects turn plus assistant events', () => {
+  it('ignores children of sessions that are not live', () => {
     const registry = new SessionRegistry()
-    bridgeSessionEvent('missing', event('turn/start', { turn: 1 }), registry)
+    bridgeChildSessionEvent('missing', 'child', logEvent('turn/start', { turn: 1 }, 1), registry)
+    expect(registry.listSubagents('missing')).toEqual([])
+  })
 
-    registry.register('sess_1', materializeAgent({ model: 'deepseek-chat' }))
-    const seen: string[] = []
-    registry.subscribe('sess_1', (evt) => {
-      seen.push(evt.type)
-    })
-
-    bridgeSessionEvent('sess_1', event('turn/start', { turn: 1 }), registry)
-    bridgeSessionEvent('sess_1', event('user/message', {
+  it('records child turns and items on the child, not the parent', () => {
+    const registry = registryWith('sess_1')
+    bridgeChildSessionEvent('sess_1', 'child', logEvent('turn/start', { turn: 1 }, 1), registry)
+    bridgeChildSessionEvent('sess_1', 'child', logEvent('user/message', {
       content: [{ type: 'text', text: 'hi' }],
       source: { kind: 'user' },
-    }), registry)
-    bridgeSessionEvent('sess_1', event('assistant/message', {
-      message: { content: [{ type: 'text', text: 'ok' }] },
-      stream: [{ type: 'text-chunks', texts: ['o', 'k'] }],
-    }), registry)
-    bridgeSessionEvent('sess_1', event('turn/end', {
-      usage: { inputTokens: 1, outputTokens: 1 },
-    }), registry)
+    }, 2), registry)
+    bridgeChildSessionEvent('sess_1', 'child', logEvent('turn/end', {}, 3), registry)
 
-    expect(seen).toContain('agent.session.turn.created')
-    expect(seen).toContain('agent.session.turn.output_text.delta')
-    expect(seen).toContain('agent.session.turn.completed')
-    expect(seen).toContain('agent.session.idle')
-    expect(registry.listItems('sess_1', { limit: 20 }).data.length).toBeGreaterThan(0)
+    expect(registry.listChildTurns('sess_1', 'child')?.map(turn => turn.status)).toEqual(['completed'])
+    expect(registry.listChildItems('sess_1', 'child')?.[0]).toMatchObject({ subagent_id: 'child', role: 'user' })
+    expect(registry.get('sess_1')?.projector.items).toEqual([])
   })
 
-  it('emits a single delta when the assistant stream is empty', () => {
-    const registry = new SessionRegistry()
-    registry.register('sess_2', materializeAgent({ model: 'deepseek-chat' }))
-    const deltas: string[] = []
-    registry.subscribe('sess_2', (evt) => {
-      if (evt.type === 'agent.session.turn.output_text.delta') deltas.push(evt.delta)
-    })
-    bridgeSessionEvent('sess_2', event('turn/start', { turn: 1 }), registry)
-    bridgeSessionEvent('sess_2', event('assistant/message', {
-      message: { content: 'only-body' },
-    }), registry)
-    expect(deltas).toEqual(['only-body'])
-  })
-
-  it('ignores unknown event types and completes a turn without usage', () => {
-    const registry = new SessionRegistry()
-    registry.register('sess_3', materializeAgent({ model: 'deepseek-chat' }))
-    bridgeSessionEvent('sess_3', { type: 'unknown/type', seq: 1, time: 1, data: {} } as unknown as SessionEvent, registry)
-    bridgeSessionEvent('sess_3', event('turn/start', { turn: 1 }), registry)
-    bridgeSessionEvent('sess_3', event('turn/end', {}), registry)
-    expect(registry.getOAISession('sess_3')?.status).toBe('idle')
-  })
-
-  it('reuses an open turn and ignores turn/end without one', () => {
-    const registry = new SessionRegistry()
-    registry.register('sess_4', materializeAgent({ model: 'deepseek-chat' }))
-    registry.createTurn('sess_4')
-    const seen: string[] = []
-    registry.subscribe('sess_4', (evt) => {
-      seen.push(evt.type)
-    })
-    bridgeSessionEvent('sess_4', event('turn/start', { turn: 1 }), registry)
-    expect(seen).toContain('agent.session.turn.created')
-    const other = new SessionRegistry()
-    other.register('sess_5', materializeAgent({ model: 'deepseek-chat' }))
-    bridgeSessionEvent('sess_5', event('turn/end', {}), other)
-    expect(other.getOAISession('sess_5')?.status).toBe('idle')
-    bridgeSessionEvent('sess_5', event('assistant/message', {
-      message: { content: '' },
-      stream: [{ type: 'text-chunks' }],
-    }), other)
+  it('marks a child turn failed with the logged error', () => {
+    const registry = registryWith('sess_1')
+    bridgeChildSessionEvent('sess_1', 'child', logEvent('turn/start', { turn: 1 }, 1), registry)
+    bridgeChildSessionEvent('sess_1', 'child', logEvent('turn/end', { reason: { kind: 'error', error: { message: 'boom', code: 'E' } } }, 2), registry)
+    expect(registry.listChildTurns('sess_1', 'child')?.[0]).toMatchObject({ status: 'failed', error: { code: 'E', message: 'boom' } })
   })
 })

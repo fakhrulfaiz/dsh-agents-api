@@ -2,17 +2,12 @@
  * Park Host function-tool `execute` until the client posts a tool result.
  */
 
-import { mintEventId } from './bridge.ts'
-import type { SessionRegistry } from './session-registry.ts'
-import type { OAIRequiredAction } from './types.ts'
-
 /** Outcome accepted from `tool_result` or legacy `function_call_output`. */
 export type FunctionCallOutcome =
   | { success: true; output: string }
   | { success: false; error: string }
 
 interface PendingEntry {
-  action: Extract<OAIRequiredAction, { type: 'function_call' }>
   resolve: (output: string) => void
   reject: (error: Error) => void
   abortListener: () => void
@@ -24,19 +19,12 @@ interface PendingEntry {
  *
  * When the model invokes a mounted wire function, Host `execute` parks here.
  * Completing the waiter unblocks the tool pipeline so the loop appends a real
- * `tool/result` and continues the turn.
+ * `tool/result` and continues the turn. `required_actions` and the
+ * `requires_action` status are not set here: they derive from the logged
+ * `tool/call` and `tool/result` events (`history/projector.ts`).
  */
 export class PendingFunctionCalls {
   private readonly pending = new Map<string, PendingEntry>()
-
-  /**
-   * @param sessionId - Agents API / Host session id.
-   * @param registry - live session directory for status and SSE fan-out.
-   */
-  constructor(
-    private readonly sessionId: string,
-    private readonly registry: SessionRegistry,
-  ) {}
 
   /**
    * Whether a call is waiting for a client result.
@@ -49,17 +37,11 @@ export class PendingFunctionCalls {
 
   /**
    * Park until the client posts a result for this call, or the Host signal aborts.
-   * @param params - call identity, arguments, and cancellation signal.
+   * @param params - call id and cancellation signal.
    * @returns the client output string on success.
    */
-  wait(params: {
-    callId: string
-    name: string
-    arguments: Record<string, unknown>
-    turnId: string
-    signal: AbortSignal
-  }): Promise<string> {
-    const { callId, name, arguments: args, turnId, signal } = params
+  wait(params: { callId: string; signal: AbortSignal }): Promise<string> {
+    const { callId, signal } = params
     if (this.pending.has(callId)) {
       return Promise.reject(new Error(`Function call "${callId}" is already waiting for a result`))
     }
@@ -67,28 +49,12 @@ export class PendingFunctionCalls {
       return Promise.reject(new Error(`Function call "${callId}" was cancelled before it started waiting`))
     }
 
-    const action: Extract<OAIRequiredAction, { type: 'function_call' }> = {
-      type: 'function_call',
-      name,
-      arguments: args,
-      turn_id: turnId,
-      call_id: callId,
-    }
-
     return new Promise<string>((resolve, reject) => {
       const abortListener = (): void => {
         this.drop(callId, new Error(`Function call "${callId}" was cancelled`))
       }
-      const entry: PendingEntry = {
-        action,
-        resolve,
-        reject,
-        abortListener,
-        signal,
-      }
-      this.pending.set(callId, entry)
+      this.pending.set(callId, { resolve, reject, abortListener, signal })
       signal.addEventListener('abort', abortListener, { once: true })
-      this.syncRequiredActions(true)
     })
   }
 
@@ -103,7 +69,6 @@ export class PendingFunctionCalls {
     if (!entry) return false
     entry.signal.removeEventListener('abort', entry.abortListener)
     this.pending.delete(callId)
-    this.syncRequiredActions(false)
     if (outcome.success) entry.resolve(outcome.output)
     else entry.reject(new Error(outcome.error))
     return true
@@ -120,7 +85,6 @@ export class PendingFunctionCalls {
       entry.signal.removeEventListener('abort', entry.abortListener)
       entry.reject(reason)
     }
-    this.syncRequiredActions(false)
   }
 
   private drop(callId: string, reason: Error): void {
@@ -128,20 +92,6 @@ export class PendingFunctionCalls {
     if (!entry) return
     entry.signal.removeEventListener('abort', entry.abortListener)
     this.pending.delete(callId)
-    this.syncRequiredActions(false)
     entry.reject(reason)
-  }
-
-  private syncRequiredActions(emitRequiresAction: boolean): void {
-    const actions: OAIRequiredAction[] = [...this.pending.values()].map(entry => entry.action)
-    const session = this.registry.syncRequiredActions(this.sessionId, actions)
-    if (!session) return
-    if (emitRequiresAction && actions.length > 0) {
-      this.registry.emit(this.sessionId, {
-        type: 'agent.session.requires_action',
-        event_id: mintEventId(),
-        session,
-      })
-    }
   }
 }

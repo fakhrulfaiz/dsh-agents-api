@@ -48,23 +48,20 @@ export function validateMountableTools(tools: readonly OAIToolConfig[]): string 
  * @param agentCtx - agent-scoped Cordis context from `agents.create` setup.
  * @param tools - validated wire function tools.
  * @param pending - per-session parked-call registry.
- * @param getTurnId - current Agents API turn id when execute starts.
  */
 export function mountFunctionTools(
   agentCtx: Context,
   tools: readonly OAIFunctionTool[],
   pending: PendingFunctionCalls,
-  getTurnId: () => string,
 ): void {
   for (const tool of tools) {
-    agentCtx.tools.register(createParkedFunctionTool(tool, pending, getTurnId))
+    agentCtx.tools.register(createParkedFunctionTool(tool, pending))
   }
 }
 
 function createParkedFunctionTool(
   tool: OAIFunctionTool,
   pending: PendingFunctionCalls,
-  getTurnId: () => string,
 ): ToolDefinition {
   return {
     name: tool.name,
@@ -77,19 +74,8 @@ function createParkedFunctionTool(
         return [{ type: 'text' as const, text }]
       },
     },
-    async execute(args: unknown, exec) {
-      const callArgs = isPlainObject(args) ? args : {}
-      return pending.wait({
-        callId: String(exec.callId),
-        name: tool.name,
-        arguments: callArgs,
-        turnId: getTurnId(),
-        signal: exec.signal,
-      })
+    async execute(_args: unknown, exec) {
+      return pending.wait({ callId: String(exec.callId), signal: exec.signal })
     },
   }
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
 }

@@ -9,10 +9,12 @@ import { materializeAgent } from '../src/agent-records.ts'
 import { createLocalProvider } from '../src/environment/local.ts'
 import type { CreateAgentParams, OAIAgent } from '../src/types.ts'
 import { MemoryStore } from './support/memory-store.ts'
+import { FakeSessionQuery, logEvent, testGatewayOptions } from './support/fake-session-query.ts'
 import { createStaticKeyAuthenticator } from '../src/auth/static-key.ts'
 import { ownerId, type Authenticator } from '../src/auth/authenticator.ts'
 import { openAuthenticator } from './open-auth.ts'
 import { AgentsGateway } from '../src/gateway.ts'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionRegistry } from '../src/session-registry.ts'
 import { badRequest, json, notFound, readBody } from '../src/http.ts'
 
@@ -136,6 +138,7 @@ function fakeContext(options?: {
     sessions: {
       get: (id: string) => sessions.get(id),
     },
+    logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn() },
     tools: {
       schemas: () => [
         { name: 'web_search', description: 'Search the web', parameters: { type: 'object', properties: {} } },
@@ -167,6 +170,10 @@ function gateway(apiKey = '', options?: {
   omitSystemPrompt?: boolean
 }): {
   base: Promise<string>
+  api: AgentsGateway
+  query: FakeSessionQuery
+  /** Log `event` for `sessionId` and project it, as a live `session/event` does. */
+  feed: (sessionId: string, event: SessionEvent) => void
   store: MemoryStore
   registry: SessionRegistry
   agents: Map<string, FakeAgent>
@@ -178,9 +185,16 @@ function gateway(apiKey = '', options?: {
   const { ctx, agents, registeredTools, restrictCalls, promptSections, pluginCalls } = fakeContext(options)
   const store = new MemoryStore()
   const registry = new SessionRegistry()
-  const api = new AgentsGateway(ctx, apiKey ? createStaticKeyAuthenticator({ key: apiKey, owner: 'test', admin: true }) : openAuthenticator, '/v1', store, registry, { environments })
+  const query = new FakeSessionQuery()
+  const api = new AgentsGateway(ctx, apiKey ? createStaticKeyAuthenticator({ key: apiKey, owner: 'test', admin: true }) : openAuthenticator, '/v1', store, registry, testGatewayOptions(environments, query))
   return {
     base: listen((req, res) => api.handle(req, res)),
+    api,
+    query,
+    feed: (sessionId, event) => {
+      query.append(sessionId, event)
+      api.applySessionEvent(sessionId, event)
+    },
     store,
     registry,
     agents,
@@ -226,7 +240,7 @@ describe('AgentsGateway', () => {
   it('answers 403 forbidden when the principal holds neither agentry role', async () => {
     const { ctx } = fakeContext()
     const noRoles = { authenticate: () => Promise.resolve({ ok: true as const, principal: { owner: ownerId('x'), roles: new Set<never>() } }) }
-    const api = new AgentsGateway(ctx, noRoles, '/v1', new MemoryStore(), new SessionRegistry(), { environments })
+    const api = new AgentsGateway(ctx, noRoles, '/v1', new MemoryStore(), new SessionRegistry(), testGatewayOptions(environments))
     const base = await listen((req, res) => api.handle(req, res))
     const denied = await fetch(`${base}/v1/agents`)
     expect(denied.status).toBe(403)
@@ -299,7 +313,7 @@ describe('AgentsGateway', () => {
   it('leaves the session unchanged and answers 503 when the store write fails on update', async () => {
     const store = new MemoryStore()
     const update = vi.spyOn(store.sessions, 'update').mockRejectedValueOnce(new Error('connection refused'))
-    const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), { environments })
+    const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), testGatewayOptions(environments))
     const root = await listen((req, res) => api.handle(req, res))
     const created = await (await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -336,7 +350,7 @@ describe('AgentsGateway', () => {
   })
 
   it('streams create-session events and later input, cancel, and tool output', async () => {
-    const { base, agents, registry } = gateway()
+    const { base, agents, registry, feed } = gateway()
     const root = await base
     const stream = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -353,8 +367,8 @@ describe('AgentsGateway', () => {
       body: JSON.stringify({ agent: { model: 'deepseek-chat' } }),
     })).json() as { id: string }
     const sessionId = idle.id
-    registry.createTurn(sessionId)
-    expect(registry.get(sessionId)?.status).toBe('in_progress')
+    feed(sessionId, logEvent('turn/start', { turn: 1 }, 1))
+    expect(registry.getOAISession(sessionId)?.status).toBe('in_progress')
 
     expect((await fetch(`${root}/v1/agents/sessions/${sessionId}/events`, {
       method: 'POST',
@@ -399,7 +413,8 @@ describe('AgentsGateway', () => {
 
     expect((await fetch(`${root}/v1/agents/sessions/${sessionId}/items`)).status).toBe(200)
     expect((await fetch(`${root}/v1/agents/sessions/${sessionId}/turns`)).status).toBe(200)
-    const turnId = registry.listTurns(sessionId, { limit: 20 }).data[0]?.id
+    const turnId = ((await (await fetch(`${root}/v1/agents/sessions/${sessionId}/turns`)).json()) as { data: Array<{ id: string }> }).data[0]?.id
+    expect(turnId).toBe('turn_1')
     expect((await fetch(`${root}/v1/agents/sessions/${sessionId}/turns/${turnId}`)).status).toBe(200)
     expect((await fetch(`${root}/v1/agents/sessions/${sessionId}/turns/missing`)).status).toBe(404)
 
@@ -438,7 +453,7 @@ describe('AgentsGateway', () => {
       if (sessionId === undefined) {
         sessionId = /"id":"(sess_[^"]+)"/.exec(joined)?.[1]
         if (sessionId !== undefined) {
-          registry.emit(sessionId, {
+          registry.emitEphemeral(sessionId, {
             type: 'agent.session.idle',
             event_id: 'evt_stream',
             session: registry.getOAISession(sessionId)!,
@@ -542,7 +557,7 @@ describe('AgentsGateway', () => {
 
   it('defaults missing request fields and tears down a registry-only session', async () => {
     const { ctx } = fakeContext()
-    const api = new AgentsGateway(ctx, openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), { environments })
+    const api = new AgentsGateway(ctx, openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), testGatewayOptions(environments))
     const chunks: Buffer[] = []
     const res = {
       setHeader() {},
@@ -632,7 +647,7 @@ describe('AgentsGateway', () => {
     await api.handle(new JsonCreateReq() as unknown as IncomingMessage, jsonRes)
     expect(Buffer.concat(jsonChunks).toString()).toContain('agent.session')
 
-    const { base, registry, store, agents } = gateway()
+    const { base, registry, store, agents, feed } = gateway()
     const root = await base
     const saved = await seedAgent(store, { model: 'deepseek-chat', instructions: 'saved' })
     const reused = await (await fetch(`${root}/v1/agents/sessions`, {
@@ -652,21 +667,20 @@ describe('AgentsGateway', () => {
       }),
     })).status).toBe(200)
 
-    registry.register('sess_orphan', saved)
     const now = new Date()
     await store.sessions.insert({
       id: 'sess_orphan', ownerId: TEST_OWNER, agentId: saved.id, environmentId: null, dshSessionId: 'sess_orphan',
-      status: 'idle', lastError: null, model: 'deepseek-chat', reasoningEffort: null, createdAt: now, updatedAt: now,
+      status: 'idle', lastError: null, model: 'deepseek-chat', reasoningEffort: null, body: null, createdAt: now, updatedAt: now,
     })
     expect((await fetch(`${root}/v1/agents/sessions/sess_orphan`, { method: 'DELETE' })).status).toBe(200)
 
     const liveId = reused.id
-    registry.createTurn(liveId)
+    feed(liveId, logEvent('turn/start', { turn: 1 }, 1))
     const live = await fetch(`${root}/v1/agents/sessions/${liveId}/events`)
     const reader = live.body!.getReader()
     const first = await reader.read()
     expect(new TextDecoder().decode(first.value)).toContain('agent.session.in_progress')
-    registry.emit(liveId, {
+    registry.emitEphemeral(liveId, {
       type: 'agent.session.failed',
       event_id: 'evt_test',
       session: registry.getOAISession(liveId)!,
@@ -687,7 +701,7 @@ describe('AgentsGateway', () => {
   })
 
   it('mounts wire function tools and completes them via tool_result', async () => {
-    const { base, registry, registeredTools } = gateway()
+    const { base, registry, registeredTools, feed } = gateway()
     const root = await base
     expect((await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -719,7 +733,7 @@ describe('AgentsGateway', () => {
     })).json() as { id: string }
     expect(registeredTools.map(tool => tool.name)).toEqual(['get_weather'])
 
-    const turn = registry.createTurn(created.id)!
+    feed(created.id, logEvent('turn/start', { turn: 1 }, 1))
     const events: unknown[] = []
     registry.subscribe(created.id, (evt) => {
       events.push(evt)
@@ -730,12 +744,13 @@ describe('AgentsGateway', () => {
       { city: 'SF' },
       { callId: 'call_weather', signal: controller.signal },
     )
-    await Promise.resolve()
-    expect(registry.get(created.id)?.status).toBe('requires_action')
-    expect(registry.get(created.id)?.required_actions).toMatchObject([{
+    feed(created.id, logEvent('tool/call', { callId: 'call_weather', name: 'get_weather', arguments: '{"city":"SF"}' }, 2))
+    expect(registry.getOAISession(created.id)?.status).toBe('requires_action')
+    expect(registry.getOAISession(created.id)?.required_actions).toMatchObject([{
       type: 'function_call',
       call_id: 'call_weather',
       name: 'get_weather',
+      turn_id: 'turn_1',
     }])
     expect(events.some(evt => (evt as { type: string }).type === 'agent.session.requires_action')).toBe(true)
 
@@ -744,7 +759,7 @@ describe('AgentsGateway', () => {
       body: JSON.stringify({
         events: [{
           type: 'agent.session.input.tool_result',
-          turn_id: turn.id,
+          turn_id: 'turn_1',
           call_id: 'call_weather',
           success: true,
           output: JSON.stringify({ temp: 68 }),
@@ -752,12 +767,13 @@ describe('AgentsGateway', () => {
       }),
     })).status).toBe(200)
     await expect(wait).resolves.toBe('{"temp":68}')
-    expect(registry.get(created.id)?.status).toBe('in_progress')
-    expect(registry.get(created.id)?.required_actions).toEqual([])
+    feed(created.id, logEvent('tool/result', { message: { source: { kind: 'tool', callId: 'call_weather' }, content: [{ type: 'text', text: '{"temp":68}' }] } }, 3))
+    expect(registry.getOAISession(created.id)?.status).toBe('in_progress')
+    expect(registry.getOAISession(created.id)?.required_actions).toEqual([])
   })
 
   it('accepts legacy function_call_output as a tool_result alias', async () => {
-    const { base, registry, registeredTools } = gateway()
+    const { base, registeredTools } = gateway()
     const root = await base
     const created = await (await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -768,7 +784,6 @@ describe('AgentsGateway', () => {
         },
       }),
     })).json() as { id: string }
-    registry.createTurn(created.id)
     const wait = registeredTools[0]!.execute({}, {
       callId: 'call_ping',
       signal: new AbortController().signal,
@@ -909,7 +924,6 @@ describe('AgentsGateway', () => {
       }),
     })).status).toBe(400)
 
-    const cwd = process.cwd()
     expect((await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
       body: JSON.stringify({
@@ -953,7 +967,7 @@ describe('AgentsGateway', () => {
       transport: 'stdio',
       serverName: 'local',
       command: 'echo',
-      cwd,
+      cwd: expect.stringContaining(join('agentry-gateway-spec-workspaces', 'test')),
       failOnStartupError: false,
     })
   })
@@ -971,7 +985,7 @@ describe('AgentsGateway store and owner scoping', () => {
   it('store outage returns 503', async () => {
     const store = new MemoryStore()
     store.failure = new Error('connection refused')
-    const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), { environments })
+    const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), testGatewayOptions(environments))
     const root = await listen((req, res) => api.handle(req, res))
     const response = await fetch(`${root}/v1/agents`)
     expect(response.status).toBe(503)
@@ -979,7 +993,7 @@ describe('AgentsGateway store and owner scoping', () => {
   })
 
   it('answers 503 store_unavailable until a store is attached, and with the start error after a failure', async () => {
-    const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', undefined, new SessionRegistry(), { environments })
+    const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', undefined, new SessionRegistry(), testGatewayOptions(environments))
     const root = await listen((req, res) => api.handle(req, res))
     const opening = await fetch(`${root}/v1/agents`)
     expect(opening.status).toBe(503)
@@ -996,7 +1010,7 @@ describe('AgentsGateway store and owner scoping', () => {
 
   it('records the owner on first request and hides other owners\' records as 404', async () => {
     const store = new MemoryStore()
-    const api = new AgentsGateway(fakeContext().ctx, ownerHeader, '/v1', store, new SessionRegistry(), { environments })
+    const api = new AgentsGateway(fakeContext().ctx, ownerHeader, '/v1', store, new SessionRegistry(), testGatewayOptions(environments))
     const root = await listen((req, res) => api.handle(req, res))
     const as = (owner: string, init: RequestInit = {}) => ({ ...init, headers: { 'x-owner': owner, ...(init.headers ?? {}) } })
 

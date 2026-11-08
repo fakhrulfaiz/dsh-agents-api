@@ -48,7 +48,6 @@ describe('mountFunctionTools', () => {
       agentCtx,
       [{ type: 'function', name: 'lookup', description: 'Find things', parameters: { type: 'object', properties: {} } }],
       pending,
-      () => 'turn_x',
     )
     expect(registered).toHaveLength(1)
     expect(registered[0]!.name).toBe('lookup')
@@ -58,9 +57,6 @@ describe('mountFunctionTools', () => {
     })).resolves.toBe('result')
     expect(wait).toHaveBeenCalledWith(expect.objectContaining({
       callId: 'c1',
-      name: 'lookup',
-      arguments: { q: 1 },
-      turnId: 'turn_x',
     }))
   })
 })

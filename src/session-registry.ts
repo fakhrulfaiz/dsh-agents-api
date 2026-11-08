@@ -1,28 +1,25 @@
 /**
- * In-memory registry of Agents API sessions, turns, saved items, and SSE fans.
+ * Live Agents API sessions: one `WireProjector` per session, SSE fan-out, and
+ * in-memory subagent state.
+ *
+ * Items, turns, and session status are not kept here; the projector derives
+ * them from the Session log, and `SessionHistory` re-derives them after a
+ * restart.
  */
 
 import { randomUUID } from 'node:crypto'
-import { paginate, type ListQuery } from './http.ts'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { applySessionUpdate } from './session-resource.ts'
+import type { StoredSessionItem, WireProjector, WireStep } from './history/projector.ts'
 import type {
-  OAIAgent,
   OAIAgentSession,
-  OAIEnvironmentConfig,
-  OAIListResponse,
-  OAIRequiredAction,
   OAISessionEvent,
-  OAISessionItem,
-  OAITokenUsage,
   OAITurn,
-  SessionStatus,
+  SessionConfig,
   UpdateSessionParams,
 } from './types.ts'
 
-/** How many SSE events to keep for `Last-Event-ID` replay. */
-const REPLAY_LIMIT = 200
-
-/** One saved item, with the child id when it belongs to a subagent. */
-export type StoredSessionItem = OAISessionItem & { subagent_id?: string }
+export type { ReplayFrame, StoredSessionItem } from './history/projector.ts'
 
 /** One Host child observed because its session header says `origin: subagent`. */
 export interface SubagentState {
@@ -38,159 +35,93 @@ export interface SubagentState {
   currentTurnId?: string
 }
 
-/** One buffered SSE frame. */
-export interface ReplayFrame {
-  id: number
-  event: OAISessionEvent
-}
-
-/** Mutable per-session state owned by the gateway. */
+/** Live state of one session. */
 export interface RegisteredSessionState {
   id: string
-  created_at: number
-  last_active_at: number
-  status: SessionStatus
-  error: string | null
-  metadata: Record<string, string>
-  vault_ids: string[]
-  agent: OAIAgent
-  environment: OAIEnvironmentConfig
-  required_actions: OAIRequiredAction[]
-  usage: OAITokenUsage | null
-  turns: OAITurn[]
-  items: StoredSessionItem[]
-  currentTurnId?: string
+  projector: WireProjector
   /** Absolute cwd used for workspace artifact reads. */
   workspace?: string
 }
 
+/**
+ * Receives each wire frame of a session. `sseId` is the frame's `id`, or
+ * `undefined` for an ephemeral event, which replay never returns.
+ */
+export type SessionListener = (event: OAISessionEvent, sseId: number | undefined) => void
+
 /** Live session directory plus SSE fan-out. */
 export class SessionRegistry {
   private readonly sessions = new Map<string, RegisteredSessionState>()
-  private readonly subscribers = new Map<string, Set<(event: OAISessionEvent, sseId: number) => void>>()
-  private readonly replay = new Map<string, ReplayFrame[]>()
-  private readonly nextEventId = new Map<string, number>()
+  private readonly subscribers = new Map<string, Set<SessionListener>>()
   private readonly subagents = new Map<string, SubagentState>()
 
   /**
-   * Record a new session.
-   * @param id - session id shared with the Host Agent.
-   * @param agent - session-local agent configuration.
-   * @param environment - create-session environment.
-   * @param metadata - string map copied onto the resource.
-   * @param vaultIds - vault ids copied onto the resource.
-   * @returns the stored state.
+   * Track a session.
+   * @param projector - projector holding the session's wire state; for a resumed session, already folded over the log.
+   * @param workspace - absolute cwd used for artifact reads.
+   * @returns the live state.
    */
-  register(
-    id: string,
-    agent: OAIAgent,
-    environment: OAIEnvironmentConfig = { type: 'none' },
-    metadata: Record<string, string> = {},
-    vaultIds: string[] = [],
-  ): RegisteredSessionState {
-    const now = Math.floor(Date.now() / 1000)
+  register(projector: WireProjector, workspace?: string): RegisteredSessionState {
     const state: RegisteredSessionState = {
-      id,
-      created_at: now,
-      last_active_at: now,
-      status: 'idle',
-      error: null,
-      metadata,
-      vault_ids: vaultIds,
-      agent,
-      environment,
-      required_actions: [],
-      usage: null,
-      turns: [],
-      items: [],
+      id: projector.base.sessionId,
+      projector,
+      ...(workspace === undefined ? {} : { workspace }),
     }
-    this.sessions.set(id, state)
+    this.sessions.set(state.id, state)
     return state
   }
 
   /**
-   * Look up mutable session state.
+   * Look up live state.
    * @param id - session id.
-   * @returns the state, or `undefined` when missing.
+   * @returns the state, or `undefined` when the session is not live here.
    */
   get(id: string): RegisteredSessionState | undefined {
     return this.sessions.get(id)
   }
 
   /**
-   * Project mutable state onto the wire session resource.
-   * @param s - stored session state.
-   * @returns the Agents API session object.
-   */
-  project(s: RegisteredSessionState): OAIAgentSession {
-    return {
-      id: s.id,
-      object: 'agent.session',
-      created_at: s.created_at,
-      last_active_at: s.last_active_at,
-      status: s.status,
-      error: s.error,
-      metadata: s.metadata,
-      vault_ids: s.vault_ids,
-      agent: s.agent,
-      environment: s.environment,
-      required_actions: s.required_actions,
-      usage: s.usage,
-    }
-  }
-
-  /**
-   * Project a session resource.
+   * Wire resource of a live session.
    * @param id - session id.
-   * @returns the wire resource, or `undefined` when missing.
+   * @returns the resource, or `undefined` when the session is not live here.
    */
   getOAISession(id: string): OAIAgentSession | undefined {
-    const s = this.sessions.get(id)
-    if (!s) return undefined
-    return this.project(s)
+    return this.sessions.get(id)?.projector.snapshot()
   }
 
   /**
-   * Apply a session-settings update. Only `model`, `reasoning.effort`,
-   * `service_tier`, and `metadata` change; `metadata: null` clears the map.
+   * Replace the configuration the live projection shows after a settings update.
+   * @param id - session id.
+   * @param config - new setup.
+   * @returns the updated resource, or `undefined` when the session is not live here.
+   */
+  applyConfig(id: string, config: SessionConfig): OAIAgentSession | undefined {
+    const projector = this.sessions.get(id)?.projector
+    if (!projector) return undefined
+    projector.base = {
+      ...projector.base,
+      agent: config.agent,
+      environment: config.environment,
+      metadata: config.metadata,
+      vaultIds: config.vault_ids,
+    }
+    return projector.snapshot()
+  }
+
+  /**
+   * Apply a settings update to a live session.
    * @param id - session id.
    * @param params - update body.
-   * @returns the updated resource, or `undefined` when missing.
+   * @returns the updated resource, or `undefined` when the session is not live here or `agent.model` is empty.
    */
   updateSession(id: string, params: UpdateSessionParams): OAIAgentSession | undefined {
-    const s = this.sessions.get(id)
-    if (!s) return undefined
-    if (params.metadata !== undefined) {
-      s.metadata = params.metadata ?? {}
-    }
-    const patch = params.agent
-    if (patch) {
-      if (patch.model !== undefined) {
-        if (patch.model === '' || patch.model === null) return undefined
-        s.agent = { ...s.agent, model: patch.model, updated_at: Math.floor(Date.now() / 1000) }
-      }
-      if (patch.service_tier !== undefined) {
-        s.agent = {
-          ...s.agent,
-          updated_at: Math.floor(Date.now() / 1000),
-          ...(patch.service_tier === null ? { service_tier: null } : { service_tier: patch.service_tier }),
-        }
-      }
-      if (patch.reasoning !== undefined) {
-        const effort = patch.reasoning.effort
-        const existing = s.agent.reasoning ?? {}
-        s.agent = {
-          ...s.agent,
-          updated_at: Math.floor(Date.now() / 1000),
-          reasoning: {
-            ...existing,
-            ...(effort === undefined ? {} : { effort }),
-          },
-        }
-      }
-    }
-    s.last_active_at = Math.floor(Date.now() / 1000)
-    return this.getOAISession(id)
+    const base = this.sessions.get(id)?.projector.base
+    if (!base) return undefined
+    const config = applySessionUpdate(
+      { agent: base.agent, environment: base.environment, metadata: base.metadata, vault_ids: base.vaultIds },
+      params,
+    )
+    return config === undefined ? undefined : this.applyConfig(id, config)
   }
 
   /**
@@ -200,8 +131,6 @@ export class SessionRegistry {
    */
   delete(id: string): boolean {
     this.subscribers.delete(id)
-    this.replay.delete(id)
-    this.nextEventId.delete(id)
     for (const key of [...this.subagents.keys()]) {
       if (key.startsWith(`${id}\0`)) this.subagents.delete(key)
     }
@@ -219,154 +148,47 @@ export class SessionRegistry {
   }
 
   /**
-   * Record a new in-progress turn.
+   * Id of the open turn.
    * @param sessionId - session id.
-   * @returns the turn, or `undefined` when the session is missing.
+   * @returns the turn id, or `undefined` when no turn is open or the session is not live.
    */
-  createTurn(sessionId: string): OAITurn | undefined {
-    const s = this.sessions.get(sessionId)
-    if (!s) return undefined
-    return this.openTurn(s)
+  getCurrentTurnId(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.projector.currentTurnId
   }
 
   /**
-   * Open a new in-progress turn on already-loaded session state.
-   * @param s - stored session state.
-   * @returns the new turn.
-   */
-  openTurn(s: RegisteredSessionState): OAITurn {
-    const now = Math.floor(Date.now() / 1000)
-    const turn: OAITurn = {
-      id: `turn_${randomUUID().replaceAll('-', '')}`,
-      object: 'agent.session.turn',
-      session_id: s.id,
-      agent_id: s.agent.id,
-      status: 'in_progress',
-      created_at: now,
-      started_at: now,
-      completed_at: null,
-      subagent_id: null,
-      error: null,
-      usage: null,
-    }
-    s.turns.push(turn)
-    s.currentTurnId = turn.id
-    s.status = 'in_progress'
-    s.last_active_at = now
-    return turn
-  }
-
-  /**
-   * Return the open turn, if any.
+   * Project one Session event and fan its frames out. Frame ids are the
+   * projector's, so they equal the ids a fold of the log assigns.
    * @param sessionId - session id.
-   * @returns the current turn.
+   * @param event - committed Session event.
+   * @returns the projection step, or `undefined` when the session is not live here.
    */
-  getCurrentTurn(sessionId: string): OAITurn | undefined {
-    const s = this.sessions.get(sessionId)
-    if (!s?.currentTurnId) return undefined
-    return s.turns.find(t => t.id === s.currentTurnId)
+  apply(sessionId: string, event: SessionEvent): WireStep | undefined {
+    const projector = this.sessions.get(sessionId)?.projector
+    if (!projector) return undefined
+    const step = projector.apply(event)
+    for (const frame of step.frames) this.fanOut(sessionId, frame.event, frame.id)
+    return step
   }
 
   /**
-   * Mark a turn completed and return the session to idle.
+   * Fan out an event that is not a Session log fact (a dispatch error, a
+   * connect-time status snapshot). It has no `id`, is not replayed, and does not
+   * move later ids.
    * @param sessionId - session id.
-   * @param turnId - turn id.
-   * @param usage - recorded usage, when known.
-   * @returns the completed turn.
+   * @param event - wire event.
    */
-  completeTurn(sessionId: string, turnId: string, usage?: OAITokenUsage | null): OAITurn | undefined {
-    return this.finishTurn(sessionId, turnId, 'completed', usage)
-  }
-
-  /**
-   * Mark a turn failed.
-   * @param sessionId - session id.
-   * @param turnId - turn id.
-   * @param error - failure identity.
-   * @returns the failed turn.
-   */
-  failTurn(sessionId: string, turnId: string, error: { code: string; message: string }): OAITurn | undefined {
-    return this.finishTurn(sessionId, turnId, 'failed', null, error)
-  }
-
-  /**
-   * Mark a turn cancelled and return the session to idle.
-   * @param sessionId - session id.
-   * @param turnId - turn id.
-   * @returns the cancelled turn.
-   */
-  cancelTurn(sessionId: string, turnId: string): OAITurn | undefined {
-    return this.finishTurn(sessionId, turnId, 'cancelled')
-  }
-
-  /**
-   * List turns with cursor pagination.
-   * @param sessionId - session id.
-   * @param opts - limit, after, order.
-   * @returns one page of turns.
-   */
-  listTurns(sessionId: string, opts: ListQuery): OAIListResponse<OAITurn> {
-    const s = this.sessions.get(sessionId)
-    return paginate(s ? s.turns : [], opts, turn => turn.created_at)
-  }
-
-  /**
-   * Retrieve one turn.
-   * @param sessionId - session id.
-   * @param turnId - turn id.
-   * @returns the turn, or `undefined` when missing.
-   */
-  getTurn(sessionId: string, turnId: string): OAITurn | undefined {
-    const s = this.sessions.get(sessionId)
-    return s?.turns.find(t => t.id === turnId)
-  }
-
-  /**
-   * Append projected items from a live Session event.
-   * @param sessionId - session id.
-   * @param items - items to store.
-   */
-  appendItems(sessionId: string, items: readonly StoredSessionItem[]): void {
-    const s = this.sessions.get(sessionId)
-    if (!s || items.length === 0) return
-    const parentItems = items.filter(item => typeof item.subagent_id !== 'string' || item.subagent_id === '')
-    if (parentItems.length === 0) return
-    s.items.push(...parentItems)
-    s.last_active_at = Math.floor(Date.now() / 1000)
-  }
-
-  /**
-   * List saved items with cursor pagination. Default order is oldest-first.
-   * @param sessionId - session id.
-   * @param opts - limit, after, order.
-   * @returns one page of items.
-   */
-  listItems(sessionId: string, opts: ListQuery): OAIListResponse<StoredSessionItem> {
-    const s = this.sessions.get(sessionId)
-    const query = { ...opts, order: opts.order ?? 'asc' }
-    const items = (s ? s.items : []).filter(item => typeof item.subagent_id !== 'string' || item.subagent_id === '')
-    return paginate(items, query)
-  }
-
-  /**
-   * List sessions with cursor pagination.
-   * @param opts - limit, after, order.
-   * @returns one page of sessions.
-   */
-  list(opts: ListQuery): OAIListResponse<OAIAgentSession> {
-    const all = [...this.sessions.keys()]
-      .map(id => this.getOAISession(id))
-      .filter((session): session is OAIAgentSession => session !== undefined)
-    return paginate(all, opts, session => session.created_at)
+  emitEphemeral(sessionId: string, event: OAISessionEvent): void {
+    this.fanOut(sessionId, event, undefined)
   }
 
   /**
    * Subscribe to the session's output event stream.
    * @param sessionId - session id.
-   * @param listener - callback for each event.
+   * @param listener - callback for each frame.
    * @returns disposer that removes the listener.
    */
-  subscribe(sessionId: string, listener: (event: OAISessionEvent, sseId: number) => void): () => void {
+  subscribe(sessionId: string, listener: SessionListener): () => void {
     let set = this.subscribers.get(sessionId)
     if (!set) {
       set = new Set()
@@ -379,39 +201,17 @@ export class SessionRegistry {
     }
   }
 
-  /**
-   * Record an event, then fan it out. The numeric id is the SSE `id:` field.
-   * Listener throws are ignored so one disconnected client cannot drop the rest.
-   * @param sessionId - session id.
-   * @param event - output event.
-   * @returns the SSE id assigned to this event.
-   */
-  emit(sessionId: string, event: OAISessionEvent): number {
-    const id = (this.nextEventId.get(sessionId) ?? 0) + 1
-    this.nextEventId.set(sessionId, id)
-    const frames = this.replay.get(sessionId) ?? []
-    frames.push({ id, event })
-    if (frames.length > REPLAY_LIMIT) frames.splice(0, frames.length - REPLAY_LIMIT)
-    this.replay.set(sessionId, frames)
+  /** Listener throws are ignored so one disconnected client cannot drop the rest. */
+  private fanOut(sessionId: string, event: OAISessionEvent, sseId: number | undefined): void {
     const set = this.subscribers.get(sessionId)
-    if (!set) return id
+    if (!set) return
     for (const listener of set) {
       try {
-        listener(event, id)
+        listener(event, sseId)
       } catch {
         // The client write failed; remaining subscribers must still receive the event.
       }
     }
-    return id
-  }
-
-  /**
-   * Return buffered events newer than `Last-Event-ID`.
-   * @param sessionId - session id.
-   * @param lastId - last id the client already has; `0` replays the buffer.
-   */
-  replayAfter(sessionId: string, lastId: number): ReplayFrame[] {
-    return (this.replay.get(sessionId) ?? []).filter(frame => frame.id > lastId)
   }
 
   /**
@@ -482,7 +282,7 @@ export class SessionRegistry {
       id: `turn_${randomUUID().replaceAll('-', '')}`,
       object: 'agent.session.turn',
       session_id: childId,
-      agent_id: parent.agent.id,
+      agent_id: parent.projector.base.agent.id,
       status: 'in_progress',
       created_at: now,
       started_at: now,
@@ -571,59 +371,5 @@ export class SessionRegistry {
    */
   listChildItems(parentId: string, childId: string): StoredSessionItem[] | undefined {
     return this.subagents.get(`${parentId}\0${childId}`)?.items
-  }
-
-  /**
-   * Replace `required_actions` and derive session status for parked function calls.
-   *
-   * When actions are non-empty the session is `requires_action`. When they clear
-   * while a turn is still open the session returns to `in_progress`; otherwise
-   * idle/failed are left unchanged.
-   *
-   * @param sessionId - session id.
-   * @param actions - pending function (or other) required actions.
-   * @returns the projected session, or `undefined` when missing.
-   */
-  syncRequiredActions(sessionId: string, actions: readonly OAIRequiredAction[]): OAIAgentSession | undefined {
-    const s = this.sessions.get(sessionId)
-    if (!s) return undefined
-    s.required_actions = [...actions]
-    s.last_active_at = Math.floor(Date.now() / 1000)
-    if (actions.length > 0) {
-      s.status = 'requires_action'
-    } else if (s.currentTurnId !== undefined && s.status === 'requires_action') {
-      s.status = 'in_progress'
-    }
-    return this.project(s)
-  }
-
-  private finishTurn(
-    sessionId: string,
-    turnId: string,
-    status: 'completed' | 'failed' | 'cancelled',
-    usage?: OAITokenUsage | null,
-    error?: { code: string; message: string },
-  ): OAITurn | undefined {
-    const s = this.sessions.get(sessionId)
-    if (!s) return undefined
-    const turn = s.turns.find(t => t.id === turnId)
-    if (!turn) return undefined
-    const now = Math.floor(Date.now() / 1000)
-    turn.status = status
-    turn.completed_at = now
-    if (usage) {
-      turn.usage = usage
-      s.usage = usage
-    }
-    if (error) {
-      turn.error = error
-      s.error = error.message
-    }
-    if (s.currentTurnId === turnId) {
-      delete s.currentTurnId
-      s.status = status === 'failed' ? 'failed' : 'idle'
-    }
-    s.last_active_at = now
-    return turn
   }
 }

@@ -15,6 +15,7 @@ import { sanitizeRelativePath } from '../src/artifacts.ts'
 import { resolveRuntimeConfig } from '../src/runtime-config.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
 import { MemoryStore } from './support/memory-store.ts'
+import { testGatewayOptions } from './support/fake-session-query.ts'
 
 vi.mock('@deepseek-ai/dsh-mcp-client', () => ({
   Config: (input: Record<string, unknown>) => ({ ...input }),
@@ -112,7 +113,7 @@ describe('local config', () => {
 describe('CoreAgent routes on the plugin gateway', () => {
   it('returns a local environment when Codebox is unset and rejects sandbox sessions', async () => {
     const environments = createLocalProvider(await tempDir())
-    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), { environments })
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), testGatewayOptions(environments))
     const root = await listen((req, res) => api.handle(req, res))
     const created = await fetch(`${root}/v1/agents/environments`, {
       method: 'POST',
@@ -155,7 +156,7 @@ describe('CoreAgent routes on the plugin gateway', () => {
       created_at: 1,
     })
     const create = vi.fn(async () => undefined)
-    const api = new AgentsGateway(fakeContext({ create }), openAuthenticator, '/v1', store, new SessionRegistry(), { environments: createLocalProvider(await tempDir()) })
+    const api = new AgentsGateway(fakeContext({ create }), openAuthenticator, '/v1', store, new SessionRegistry(), testGatewayOptions(createLocalProvider(await tempDir())))
     const root = await listen((req, res) => api.handle(req, res))
     const session = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -172,7 +173,7 @@ describe('CoreAgent routes on the plugin gateway', () => {
   it('rejects artifact paths that escape the session workspace', async () => {
     const workspace = await tempDir()
     await writeFile(join(workspace, 'note.txt'), 'hello')
-    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), { environments: createLocalProvider(join(tmpdir(), 'agentry-surface-spec')) })
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), testGatewayOptions(createLocalProvider(join(tmpdir(), 'agentry-surface-spec'))))
     const root = await listen((req, res) => api.handle(req, res))
     const session = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -192,7 +193,7 @@ describe('CoreAgent routes on the plugin gateway', () => {
 
   it('keeps subagent turns and items off the parent list', async () => {
     const registry = new SessionRegistry()
-    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), registry, { environments: createLocalProvider(join(tmpdir(), 'agentry-surface-spec')) })
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), registry, testGatewayOptions(createLocalProvider(join(tmpdir(), 'agentry-surface-spec'))))
     const root = await listen((req, res) => api.handle(req, res))
     const session = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -219,9 +220,8 @@ describe('CoreAgent routes on the plugin gateway', () => {
     expect(childTurns.data[0]).toMatchObject({ subagent_id: 'child_1', status: 'completed' })
   })
 
-  it('replays SSE events after Last-Event-ID', async () => {
-    const registry = new SessionRegistry()
-    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), registry, { environments: createLocalProvider(join(tmpdir(), 'agentry-surface-spec')) })
+  it('numbers the created event 1 on a streamed create', async () => {
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), testGatewayOptions(createLocalProvider(join(tmpdir(), 'agentry-surface-spec'))))
     const root = await listen((req, res) => api.handle(req, res))
     const created = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -231,21 +231,11 @@ describe('CoreAgent routes on the plugin gateway', () => {
     const reader = created.body?.getReader()
     const first = new TextDecoder().decode((await reader?.read())?.value)
     await reader?.cancel()
-    const sessionId = /"id":"(sess_[^"]+)"/u.exec(first)?.[1]
-    expect(first).toContain('id: 1')
-    expect(sessionId).toBeTruthy()
-    const resume = await fetch(`${root}/v1/agents/sessions/${sessionId ?? ''}/events`, {
-      headers: { 'Last-Event-ID': '1' },
-    })
-    const resumeReader = resume.body?.getReader()
-    const resumed = new TextDecoder().decode((await resumeReader?.read())?.value)
-    await resumeReader?.cancel()
-    expect(resumed).toContain('id: 2')
-    expect(resumed.includes('id: 1\n')).toBe(false)
+    expect(first).toMatch(/^id: 1\nevent: agent\.session\.created\n/u)
   })
 
   it('masks the tool catalog only when session_id is set', async () => {
-    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), { environments: createLocalProvider(join(tmpdir(), 'agentry-surface-spec')) })
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), testGatewayOptions(createLocalProvider(join(tmpdir(), 'agentry-surface-spec'))))
     const root = await listen((req, res) => api.handle(req, res))
     const full = await fetch(`${root}/v1/agents/tools`)
     expect((await full.json() as { data: Array<{ name: string }> }).data.map(row => row.name)).toEqual(['web_search', 'web_fetch'])

@@ -11,7 +11,7 @@ import { isAbsolute, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-import type { AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -37,28 +37,38 @@ import { mountFunctionTools, validateMountableTools } from './mount-function-too
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { SessionRegistry } from './session-registry.ts'
+import { WireProjector, type ProjectionBase } from './history/projector.ts'
+import type { SessionHistory } from './history/session-history.ts'
+import { NO_STORED_CONFIG } from './recovery.ts'
+import { applySessionUpdate, baseOf, configOf, sessionFromRow } from './session-resource.ts'
 import { writeEvent, writeSSEHeaders } from './sse.ts'
 import type { ArtifactS3Config } from './artifacts.ts'
 import { getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath } from './artifacts.ts'
 import { directorySegment } from './environment/local.ts'
 import type { CreateEnvironmentInput, EnvironmentProvider } from './environment/provider.ts'
 import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, EnvironmentTemplateConfig } from './environment-types.ts'
-import type { RegisteredSessionState, SubagentState } from './session-registry.ts'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SubagentState } from './session-registry.ts'
 import {
   StoreUnavailableError,
   encodeSessionCursor,
   guardStore,
+  type SessionIndexRow,
   type Store,
 } from './store/store.ts'
 import type {
   CreateAgentParams,
   CreateSessionParams,
   OAIAgent,
+  OAIAgentSession,
   OAIEnvironmentConfig,
   OAIFunctionTool,
   OAIHostToolsConfig,
   OAIInputEvent,
+  OAISessionEvent,
   OAIToolResultInputEvent,
+  SessionConfig,
+  SessionStatus,
   UpdateAgentParams,
   UpdateSessionParams,
 } from './types.ts'
@@ -82,8 +92,10 @@ interface Route {
 export interface GatewayOptions {
   /** Workspace backend for `/agents/environments`. */
   environments: EnvironmentProvider
-  /** Root of `<owner>/<session>/` default session workspaces; omitted to run sessions in the host cwd. */
-  workspacesRoot?: string
+  /** Root of `<owner>/<session>/` default session workspaces. */
+  workspacesRoot: string
+  /** Reads items, turns, and wire events from the Session log. */
+  history: SessionHistory
   artifacts?: ArtifactS3Config
 }
 
@@ -98,8 +110,13 @@ export interface GatewayOptions {
 export class AgentsGateway {
   private readonly handles = new Map<string, AgentHandle>()
   private readonly pendingBySession = new Map<string, PendingFunctionCalls>()
+  /** Tail of each session's status writes, so writes land in the order the statuses were produced. */
+  private readonly statusWrites = new Map<string, Promise<void>>()
+  /** Resumes in flight, so two requests do not resume one session twice. */
+  private readonly resuming = new Map<string, Promise<void>>()
   private readonly environments: EnvironmentProvider
-  private readonly workspacesRoot: string | undefined
+  private readonly workspacesRoot: string
+  private readonly history: SessionHistory
   private readonly artifacts: ArtifactS3Config | undefined
   private readonly routes: Route[]
   #store: Store | undefined
@@ -126,6 +143,7 @@ export class AgentsGateway {
     if (store !== undefined) this.attachStore(store)
     this.environments = options.environments
     this.workspacesRoot = options.workspacesRoot
+    this.history = options.history
     this.artifacts = options.artifacts
     this.routes = [
       { method: 'POST', pattern: '/agents', handler: (req, res, _url, _params, p) => this.createAgent(req, res, p.owner) },
@@ -301,9 +319,9 @@ export class AgentsGateway {
       source: 'host' as const,
     }))
     if (sessionId) {
-      const state = await this.requireSession(res, owner, sessionId)
-      if (!state) return
-      data = maskHostCatalog(data, state.agent.host_tools)
+      const row = await this.requireSession(res, owner, sessionId)
+      if (!row) return
+      data = maskHostCatalog(data, configOf(row).agent.host_tools)
     }
     json(res, 200, { object: 'list', data })
   }
@@ -405,40 +423,33 @@ export class AgentsGateway {
       badRequest(res, errorMessage(error))
       return
     }
-    const pending = new PendingFunctionCalls(sessionId, this.sessionRegistry)
-    const functionTools = resolved.tools.filter(
-      (tool): tool is OAIFunctionTool => tool.type === 'function',
-    )
+    const pending = new PendingFunctionCalls()
+    const config: SessionConfig = {
+      agent: resolved,
+      environment,
+      metadata: body.metadata ?? {},
+      vault_ids: body.vault_ids ?? [],
+    }
+    const now = new Date()
+    const base: ProjectionBase = {
+      sessionId,
+      createdAt: Math.floor(now.getTime() / 1000),
+      agent: config.agent,
+      environment: config.environment,
+      metadata: config.metadata,
+      vaultIds: config.vault_ids,
+    }
+    const projector = new WireProjector(base, false)
 
     try {
-      const defaults = this.ctx.agentDefaultModel.currentSelection()
-      const provider = await providerForModel(this.ctx, resolved.model, defaults.provider)
       const handle = await this.ctx.agents.create({
         sessionId,
         meta: { cwd },
-        agentOptions: {
-          provider,
-          model: resolved.model,
-          ...(defaults.reasoningEffort === undefined
-            ? {}
-            : { reasoningEffort: defaults.reasoningEffort }),
-        },
-        setup: async (agentCtx) => {
-          await mountDefaultPreset(agentCtx)
-          mountAgentInstructions(agentCtx, resolved.instructions)
-          applyHostToolsRestrict(agentCtx, resolved.host_tools)
-          mountFunctionTools(
-            agentCtx,
-            functionTools,
-            pending,
-            () => this.sessionRegistry.getCurrentTurn(sessionId)?.id ?? 'turn_default',
-          )
-          await mountMcpTools(agentCtx, mcpToolsFrom(resolved.tools), cwd)
-        },
+        agentOptions: await this.agentOptionsFor(resolved),
+        setup: this.buildAgentSetup(resolved, pending, cwd),
       })
       this.handles.set(sessionId, handle)
       this.pendingBySession.set(sessionId, pending)
-      const now = new Date()
       await this.store.sessions.insert({
         id: sessionId,
         ownerId: owner,
@@ -449,6 +460,7 @@ export class AgentsGateway {
         lastError: null,
         model: resolved.model,
         reasoningEffort: resolved.reasoning?.effort ?? null,
+        body: config,
         createdAt: now,
         updatedAt: now,
       })
@@ -479,19 +491,17 @@ export class AgentsGateway {
       return
     }
 
-    const state = this.sessionRegistry.register(
-      sessionId,
-      resolved,
-      environment,
-      body.metadata ?? {},
-      body.vault_ids ?? [],
-    )
-    this.sessionRegistry.noteWorkspace(sessionId, cwd)
-    const oaiSession = this.sessionRegistry.project(state)
+    this.sessionRegistry.register(projector, cwd)
+    const oaiSession = projector.snapshot()
     const stream = body.stream === true
       || url.searchParams.get('stream') === 'true'
       || (req.headers.accept ?? '').includes('text/event-stream')
     const userText = userTextFromInput(body.input)
+    const startTurn = (): void => {
+      void this.triggerTurn(sessionId, userText!).catch((error: unknown) => {
+        this.emitError(sessionId, error)
+      })
+    }
 
     if (stream) {
       writeSSEHeaders(res)
@@ -501,22 +511,11 @@ export class AgentsGateway {
       req.on('close', () => {
         unsubscribe()
       })
-      this.sessionRegistry.emit(sessionId, {
-        type: 'agent.session.created',
-        event_id: mintEventId(),
-        session: oaiSession,
-      })
+      writeEvent(res, projector.created.event.type, projector.created.event, projector.created.id)
       if (userText !== undefined && userText !== '') {
-        void this.triggerTurn(sessionId, userText).catch((error: unknown) => {
-          this.sessionRegistry.emit(sessionId, {
-            type: 'error',
-            event_id: mintEventId(),
-            session_id: sessionId,
-            error: { message: errorMessage(error) },
-          })
-        })
+        startTurn()
       } else {
-        this.sessionRegistry.emit(sessionId, {
+        this.sessionRegistry.emitEphemeral(sessionId, {
           type: 'agent.session.idle',
           event_id: mintEventId(),
           session: oaiSession,
@@ -525,24 +524,21 @@ export class AgentsGateway {
       return
     }
 
-    if (userText !== undefined && userText !== '') {
-      void this.triggerTurn(sessionId, userText).catch((error: unknown) => {
-        this.sessionRegistry.emit(sessionId, {
-          type: 'error',
-          event_id: mintEventId(),
-          session_id: sessionId,
-          error: { message: errorMessage(error) },
-        })
-      })
-    }
-    json(res, 200, this.sessionPayload(sessionId) ?? { ...oaiSession, session: oaiSession, items: [], turns: [] })
+    if (userText !== undefined && userText !== '') startTurn()
+    json(res, 200, await this.sessionPayload(oaiSession, base))
   }
 
-  /**
-   * Newest first. `after` names the last session of the previous page;
-   * `first_id` and `last_id` come from the index page so paging advances
-   * past rows whose live state is gone.
-   */
+  /** Wire `error` event for a dispatch failure. It is not a Session log fact, so it carries no `id`. */
+  private emitError(sessionId: string, error: unknown): void {
+    this.sessionRegistry.emitEphemeral(sessionId, {
+      type: 'error',
+      event_id: mintEventId(),
+      session_id: sessionId,
+      error: { message: errorMessage(error) },
+    })
+  }
+
+  /** Newest first, from index rows only. `after` names the last session of the previous page. */
   private async listSessions(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
     const query = listQuery(url)
     const after = query.after === undefined ? undefined : await this.store.sessions.get(query.after, owner)
@@ -553,9 +549,7 @@ export class AgentsGateway {
     })
     json(res, 200, {
       object: 'list',
-      data: page.data
-        .map(row => this.sessionRegistry.getOAISession(row.id))
-        .filter(session => session !== undefined),
+      data: page.data.map(row => this.sessionRegistry.getOAISession(row.id) ?? sessionFromRow(row)),
       first_id: page.data[0]?.id ?? null,
       last_id: page.data.at(-1)?.id ?? null,
       has_more: page.nextCursor !== null,
@@ -563,42 +557,44 @@ export class AgentsGateway {
   }
 
   /**
-   * Find a live session the owner holds, or answer 404.
+   * Find the session index row the owner holds, or answer 404.
    * @param res - response that receives the 404.
    * @param owner - calling principal.
    * @param sessionId - session id from the route.
-   * @returns the live state, or `undefined` after a 404 was written.
+   * @returns the row, or `undefined` after a 404 was written.
    */
-  private async requireSession(res: ServerResponse, owner: OwnerId, sessionId: string): Promise<RegisteredSessionState | undefined> {
-    const state = await this.store.sessions.get(sessionId, owner) === undefined ? undefined : this.sessionRegistry.get(sessionId)
-    if (!state) notFound(res, `Session "${sessionId}" not found`)
-    return state
+  private async requireSession(res: ServerResponse, owner: OwnerId, sessionId: string): Promise<SessionIndexRow | undefined> {
+    const row = await this.store.sessions.get(sessionId, owner)
+    if (!row) notFound(res, `Session "${sessionId}" not found`)
+    return row
   }
 
   private async getSession(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const sessionId = routeParam(params, 'session_id')
-    const state = await this.requireSession(res, owner, sessionId)
-    if (!state) return
-    json(res, 200, this.sessionRegistry.project(state))
+    const row = await this.requireSession(res, owner, routeParam(params, 'session_id'))
+    if (!row) return
+    json(res, 200, this.sessionRegistry.getOAISession(row.id) ?? sessionFromRow(row))
   }
 
   private async updateSession(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    const state = await this.requireSession(res, owner, sessionId)
-    if (!state) return
+    const row = await this.requireSession(res, owner, sessionId)
+    if (!row) return
     const body = await readBody(req) as unknown as UpdateSessionParams
-    if (body.agent?.model === null || body.agent?.model === '') {
+    const next = applySessionUpdate(configOf(row), body)
+    if (next === undefined) {
       badRequest(res, 'Field "agent.model" cannot be null or empty')
       return
     }
-    const current = state.agent
-    const requestedEffort = body.agent?.reasoning?.effort
-    await this.store.sessions.update(sessionId, owner, {
-      model: body.agent?.model ?? current.model,
-      reasoningEffort: requestedEffort !== undefined ? requestedEffort : current.reasoning?.effort ?? null,
+    const updated = await this.store.sessions.update(sessionId, owner, {
+      model: next.agent.model,
+      reasoningEffort: next.agent.reasoning?.effort ?? null,
+      body: next,
     })
-    const session = this.sessionRegistry.updateSession(sessionId, body)
-    json(res, 200, session)
+    if (!updated) {
+      notFound(res, `Session "${sessionId}" not found`)
+      return
+    }
+    json(res, 200, this.sessionRegistry.applyConfig(sessionId, next) ?? sessionFromRow(updated))
   }
 
   private async deleteSession(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -609,6 +605,7 @@ export class AgentsGateway {
     this.pendingBySession.get(sessionId)?.rejectAll(new Error(`Session "${sessionId}" was deleted`))
     this.pendingBySession.delete(sessionId)
     this.sessionRegistry.delete(sessionId)
+    this.statusWrites.delete(sessionId)
     const handle = this.handles.get(sessionId)
     this.handles.delete(sessionId)
     if (handle) {
@@ -623,15 +620,28 @@ export class AgentsGateway {
 
   private async postEvents(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    const owned = await this.store.sessions.get(sessionId, owner)
-    const state = owned === undefined ? undefined : this.sessionRegistry.get(sessionId)
-    if (!state || !this.ctx.sessions.get(SessionId(sessionId))) {
+    const row = await this.store.sessions.get(sessionId, owner)
+    if (!row) {
       notFound(res, `Session "${sessionId}" not found`)
       return
     }
-    const body = await readBody(req)
     try {
-      for (const evt of inputEventsFromBody(body)) {
+      await this.ensureLive(row)
+    } catch (error: unknown) {
+      if (error instanceof AgentsApiRequestError) {
+        json(res, error.status, { error: { type: 'invalid_request_error', message: error.message, code: error.code } })
+        return
+      }
+      json(res, 500, { error: { type: 'server_error', message: errorMessage(error), code: 'session_resume_failed' } })
+      return
+    }
+    if (!this.ctx.sessions.get(SessionId(sessionId))) {
+      notFound(res, `Session "${sessionId}" not found`)
+      return
+    }
+    const input = await readBody(req)
+    try {
+      for (const evt of inputEventsFromBody(input)) {
         await this.applyInputEvent(sessionId, evt)
       }
     } catch (error: unknown) {
@@ -654,74 +664,222 @@ export class AgentsGateway {
       })
       return
     }
-    const payload = this.sessionPayload(sessionId)
-    json(res, 200, payload ?? { session: this.sessionRegistry.project(state), items: [], turns: [] })
+    json(res, 200, await this.sessionPayload(this.sessionRegistry.getOAISession(sessionId) ?? sessionFromRow(row), baseOf(row)))
   }
 
   /** Session plus the items and turns CoreWork reads after create and follow-up. */
-  private sessionPayload(sessionId: string): {
-    session: ReturnType<SessionRegistry['project']>
-    items: ReturnType<SessionRegistry['listItems']>['data']
-    turns: ReturnType<SessionRegistry['listTurns']>['data']
-  } | undefined {
-    const session = this.sessionRegistry.getOAISession(sessionId)
-    if (!session) return undefined
+  private async sessionPayload(
+    session: OAIAgentSession,
+    base: ProjectionBase,
+  ): Promise<OAIAgentSession & { session: OAIAgentSession; items: unknown[]; turns: unknown[] }> {
     const page = { limit: 100, order: 'asc' as const }
-    return {
-      ...session,
-      session,
-      items: this.sessionRegistry.listItems(sessionId, page).data,
-      turns: this.sessionRegistry.listTurns(sessionId, page).data,
-    }
+    const [items, turns] = await Promise.all([this.history.items(base, page), this.history.turns(base, page)])
+    return { ...session, session, items: items.data, turns: turns.data }
   }
 
   private async streamEvents(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    const state = await this.requireSession(res, owner, sessionId)
-    if (!state) return
+    const row = await this.requireSession(res, owner, sessionId)
+    if (!row) return
     writeSSEHeaders(res)
     const header = req.headers['last-event-id']
     const raw = Array.isArray(header) ? header[0] : header
-    const lastId = raw === undefined || raw === '' ? undefined : Number(raw)
-    if (lastId !== undefined) {
-      for (const frame of this.sessionRegistry.replayAfter(sessionId, Number.isFinite(lastId) ? lastId : 0)) {
-        writeEvent(res, frame.event.type, frame.event, frame.id)
-      }
+    const parsed = raw === undefined || raw === '' ? undefined : Number(raw)
+    const lastId = parsed === undefined ? undefined : Number.isFinite(parsed) ? parsed : 0
+
+    let open = true
+    const write = (evt: OAISessionEvent, sseId: number | undefined): void => {
+      if (open) writeEvent(res, evt.type, evt, sseId)
     }
-    const unsubscribe = this.sessionRegistry.subscribe(sessionId, (evt, sseId) => {
-      writeEvent(res, evt.type, evt, sseId)
-    })
-    req.on('close', () => {
-      unsubscribe()
-    })
     if (lastId === undefined) {
-      const session = this.sessionRegistry.project(state)
-      const type = state.status === 'requires_action'
+      const unsubscribe = this.sessionRegistry.subscribe(sessionId, write)
+      req.on('close', () => {
+        open = false
+        unsubscribe()
+      })
+      const session = this.sessionRegistry.getOAISession(sessionId) ?? sessionFromRow(row)
+      const type = session.status === 'requires_action'
         ? 'agent.session.requires_action'
-        : state.status === 'in_progress'
+        : session.status === 'in_progress'
           ? 'agent.session.in_progress'
           : 'agent.session.idle'
-      this.sessionRegistry.emit(sessionId, { type, event_id: mintEventId(), session })
+      write({ type, event_id: mintEventId(), session }, undefined)
+      return
     }
+
+    // Subscribe before folding: frames produced while the log is read are buffered, then flushed after the replayed ones.
+    let replaying = true
+    const buffered: Array<{ evt: OAISessionEvent; sseId: number | undefined }> = []
+    const unsubscribe = this.sessionRegistry.subscribe(sessionId, (evt, sseId) => {
+      if (replaying) buffered.push({ evt, sseId })
+      else write(evt, sseId)
+    })
+    req.on('close', () => {
+      open = false
+      unsubscribe()
+    })
+    let lastWritten = lastId
+    try {
+      for (const frame of await this.history.wireEvents(baseOf(row), lastId)) {
+        write(frame.event, frame.id)
+        lastWritten = frame.id
+      }
+    } catch (error: unknown) {
+      unsubscribe()
+      open = false
+      this.ctx.logger.warn(`agents-api: replay of ${sessionId} failed: ${errorMessage(error)}`)
+      res.end()
+      return
+    }
+    for (const { evt, sseId } of buffered) {
+      if (sseId !== undefined && sseId <= lastWritten) continue
+      write(evt, sseId)
+      if (sseId !== undefined) lastWritten = sseId
+    }
+    replaying = false
+  }
+
+  /**
+   * Record a status change in the session index. Writes for one session run in
+   * the order the statuses were produced; a failed write is logged and never
+   * thrown into the Session event listener that produced it.
+   * @param sessionId - session id.
+   * @param status - new status.
+   * @param error - error text for `failed`, else `null`.
+   */
+  recordStatus(sessionId: string, status: SessionStatus, error: string | null): void {
+    const store = this.#store
+    if (store === undefined) return
+    const previous = this.statusWrites.get(sessionId) ?? Promise.resolve()
+    const next = previous
+      .then(() => store.sessions.update(sessionId, 'any', { status, lastError: error }))
+      .then(() => undefined, (failure: unknown) => {
+        this.ctx.logger.warn(`agents-api: status write for ${sessionId} failed: ${errorMessage(failure)}`)
+      })
+    this.statusWrites.set(sessionId, next)
+  }
+
+  /**
+   * Resolves when every status write requested so far has finished.
+   * @returns a promise that never rejects.
+   */
+  async statusWritesSettled(): Promise<void> {
+    await Promise.all([...this.statusWrites.values()])
+  }
+
+  /**
+   * Project one Session event of a live session: fan its frames out and write
+   * the status it produced.
+   * @param sessionId - session id.
+   * @param event - committed Session event.
+   */
+  applySessionEvent(sessionId: string, event: SessionEvent): void {
+    const step = this.sessionRegistry.apply(sessionId, event)
+    if (step?.status) this.recordStatus(sessionId, step.status.status, step.status.error)
+  }
+
+  /**
+   * Model route a session's agent starts with: the profile default, or the
+   * first provider that lists the model.
+   * @param agent - session agent.
+   */
+  private async agentOptionsFor(agent: OAIAgent): Promise<{ provider: string; model: string; reasoningEffort?: NonNullable<ReturnType<Context['agentDefaultModel']['currentSelection']>['reasoningEffort']> }> {
+    const defaults = this.ctx.agentDefaultModel.currentSelection()
+    const provider = await providerForModel(this.ctx, agent.model, defaults.provider)
+    return {
+      provider,
+      model: agent.model,
+      ...(defaults.reasoningEffort === undefined ? {} : { reasoningEffort: defaults.reasoningEffort }),
+    }
+  }
+
+  /**
+   * Agent composition shared by create and resume.
+   * @param resolved - session agent.
+   * @param pending - the session's parked function calls.
+   * @param cwd - session working directory.
+   * @returns the `agents.create` / `agents.resume` setup callback.
+   */
+  private buildAgentSetup(resolved: OAIAgent, pending: PendingFunctionCalls, cwd: string): AgentSetup {
+    const functionTools = resolved.tools.filter(
+      (tool): tool is OAIFunctionTool => tool.type === 'function',
+    )
+    return async (agentCtx) => {
+      await mountDefaultPreset(agentCtx)
+      mountAgentInstructions(agentCtx, resolved.instructions)
+      applyHostToolsRestrict(agentCtx, resolved.host_tools)
+      mountFunctionTools(agentCtx, functionTools, pending)
+      await mountMcpTools(agentCtx, mcpToolsFrom(resolved.tools), cwd)
+    }
+  }
+
+  /**
+   * Rebuild the agent of a session that is not live in this process: fold its
+   * Session log into a projector, register it, then resume the agent. Frame ids
+   * after the resume continue from the fold, so they equal what a later replay
+   * assigns. The session index row is updated to the status the fold ends in.
+   * @param row - session index row with a stored setup.
+   * @throws when the log cannot be read or the agent cannot be resumed; nothing stays registered.
+   */
+  async resumeSession(row: SessionIndexRow): Promise<void> {
+    const config = configOf(row)
+    const cwd = await this.history.workspace(row.id)
+    if (cwd === undefined) throw new Error('the session log has no working directory')
+    const projector = await this.history.fold(baseOf(row))
+    const pending = new PendingFunctionCalls()
+    this.sessionRegistry.register(projector, cwd)
+    try {
+      const handle = await this.ctx.agents.resume({
+        resumeSessionId: SessionId(row.id),
+        agentOptions: await this.agentOptionsFor(config.agent),
+        setup: this.buildAgentSetup(config.agent, pending, cwd),
+      })
+      this.handles.set(row.id, handle)
+      this.pendingBySession.set(row.id, pending)
+    } catch (error: unknown) {
+      this.sessionRegistry.delete(row.id)
+      throw error
+    }
+    this.recordStatus(row.id, projector.status, projector.error)
+  }
+
+  /**
+   * Make sure the session has a live agent, resuming it from its log after a restart.
+   * @param row - session index row.
+   * @throws AgentsApiRequestError 409 `session_not_resumable` when the row has no stored setup.
+   */
+  private async ensureLive(row: SessionIndexRow): Promise<void> {
+    if (this.sessionRegistry.get(row.id) !== undefined) {
+      await this.resuming.get(row.id)
+      return
+    }
+    if (row.body === null) {
+      throw new AgentsApiRequestError(`Session "${row.id}" ${NO_STORED_CONFIG} and cannot be continued`, 409, 'session_not_resumable')
+    }
+    const attempt = this.resumeSession(row).finally(() => {
+      this.resuming.delete(row.id)
+    })
+    this.resuming.set(row.id, attempt)
+    await attempt
   }
 
   private async listItems(res: ServerResponse, url: URL, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const sessionId = routeParam(params, 'session_id')
-    if (!await this.requireSession(res, owner, sessionId)) return
-    json(res, 200, this.sessionRegistry.listItems(sessionId, listQuery(url)))
+    const row = await this.requireSession(res, owner, routeParam(params, 'session_id'))
+    if (!row) return
+    json(res, 200, await this.history.items(baseOf(row), listQuery(url)))
   }
 
   private async listTurns(res: ServerResponse, url: URL, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const sessionId = routeParam(params, 'session_id')
-    if (!await this.requireSession(res, owner, sessionId)) return
-    json(res, 200, this.sessionRegistry.listTurns(sessionId, listQuery(url)))
+    const row = await this.requireSession(res, owner, routeParam(params, 'session_id'))
+    if (!row) return
+    json(res, 200, await this.history.turns(baseOf(row), listQuery(url)))
   }
 
   private async getTurn(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const sessionId = routeParam(params, 'session_id')
     const turnId = routeParam(params, 'turn_id')
-    if (!await this.requireSession(res, owner, sessionId)) return
-    const turn = this.sessionRegistry.getTurn(sessionId, turnId)
+    const row = await this.requireSession(res, owner, routeParam(params, 'session_id'))
+    if (!row) return
+    const turn = await this.history.turn(baseOf(row), turnId)
     if (!turn) {
       notFound(res, `Turn "${turnId}" not found`)
       return
@@ -777,7 +935,6 @@ export class AgentsGateway {
   }
 
   private async defaultWorkspace(owner: OwnerId, sessionId: string): Promise<string> {
-    if (this.workspacesRoot === undefined) return process.cwd()
     const dir = join(this.workspacesRoot, directorySegment(owner, 'owner'), sessionId)
     await mkdir(dir, { recursive: true })
     return dir
@@ -794,17 +951,6 @@ export class AgentsGateway {
         this.pendingBySession.get(sessionId)?.rejectAll(new Error('turn cancelled'))
         const agent = this.ctx.agents.get(SessionId(sessionId))
         agent?.cancel({ kind: 'user' }, { keepInbox: true })
-        const turn = this.sessionRegistry.getCurrentTurn(sessionId)
-        if (turn) {
-          this.sessionRegistry.cancelTurn(sessionId, turn.id)
-          this.sessionRegistry.emit(sessionId, {
-            type: 'agent.session.turn.cancelled',
-            event_id: mintEventId(),
-            session_id: sessionId,
-            turn_id: turn.id,
-            turn,
-          })
-        }
         return
       }
       case 'agent.session.input.tool_result': {
@@ -815,7 +961,7 @@ export class AgentsGateway {
         const output = typeof evt.output === 'string' ? evt.output : JSON.stringify(evt.output)
         this.applyToolResult(sessionId, {
           type: 'agent.session.input.tool_result',
-          turn_id: evt.turn_id ?? this.sessionRegistry.getCurrentTurn(sessionId)?.id ?? '',
+          turn_id: evt.turn_id ?? this.sessionRegistry.getCurrentTurnId(sessionId) ?? '',
           call_id: evt.call_id,
           success: true,
           output,
@@ -837,10 +983,10 @@ export class AgentsGateway {
       )
     }
     if (evt.turn_id) {
-      const current = this.sessionRegistry.getCurrentTurn(sessionId)
-      if (current && current.id !== evt.turn_id) {
+      const current = this.sessionRegistry.getCurrentTurnId(sessionId)
+      if (current !== undefined && current !== evt.turn_id) {
         throw new AgentsApiRequestError(
-          `turn_id "${evt.turn_id}" does not match the open turn "${current.id}"`,
+          `turn_id "${evt.turn_id}" does not match the open turn "${current}"`,
           400,
           'turn_mismatch',
         )
@@ -1102,26 +1248,32 @@ export class AgentsGateway {
 
   private async listArtifacts(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    const state = await this.requireSession(res, owner, sessionId)
-    if (!state) return
-    const data = this.artifacts !== undefined
-      ? await listS3Artifacts(this.artifacts, sessionId)
-      : await listWorkspaceArtifacts(state.workspace ?? process.cwd())
-    json(res, 200, { object: 'list', data })
+    if (!await this.requireSession(res, owner, sessionId)) return
+    if (this.artifacts !== undefined) {
+      json(res, 200, { object: 'list', data: await listS3Artifacts(this.artifacts, sessionId) })
+      return
+    }
+    const workspace = await this.workspaceOf(res, sessionId)
+    if (workspace === undefined) return
+    json(res, 200, { object: 'list', data: await listWorkspaceArtifacts(workspace) })
   }
 
   private async getArtifact(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    const state = await this.requireSession(res, owner, sessionId)
-    if (!state) return
+    if (!await this.requireSession(res, owner, sessionId)) return
     const rawPath = params['path'] ?? ''
     if (sanitizeRelativePath(rawPath) === undefined) {
       badRequest(res, 'artifact path escapes the session workspace')
       return
     }
-    const body = this.artifacts !== undefined
-      ? await getS3Artifact(this.artifacts, sessionId, rawPath)
-      : await getWorkspaceArtifact(state.workspace ?? process.cwd(), rawPath)
+    let body: Awaited<ReturnType<typeof getS3Artifact>>
+    if (this.artifacts !== undefined) {
+      body = await getS3Artifact(this.artifacts, sessionId, rawPath)
+    } else {
+      const workspace = await this.workspaceOf(res, sessionId)
+      if (workspace === undefined) return
+      body = await getWorkspaceArtifact(workspace, rawPath)
+    }
     if (body === undefined) {
       notFound(res, 'artifact not found')
       return
@@ -1129,6 +1281,18 @@ export class AgentsGateway {
     res.statusCode = 200
     res.setHeader('Content-Type', 'application/octet-stream')
     res.end(body)
+  }
+
+  /**
+   * Working directory of a session: the live one, else the Session log header's.
+   * @param res - response that receives a 404 when neither is known.
+   * @param sessionId - session id.
+   * @returns the absolute directory, or `undefined` after a 404 was written.
+   */
+  private async workspaceOf(res: ServerResponse, sessionId: string): Promise<string | undefined> {
+    const workspace = this.sessionRegistry.get(sessionId)?.workspace ?? await this.history.workspace(sessionId)
+    if (workspace === undefined) notFound(res, `Session "${sessionId}" has no workspace`)
+    return workspace
   }
 
   private async listSubagents(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -1207,8 +1371,8 @@ export class AgentsGateway {
           content: [{ type: 'text', text: userText }],
           source: { kind: 'user' },
         })
-        const state = this.sessionRegistry.get(sessionId)
-        if (state?.status === 'in_progress' || state?.status === 'requires_action') {
+        const status = this.sessionRegistry.get(sessionId)?.projector.status
+        if (status === 'in_progress' || status === 'requires_action') {
           agent.steer(message)
         } else {
           agent.followup(message)

@@ -23,14 +23,18 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-session-query'
+import type {} from '@deepseek-ai/dsh-session-persistence'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { firstThen, type Authenticator } from './auth/authenticator.ts'
 import { API_KEY_HASH_PATTERN, createApiKeyAuthenticator, type ApiKeyEntry } from './auth/api-keys.ts'
 import { createKeycloakAuthenticator } from './auth/keycloak.ts'
 import { createStaticKeyAuthenticator } from './auth/static-key.ts'
-import { bridgeChildSessionEvent, bridgeSessionEvent } from './bridge.ts'
+import { bridgeChildSessionEvent } from './bridge.ts'
 import { createLocalProvider } from './environment/local.ts'
 import { AgentsGateway } from './gateway.ts'
+import { createSessionHistory } from './history/session-history.ts'
+import { recoverSessions } from './recovery.ts'
 import { CodeboxDisabledError, resolveRuntimeConfig, type RuntimeConfigInput } from './runtime-config.ts'
 import { SessionRegistry } from './session-registry.ts'
 import { migrate } from './store/migrate.ts'
@@ -45,6 +49,10 @@ export * from './items.ts'
 export * from './http.ts'
 export * from './input.ts'
 export * from './bridge.ts'
+export * from './history/projector.ts'
+export * from './history/session-history.ts'
+export * from './recovery.ts'
+export * from './session-resource.ts'
 export * from './gateway.ts'
 export * from './errors.ts'
 export * from './pending-function-calls.ts'
@@ -71,7 +79,7 @@ export { createApiKeyAuthenticator, generateApiKey, hashApiKey, type ApiKeyEntry
 export const name = 'agents-api'
 
 /** Host services required before routes can register. */
-export const inject = ['webServer', 'sessions', 'agents', 'agentDefaultModel', 'tools']
+export const inject = ['webServer', 'sessions', 'agents', 'agentDefaultModel', 'tools', 'sessionQuery', 'sessionPersistence']
 
 /** Resolved Keycloak settings: every field present after `Config` defaults. */
 export interface ResolvedKeycloakConfig {
@@ -273,11 +281,12 @@ export function createAuthenticator(auth: ResolvedAuthConfig, warn: (message: st
 }
 
 /**
- * Register the Agents API prefix route and Session-event bridge, then migrate
- * and open the Postgres store in the background. Until the store is open
- * `/v1` answers 503 `store_unavailable`; when migration or connection fails,
- * a `StoreStartError` is logged and `/v1` keeps answering 503 with its message.
- * @param ctx - plugin context with `webServer`, `sessions`, `agents`, `agentDefaultModel`, and `tools`.
+ * Register the Agents API prefix route and Session-event bridge, then migrate,
+ * open the Postgres store, and recover sessions that were running at shutdown
+ * in the background. Until the store is open `/v1` answers 503
+ * `store_unavailable`; when migration, connection, or recovery fails, a
+ * `StoreStartError` is logged and `/v1` keeps answering 503 with its message.
+ * @param ctx - plugin context with `webServer`, `sessions`, `agents`, `agentDefaultModel`, `tools`, `sessionQuery`, and `sessionPersistence`.
  * @param config - validated config.
  */
 export function apply(ctx: Context, config: ResolvedConfig): void {
@@ -287,6 +296,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth, message => ctx.logger.warn(message)), prefix, undefined, sessionRegistry, {
     environments: createLocalProvider(runtime.workspacesRoot),
     workspacesRoot: runtime.workspacesRoot,
+    history: createSessionHistory(ctx.sessionQuery),
     ...(runtime.artifacts === undefined ? {} : { artifacts: runtime.artifacts }),
   })
 
@@ -298,7 +308,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
       bridgeChildSessionEvent(parent, session.id, event, sessionRegistry)
       return
     }
-    bridgeSessionEvent(session.id, event, sessionRegistry)
+    gateway.applySessionEvent(session.id, event)
   })
   ctx.on('session/disposed', (session: Session) => {
     const parent = session.header?.parentSession
@@ -350,6 +360,17 @@ async function openStore(ctx: Context, url: string, gateway: AgentsGateway): Pro
     throw failure
   }
   gateway.attachStore(store)
+  try {
+    const recovered = await recoverSessions({ store, resume: row => gateway.resumeSession(row) })
+    if (recovered.resumed.length > 0) ctx.logger.info(`agents-api: resumed ${String(recovered.resumed.length)} session(s)`)
+    for (const { id, reason } of recovered.interrupted) ctx.logger.warn(`agents-api: session ${id} marked interrupted: ${reason}`)
+  } catch (error: unknown) {
+    const failure = new StoreStartError(error)
+    gateway.failStore(failure.message)
+    await store.close()
+    ctx.logger.error(failure)
+    throw failure
+  }
   return async () => {
     gateway.detachStore()
     await store.close()

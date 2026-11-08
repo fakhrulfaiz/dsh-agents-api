@@ -89,7 +89,7 @@ function sessionFromDb(row: SessionDbRow): SessionIndexRow {
     lastError: row.last_error,
     model: row.model,
     reasoningEffort: row.reasoning_effort,
-    body: 'agent' in row.body ? row.body : null,
+    body: Object.keys(row.body).length === 0 ? null : row.body as SessionConfig,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
