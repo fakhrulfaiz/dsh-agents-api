@@ -25,7 +25,7 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { AgentStore } from './agent-store.ts'
-import type { Authenticator } from './auth/authenticator.ts'
+import { firstThen, type Authenticator } from './auth/authenticator.ts'
 import { createKeycloakAuthenticator } from './auth/keycloak.ts'
 import { createStaticKeyAuthenticator } from './auth/static-key.ts'
 import { bridgeChildSessionEvent, bridgeSessionEvent } from './bridge.ts'
@@ -55,9 +55,9 @@ export * from './environment-types.ts'
 export * from './runtime-config.ts'
 export * from './durable-store.ts'
 export * from './artifacts.ts'
-export { bearerToken, ownerId, requireRole, unauthenticated } from './auth/authenticator.ts'
+export { bearerToken, firstThen, ownerId, requireAnyRole, requireRole, unauthenticated } from './auth/authenticator.ts'
 export type { AuthResult, Authenticator, OwnerId, Principal, Role as AuthRole } from './auth/authenticator.ts'
-export { createKeycloakAuthenticator } from './auth/keycloak.ts'
+export { createKeycloakAuthenticator, type KeycloakAuthConfig } from './auth/keycloak.ts'
 export { createStaticKeyAuthenticator } from './auth/static-key.ts'
 
 /** Cordis plugin name. */
@@ -78,6 +78,12 @@ export interface AuthConfig {
     audience: string
     /** JWKS cache lifetime in seconds (default 600). */
     jwksTtlSeconds?: number
+    /** Minimum seconds between JWKS refetches caused by an unknown `kid` (default 30). */
+    jwksCooldownSeconds?: number
+    /** Accepted JWS algorithms (default `['RS256']`). */
+    algorithms?: string[]
+    /** Allowed clock skew in seconds (default 5). */
+    clockToleranceSeconds?: number
   }
   /** Fixed development bearer key. */
   devKey?: {
@@ -108,6 +114,9 @@ export const Config: z<Config> = z.transform(z.object({
       issuer: z.string().required(),
       audience: z.string().required(),
       jwksTtlSeconds: z.number().default(600),
+      jwksCooldownSeconds: z.number().default(30),
+      algorithms: z.array(z.string()).default(['RS256']),
+      clockToleranceSeconds: z.number().default(5),
     }).default(ABSENT),
     devKey: z.object({
       key: z.string().required(),
@@ -134,17 +143,16 @@ export const Config: z<Config> = z.transform(z.object({
     secretAccessKey: z.string(),
   }),
 }), (config) => {
-  createAuthenticator(config.auth as AuthConfig | undefined)
+  validateAuth(config.auth as AuthConfig | undefined)
   return config
 }) as unknown as z<Config>
 
 /**
- * Build the request authenticator from the `auth` config block.
+ * Check the `auth` block for contradictory or missing settings.
  * @param auth - validated `auth` block.
- * @returns a Keycloak authenticator, or a static-key authenticator in development with a `devKey`.
- * @throws when `auth` is missing, `production` lacks `keycloak` or sets `devKey`, or `development` has neither.
+ * @throws when `auth` is missing, `production` lacks `keycloak` or sets `devKey`, `development` has neither, or `devKey.key` is empty.
  */
-export function createAuthenticator(auth: AuthConfig | undefined): Authenticator {
+export function validateAuth(auth: AuthConfig | undefined): void {
   if (auth === undefined) throw new Error('agents-api: "auth" is required (set auth.mode to production or development)')
   const { mode, keycloak, devKey } = auth
   if (mode === 'production') {
@@ -153,12 +161,34 @@ export function createAuthenticator(auth: AuthConfig | undefined): Authenticator
   } else if (devKey === undefined && keycloak === undefined) {
     throw new Error('agents-api: auth.mode "development" needs auth.devKey or auth.keycloak')
   }
-  if (devKey !== undefined) {
-    if (!devKey.key) throw new Error('agents-api: auth.devKey.key must not be empty')
-    return createStaticKeyAuthenticator({ key: devKey.key, owner: devKey.owner, admin: devKey.admin ?? true })
-  }
-  const kc = keycloak!
-  return createKeycloakAuthenticator({ issuer: kc.issuer, audience: kc.audience, jwksTtlSeconds: kc.jwksTtlSeconds ?? 600 })
+  if (devKey !== undefined && !devKey.key) throw new Error('agents-api: auth.devKey.key must not be empty')
+}
+
+/**
+ * Build the request authenticator from the `auth` block.
+ * @param auth - `auth` block; validated here as well.
+ * @param warn - receives Keycloak rejection diagnostics.
+ * @returns Keycloak, the static dev key, or the dev key first and Keycloak as fallback when development sets both.
+ */
+export function createAuthenticator(auth: AuthConfig | undefined, warn: (message: string) => void): Authenticator {
+  validateAuth(auth)
+  const { keycloak, devKey } = auth!
+  const staticKey = devKey === undefined
+    ? undefined
+    : createStaticKeyAuthenticator({ key: devKey.key, owner: devKey.owner, admin: devKey.admin ?? true })
+  const verifier = keycloak === undefined
+    ? undefined
+    : createKeycloakAuthenticator({
+      issuer: keycloak.issuer,
+      audience: keycloak.audience,
+      jwksTtlSeconds: keycloak.jwksTtlSeconds ?? 600,
+      jwksCooldownSeconds: keycloak.jwksCooldownSeconds ?? 30,
+      algorithms: keycloak.algorithms ?? ['RS256'],
+      clockToleranceSeconds: keycloak.clockToleranceSeconds ?? 5,
+      warn,
+    })
+  if (staticKey !== undefined && verifier !== undefined) return firstThen(staticKey, verifier)
+  return (staticKey ?? verifier)!
 }
 
 /**
@@ -176,7 +206,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     runtime.codebox ?? {},
     runtime.workspacesRoot,
   )
-  const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth), prefix, agentStore, sessionRegistry, {
+  const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth, message => ctx.logger.warn(message)), prefix, agentStore, sessionRegistry, {
     environments,
     ...(runtime.workspacesRoot === undefined ? {} : { workspacesRoot: runtime.workspacesRoot }),
     ...(runtime.artifacts === undefined ? {} : { artifacts: runtime.artifacts }),

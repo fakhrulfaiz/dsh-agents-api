@@ -56,6 +56,7 @@ import type {
   UpdateSessionParams,
 } from './types.ts'
 
+import { requireAnyRole } from './auth/authenticator.ts'
 import type { AuthResult, Authenticator, Principal } from './auth/authenticator.ts'
 
 interface Route {
@@ -158,7 +159,7 @@ export class AgentsGateway {
    * @param res - outgoing response.
    */
   async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const auth = await this.authenticator.authenticate(req)
+    const auth = requireAnyRole(await this.authenticator.authenticate(req), ['agentry-user', 'agentry-admin'])
     if (!auth.ok) {
       this.rejectAuth(res, auth)
       return

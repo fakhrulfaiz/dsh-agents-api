@@ -60,6 +60,32 @@ export function requireRole(result: AuthResult, role: Role): AuthResult {
 }
 
 /**
+ * Require any one of several roles on a successful result; failures pass through.
+ * @param result - result from `Authenticator.authenticate`.
+ * @param roles - roles that each grant access.
+ * @returns `result`, or a 403 failure when the principal holds none of `roles`.
+ */
+export function requireAnyRole(result: AuthResult, roles: readonly Role[]): AuthResult {
+  if (!result.ok || roles.some(role => result.principal.roles.has(role))) return result
+  return { ok: false, status: 403, code: 'forbidden', message: `One of the roles ${roles.map(r => `"${r}"`).join(', ')} is required` }
+}
+
+/**
+ * Chain two authenticators: `second` runs only when `first` rejects the request.
+ * @param first - tried first (the development key).
+ * @param second - tried when `first` fails (Keycloak).
+ * @returns an authenticator accepting what either accepts; the failure is `second`'s.
+ */
+export function firstThen(first: Authenticator, second: Authenticator): Authenticator {
+  return {
+    async authenticate(req) {
+      const result = await first.authenticate(req)
+      return result.ok ? result : second.authenticate(req)
+    },
+  }
+}
+
+/**
  * Extract the bearer token from an `Authorization` header.
  * @param req - incoming request.
  * @returns the token, or `undefined` when absent or not a Bearer credential.

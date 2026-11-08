@@ -32,6 +32,10 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 | `GET` | `/agents/sessions/{session_id}/subagents/{subagent_id}/items` | List that child's items |
 | `GET` | `/agents/sessions/{session_id}/subagents/{subagent_id}/turns/{turn_id}/items` | List items for one child turn |
 
+## Authentication errors
+
+Every route under the prefix needs `Authorization: Bearer <token>`. A missing or invalid credential returns 401 with error code `unauthenticated` and `WWW-Authenticate: Bearer`. A principal holding neither `agentry-user` nor `agentry-admin` returns 403 with error code `forbidden`. `/health` is unauthenticated.
+
 ## Session create and follow-up
 
 `POST /agents/sessions` accepts `input` as a string or `input_text` messages and `stream: true` for SSE on the create response. Follow-ups use `agent.session.input.message`. Steering vs a new turn follows Host idle vs in-progress. Cancel uses `agent.session.input.cancel`.

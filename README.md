@@ -71,16 +71,19 @@ REST and SSE under the configured prefix (`/v1` by default) for saved agents, se
 
 | Field                       | Default | Meaning                                                                                                   |
 | --------------------------- | ------- | --------------------------------------------------------------------------------------------------------- |
-| `auth.mode`                 | none    | Required. `production` verifies Keycloak tokens and forbids `devKey`; `development` also allows `devKey`  |
+| `auth.mode`                 | none    | Required. `production` verifies Keycloak tokens and forbids `devKey`; `development` allows `devKey`, `keycloak`, or both (the dev key is tried first, then Keycloak) |
 | `auth.keycloak.issuer`      | none    | Realm issuer URL; JWKS is read from `${issuer}/protocol/openid-connect/certs`                             |
 | `auth.keycloak.audience`    | none    | Required token `aud`                                                                                      |
-| `auth.keycloak.jwksTtlSeconds` | `600` | JWKS cache lifetime; an unknown `kid` triggers an immediate refetch                                      |
+| `auth.keycloak.jwksTtlSeconds` | `600` | JWKS cache lifetime                                                                                       |
+| `auth.keycloak.jwksCooldownSeconds` | `30` | Minimum seconds between JWKS refetches caused by an unknown `kid`; `0` refetches on every unknown `kid` |
+| `auth.keycloak.algorithms` | `['RS256']` | Accepted JWS algorithms                                                                          |
+| `auth.keycloak.clockToleranceSeconds` | `5` | Allowed clock skew for `exp`/`nbf`                                                          |
 | `auth.devKey.key`           | none    | Fixed bearer key (development only)                                                                       |
 | `auth.devKey.owner`         | none    | Owner id the key acts as                                                                                  |
 | `auth.devKey.admin`         | `true`  | Grant `agentry-admin` to the key                                                                          |
 | `prefix`                    | `/v1`   | URL prefix for every Agents API route                                                                     |
 
-The caller's owner is the token `sub`; roles come from `realm_access.roles` (`agentry-user`, `agentry-admin`). Missing or invalid credentials return 401 `unauthenticated` with `WWW-Authenticate: Bearer`; a missing role returns 403 `forbidden`. `/health` is unauthenticated. The bundled `cordis.patch.yml` runs in `development` mode with the key read from `AGENTRY_DEV_KEY`.
+The caller's owner is the token `sub`; roles come from `realm_access.roles` (`agentry-user`, `agentry-admin`). Missing or invalid credentials return 401 `unauthenticated` with `WWW-Authenticate: Bearer`; a principal holding neither `agentry-user` nor `agentry-admin` gets 403 `forbidden`. Tokens need `exp`, `sub`, and `typ: Bearer`. `/health` is unauthenticated. The bundled `cordis.patch.yml` runs in `development` mode with the key read from `AGENTRY_DEV_KEY`.
 
 
 The wire details for create, stream, and function tools live in [HTTP API](docs/http-api.md). The route list is below.

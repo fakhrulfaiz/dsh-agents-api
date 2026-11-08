@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { AgentStore } from '../src/agent-store.ts'
 import { createStaticKeyAuthenticator } from '../src/auth/static-key.ts'
+import { ownerId } from '../src/auth/authenticator.ts'
 import { openAuthenticator } from './open-auth.ts'
 import { AgentsGateway } from '../src/gateway.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
@@ -210,6 +211,16 @@ describe('AgentsGateway', () => {
     expect(denied.headers.get('www-authenticate')).toBe('Bearer')
     expect(await denied.json()).toMatchObject({ error: { code: 'unauthenticated' } })
     expect((await fetch(`${base}/v1/agents`, { headers: { authorization: 'Bearer secret' } })).status).toBe(200)
+  })
+
+  it('answers 403 forbidden when the principal holds neither agentry role', async () => {
+    const { ctx } = fakeContext()
+    const noRoles = { authenticate: () => Promise.resolve({ ok: true as const, principal: { owner: ownerId('x'), roles: new Set<never>() } }) }
+    const api = new AgentsGateway(ctx, noRoles, '/v1', new AgentStore(), new SessionRegistry())
+    const base = await listen((req, res) => api.handle(req, res))
+    const denied = await fetch(`${base}/v1/agents`)
+    expect(denied.status).toBe(403)
+    expect(await denied.json()).toMatchObject({ error: { code: 'forbidden' } })
   })
 
   it('covers saved-agent CRUD and refuses a missing model', async () => {
