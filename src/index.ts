@@ -33,8 +33,9 @@ import { createStaticKeyAuthenticator } from './auth/static-key.ts'
 import { bridgeChildSessionEvent } from './bridge.ts'
 import { createLocalProvider } from './environment/local.ts'
 import { AgentsGateway } from './gateway.ts'
+import { errorMessage } from './http.ts'
 import { createSessionHistory } from './history/session-history.ts'
-import { recoverSessions } from './recovery.ts'
+import { recoverSessions, recoveryUnavailable } from './recovery.ts'
 import { CodeboxDisabledError, resolveRuntimeConfig, type RuntimeConfigInput } from './runtime-config.ts'
 import { SessionRegistry } from './session-registry.ts'
 import { migrate } from './store/migrate.ts'
@@ -360,16 +361,17 @@ async function openStore(ctx: Context, url: string, gateway: AgentsGateway): Pro
     throw failure
   }
   gateway.attachStore(store)
-  try {
-    const recovered = await recoverSessions({ store, resume: row => gateway.resumeSession(row) })
-    if (recovered.resumed.length > 0) ctx.logger.info(`agents-api: resumed ${String(recovered.resumed.length)} session(s)`)
-    for (const { id, reason } of recovered.interrupted) ctx.logger.warn(`agents-api: session ${id} marked interrupted: ${reason}`)
-  } catch (error: unknown) {
-    const failure = new StoreStartError(error)
-    gateway.failStore(failure.message)
-    await store.close()
-    ctx.logger.error(failure)
-    throw failure
+  const unavailable = recoveryUnavailable(ctx.agents, ctx.sessionPersistence)
+  if (unavailable !== undefined) {
+    ctx.logger.warn(`agents-api: ${unavailable.message}; rows are left as they are and sessions resume on first access`)
+  } else {
+    try {
+      const recovered = await recoverSessions({ store, resume: row => gateway.resumeSession(row) })
+      if (recovered.resumed.length > 0) ctx.logger.info(`agents-api: resumed ${String(recovered.resumed.length)} session(s)`)
+      for (const { id, reason } of recovered.interrupted) ctx.logger.warn(`agents-api: session ${id} marked interrupted: ${reason}`)
+    } catch (error: unknown) {
+      ctx.logger.error(`agents-api: session recovery stopped early: ${errorMessage(error)}`)
+    }
   }
   return async () => {
     gateway.detachStore()

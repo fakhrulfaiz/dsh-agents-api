@@ -9,8 +9,28 @@ import type { SessionIndexRow, Store } from './store/store.ts'
 /** Recorded on a running session that was created before migration 0002 and so has no stored setup. */
 export const NO_STORED_CONFIG = 'session predates stored configuration'
 
-/** Resume failures that mean the process is misconfigured, not that one session is unrecoverable. */
-const STARTUP_MISCONFIGURATION = ['no agent factory registered', 'cannot resume: session persistence is not configured']
+/** Recovery cannot run because a Host capability it needs is missing. */
+export class RecoveryUnavailableError extends Error {
+  /** @param reason - what is missing. */
+  constructor(reason: string) {
+    super(`session recovery unavailable: ${reason}`)
+    this.name = 'RecoveryUnavailableError'
+  }
+}
+
+/**
+ * Check, without calling `resume`, that the Host can resume sessions. The agent
+ * registry keeps the loop's factory in a field named `factory` that is `undefined`
+ * until the agent loop plugin registers it; DSH exposes no public accessor.
+ * @param agents - `ctx.agents`.
+ * @param sessionPersistence - `ctx.sessionPersistence`.
+ * @returns an error naming the missing capability, or `undefined` when both exist.
+ */
+export function recoveryUnavailable(agents: unknown, sessionPersistence: unknown): RecoveryUnavailableError | undefined {
+  if ((agents as { factory?: unknown } | undefined)?.factory === undefined) return new RecoveryUnavailableError('no agent factory is registered yet')
+  if (sessionPersistence === undefined) return new RecoveryUnavailableError('session persistence is not available')
+  return undefined
+}
 
 /** Dependencies of `recoverSessions`. */
 export interface RecoveryDeps {
@@ -38,7 +58,6 @@ export interface RecoveryResult {
  * the status the session resumes in.
  * @param deps - store and the resume operation.
  * @returns which sessions were resumed and which were interrupted.
- * @throws the resume error when it shows a startup misconfiguration (no agent factory, no session persistence); no row is changed for it.
  */
 export async function recoverSessions(deps: RecoveryDeps): Promise<RecoveryResult> {
   const result: RecoveryResult = { resumed: [], interrupted: [] }
@@ -53,7 +72,6 @@ export async function recoverSessions(deps: RecoveryDeps): Promise<RecoveryResul
         continue
       } catch (error: unknown) {
         reason = errorMessage(error)
-        if (STARTUP_MISCONFIGURATION.some(message => reason.includes(message))) throw error
       }
     }
     await deps.store.sessions.update(row.id, 'any', { status: 'interrupted', lastError: reason })

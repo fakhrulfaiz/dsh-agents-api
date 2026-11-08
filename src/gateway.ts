@@ -27,6 +27,7 @@ import {
   matchRoute,
   normalizePath,
   notFound,
+  paginate,
   readBody,
   routeParam,
 } from './http.ts'
@@ -440,6 +441,8 @@ export class AgentsGateway {
       vaultIds: config.vault_ids,
     }
     const projector = new WireProjector(base, false)
+    // Registered before the agent exists so no event logged during creation is missed.
+    this.sessionRegistry.register(projector, cwd)
 
     try {
       const handle = await this.ctx.agents.create({
@@ -466,6 +469,7 @@ export class AgentsGateway {
       })
     } catch (error: unknown) {
       pending.rejectAll(new Error('session create failed'))
+      this.sessionRegistry.delete(sessionId)
       const created = this.handles.get(sessionId)
       this.handles.delete(sessionId)
       this.pendingBySession.delete(sessionId)
@@ -491,7 +495,6 @@ export class AgentsGateway {
       return
     }
 
-    this.sessionRegistry.register(projector, cwd)
     const oaiSession = projector.snapshot()
     const stream = body.stream === true
       || url.searchParams.get('stream') === 'true'
@@ -673,8 +676,8 @@ export class AgentsGateway {
     base: ProjectionBase,
   ): Promise<OAIAgentSession & { session: OAIAgentSession; items: unknown[]; turns: unknown[] }> {
     const page = { limit: 100, order: 'asc' as const }
-    const [items, turns] = await Promise.all([this.history.items(base, page), this.history.turns(base, page)])
-    return { ...session, session, items: items.data, turns: turns.data }
+    const folded = await this.history.fold(base)
+    return { ...session, session, items: paginate(folded.items, page).data, turns: paginate(folded.turns, page).data }
   }
 
   private async streamEvents(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -702,7 +705,7 @@ export class AgentsGateway {
         ? 'agent.session.requires_action'
         : session.status === 'in_progress'
           ? 'agent.session.in_progress'
-          : 'agent.session.idle'
+          : session.status === 'failed' ? 'agent.session.failed' : 'agent.session.idle'
       write({ type, event_id: mintEventId(), session }, undefined)
       return
     }
@@ -834,6 +837,12 @@ export class AgentsGateway {
         agentOptions: await this.agentOptionsFor(config.agent),
         setup: this.buildAgentSetup(config.agent, pending, cwd),
       })
+      if (await this.store.sessions.get(row.id, 'any') === undefined) {
+        // Deleted while the resume was in flight: undo it.
+        this.sessionRegistry.delete(row.id)
+        await handle.dispose().catch(() => undefined)
+        return
+      }
       this.handles.set(row.id, handle)
       this.pendingBySession.set(row.id, pending)
     } catch (error: unknown) {

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { materializeAgent } from '../src/agent-records.ts'
 import { ownerId } from '../src/auth/authenticator.ts'
-import { NO_STORED_CONFIG, recoverSessions } from '../src/recovery.ts'
+import { NO_STORED_CONFIG, RecoveryUnavailableError, recoverSessions, recoveryUnavailable } from '../src/recovery.ts'
 import type { SessionIndexRow } from '../src/store/store.ts'
 import { MemoryStore } from './support/memory-store.ts'
 
@@ -64,13 +64,19 @@ describe('recoverSessions', () => {
     expect(await store.sessions.get('sess_old', 'any')).toMatchObject({ status: 'interrupted', lastError: NO_STORED_CONFIG })
   })
 
-  it.each([
-    'no agent factory registered (load an agent-loop plugin)',
-    'cannot resume: session persistence is not configured',
-  ])('rethrows a startup misconfiguration and leaves rows untouched: %s', async (message) => {
-    const store = await seeded(row('sess_a', 'in_progress'))
-    await expect(recoverSessions({ store, resume: () => Promise.reject(new Error(message)) })).rejects.toThrow(message)
-    expect(await store.sessions.get('sess_a', 'any')).toMatchObject({ status: 'in_progress', lastError: null })
+  it('treats every resume rejection as that session failing and keeps going', async () => {
+    const store = await seeded(row('sess_a', 'in_progress'), row('sess_b', 'in_progress'), row('sess_c', 'in_progress'))
+    const resume = vi.fn<(r: SessionIndexRow) => Promise<void>>(r => r.id === 'sess_b' ? Promise.resolve() : Promise.reject(new Error('no agent factory registered')))
+    const result = await recoverSessions({ store, resume })
+    expect(result.resumed).toEqual(['sess_b'])
+    expect(result.interrupted.map(entry => entry.id)).toEqual(['sess_a', 'sess_c'])
+  })
+
+  it('reports a missing agent factory or session persistence before any resume', () => {
+    expect(recoveryUnavailable({ factory: {} }, {})).toBeUndefined()
+    expect(recoveryUnavailable({}, {})).toBeInstanceOf(RecoveryUnavailableError)
+    expect(recoveryUnavailable(undefined, {})?.message).toMatch(/agent factory/)
+    expect(recoveryUnavailable({ factory: {} }, undefined)?.message).toMatch(/persistence/)
   })
 
   it('does nothing when no session is running', async () => {

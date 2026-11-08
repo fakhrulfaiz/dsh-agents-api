@@ -9,6 +9,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import pg from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Include from '@deepseek-ai/cordis-plugin-include'
@@ -56,9 +57,10 @@ afterEach(async () => {
  * Boot the webserver and Agents API through the Loader, with fake Host services.
  * @param databaseUrl - Postgres database the plugin migrates and opens.
  * @param query - fake Session log behind `sessionQuery`.
+ * @param factory - whether `agents` reports a registered agent factory.
  * @returns the HTTP origin of the webserver.
  */
-async function boot(databaseUrl: string, query: FakeSessionQuery): Promise<string> {
+async function boot(databaseUrl: string, query: FakeSessionQuery, factory = true): Promise<string> {
   const configPath = join(root!, 'cordis.yml')
   await writeFile(configPath, [
     '- name: fixture-dependencies',
@@ -101,6 +103,7 @@ async function boot(databaseUrl: string, query: FakeSessionQuery): Promise<strin
           return { agent, dispose: async () => {} }
         },
         get: (id: string) => agents.get(id),
+        ...(factory ? { factory: {} } : {}),
       } as never)
       ctx.provide('agentDefaultModel', {
         currentSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }),
@@ -197,5 +200,40 @@ describe('real Loader composition', () => {
     const text = new TextDecoder().decode((await reader.read()).value)
     await reader.cancel()
     expect(text).toMatch(/^id: 9\nevent: agent\.session\.turn\.completed\n/u)
+  })
+
+  it('serves requests and leaves rows alone when the agent factory is missing at store open, then resumes on first access', { timeout: 90_000 }, async () => {
+    root = await mkdtemp(join(tmpdir(), 'dsh-agents-api-loader-'))
+    const url = await postgres!.createDatabase('nofactory')
+    const query = new FakeSessionQuery()
+    let origin = await boot(url, query)
+    const created = await (await whenStoreReady(() => fetch(`${origin}/v1/agents/sessions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ agent: { model: 'deepseek-chat' } }),
+    }))).json() as { id: string }
+    const event = logEvent('turn/start', { turn: 1 }, 1)
+    query.append(created.id, event)
+    ;(context as unknown as { emit: (name: string, ...args: unknown[]) => void }).emit('session/event', { id: created.id, header: {} }, event)
+    const statusOf = async () => (await (await fetch(`${origin}/v1/agents/sessions/${created.id}`, { headers })).json() as { status: string }).status
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      const direct = new pg.Client({ connectionString: url })
+      await direct.connect()
+      const { rows } = await direct.query<{ status: string }>('select status from sessions where id = $1', [created.id])
+      await direct.end()
+      if (rows[0]?.status === 'in_progress') break
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+
+    await context?.fiber.dispose()
+    context = undefined
+    query.crash()
+    origin = await boot(url, query, false)
+    expect((await whenStoreReady(() => fetch(`${origin}/v1/agents`, { headers }))).status).toBe(200)
+    expect(await statusOf()).toBe('in_progress')
+    const posted = await fetch(`${origin}/v1/agents/sessions/${created.id}/events`, { method: 'POST', headers, body: '{"events":[]}' })
+    expect(posted.status).toBe(200)
+    expect(await statusOf()).toBe('idle')
   })
 })

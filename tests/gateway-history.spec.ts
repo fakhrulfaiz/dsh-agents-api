@@ -14,6 +14,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { ownerId } from '../src/auth/authenticator.ts'
 import { createLocalProvider } from '../src/environment/local.ts'
 import { AgentsGateway } from '../src/gateway.ts'
+import { createSessionHistory } from '../src/history/session-history.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
 import { MemoryStore } from './support/memory-store.ts'
 import { FakeSessionQuery, logEvent, testGatewayOptions } from './support/fake-session-query.ts'
@@ -40,6 +41,10 @@ interface Process {
   agents: Map<string, { followup: ReturnType<typeof vi.fn>; steer: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn> }>
   tools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }>
   logger: { warn: ReturnType<typeof vi.fn> }
+  /** Called inside `agents.create`, after the agent exists and before it returns. */
+  hooks: { duringCreate?: (sessionId: string) => void }
+  /** Disposers of agents handed out by `create` and `resume`. */
+  disposers: Array<ReturnType<typeof vi.fn>>
   /** Log `event` and project it, as a live `session/event` does. */
   feed(sessionId: string, event: SessionEvent): void
 }
@@ -56,6 +61,8 @@ async function startProcess(store: MemoryStore, query: FakeSessionQuery, failRes
   const agents: Process['agents'] = new Map()
   const tools: Process['tools'] = []
   const logger = { warn: vi.fn() }
+  const hooks: Process['hooks'] = {}
+  const disposers: Process['disposers'] = []
   const make = async (sessionId: string, setup?: (agentCtx: unknown) => Promise<void>) => {
     const agent = {
       followup: vi.fn(() => {
@@ -72,7 +79,10 @@ async function startProcess(store: MemoryStore, query: FakeSessionQuery, failRes
       plugin: () => Promise.resolve(),
       tools: { register: (definition: Process['tools'][number]) => { tools.push(definition); return () => undefined }, restrict: () => () => undefined, guard: () => () => undefined },
     })
-    return { agent, dispose: vi.fn(() => Promise.resolve()) }
+    hooks.duringCreate?.(sessionId)
+    const dispose = vi.fn(() => Promise.resolve())
+    disposers.push(dispose)
+    return { agent, dispose }
   }
   const resume = vi.fn<(options: ResumeAgentOptions) => Promise<unknown>>((options) => {
     if (failResume !== undefined) return Promise.reject(new Error(failResume))
@@ -106,6 +116,8 @@ async function startProcess(store: MemoryStore, query: FakeSessionQuery, failRes
     agents,
     tools,
     logger,
+    hooks,
+    disposers,
     feed: (sessionId, event) => {
       query.append(sessionId, event)
       api.applySessionEvent(sessionId, event)
@@ -251,6 +263,19 @@ describe('SSE replay', () => {
     expect(frameIds(text)).toEqual([1])
   })
 
+  it('sends a status snapshot of the matching type for a failed session', async () => {
+    const store = new MemoryStore()
+    const first = await startProcess(store, new FakeSessionQuery())
+    const id = await createSession(first.origin)
+    first.feed(id, logEvent('turn/start', { turn: 1 }, 1))
+    first.feed(id, logEvent('turn/end', { reason: { kind: 'error', error: { message: 'boom', code: 'E' } } }, 2))
+    const live = await readStream(await fetch(`${first.origin}/v1/agents/sessions/${id}/events`), text => text.includes('\n\n'))
+    expect(live).toMatch(/^event: agent\.session\.failed\n/u)
+    await first.api.statusWritesSettled()
+    const cold = await startProcess(store, new FakeSessionQuery())
+    expect(await readStream(await fetch(`${cold.origin}/v1/agents/sessions/${id}/events`), text => text.includes('\n\n'))).toMatch(/^event: agent\.session\.failed\n/u)
+  })
+
   it('answers a replay read failure by ending the stream', async () => {
     const query = new FakeSessionQuery()
     const process = await startProcess(new MemoryStore(), query)
@@ -259,6 +284,36 @@ describe('SSE replay', () => {
     const response = await fetch(`${process.origin}/v1/agents/sessions/${id}/events`, { headers: { 'last-event-id': '1' } })
     expect(await response.text()).toBe('')
     expect(process.logger.warn).toHaveBeenCalledWith(expect.stringContaining('disk gone'))
+  })
+})
+
+describe('create', () => {
+  it('live frames of a new session equal the fold of its log, including events logged during creation', async () => {
+    const store = new MemoryStore()
+    const query = new FakeSessionQuery()
+    const process = await startProcess(store, query)
+    // The Host logs a turn while the agent is still being created.
+    process.hooks.duringCreate = (sessionId) => {
+      process.feed(sessionId, logEvent('turn/start', { turn: 1 }, 1))
+    }
+    const id = await createSession(process.origin)
+    delete process.hooks.duringCreate
+    process.feed(id, user(2))
+    process.feed(id, logEvent('turn/end', { reason: { kind: 'completed' } }, 3))
+
+    const live = process.registry.get(id)!.projector
+    const folded = await createSessionHistory(query).fold(live.base)
+    expect(live.nextId).toBe(folded.nextId)
+    expect(live.items).toEqual(folded.items)
+    expect(live.turns).toEqual(folded.turns)
+    expect(live.turns.map(turn => turn.id)).toEqual(['turn_1'])
+  })
+
+  it('folds the log once for the create response', async () => {
+    const query = new FakeSessionQuery()
+    const process = await startProcess(new MemoryStore(), query)
+    await createSession(process.origin)
+    expect(query.reads).toBe(1)
   })
 })
 
@@ -394,6 +449,32 @@ describe('resume', () => {
     query.crash()
     const second = await startProcess(store, query, 'cannot resume: nope')
     await expect(second.api.resumeSession((await store.sessions.get(id, 'any'))!)).rejects.toThrow('cannot resume: nope')
+    expect(second.registry.get(id)).toBeUndefined()
+  })
+
+  it('undoes a lazy resume when the session is deleted while it is in flight', async () => {
+    const store = new MemoryStore()
+    const query = new FakeSessionQuery()
+    const first = await startProcess(store, query)
+    const id = await createSession(first.origin)
+    first.feed(id, logEvent('turn/start', { turn: 1 }, 1))
+    query.crash()
+    const second = await startProcess(store, query)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const dispose = vi.fn(() => Promise.resolve())
+    second.resume.mockImplementationOnce(async () => {
+      await gate
+      return { agent: {}, dispose }
+    })
+    const posted = fetch(`${second.origin}/v1/agents/sessions/${id}/events`, { method: 'POST', body: '{"events":[]}' })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    await store.sessions.delete(id, 'any')
+    release()
+    await posted
+    expect(dispose).toHaveBeenCalledOnce()
     expect(second.registry.get(id)).toBeUndefined()
   })
 

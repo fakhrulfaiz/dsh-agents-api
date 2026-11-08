@@ -73,13 +73,15 @@ Session create accepts `environment.type` `local` with an absolute `workspace_di
 
 Every event derived from the session's DSH Session log carries `id: <n>`, the 1-based position of the event in the session's wire event sequence. `agent.session.created` is always `id: 1`. The sequence is a pure function of the Session log, so a client's `Last-Event-ID` stays valid across server restarts. Event ids in the payload are deterministic too (`evt_<session_id>_<n>`), as are turn ids (`turn_<log position of turn/start>`) and item ids.
 
-`GET .../events` with `Last-Event-ID: n` writes every event with a greater `id`, derived from the Session log, then continues live without gaps or duplicates. Without the header the stream starts live with one status snapshot event (`agent.session.idle`, `in_progress`, or `requires_action`). A non-numeric `Last-Event-ID` replays the whole history.
+`GET .../events` with `Last-Event-ID: n` writes every event with a greater `id`, derived from the Session log, then continues live without gaps or duplicates. Without the header the stream starts live with one status snapshot event whose type matches the session status: `agent.session.idle`, `in_progress`, `requires_action`, or `failed` (also for an `interrupted` session). A non-numeric `Last-Event-ID` replays the whole history.
 
 Three kinds of event are ephemeral: they have no `id:` line, are never replayed, and do not move later ids. They are the status snapshot written when a stream connects, the `idle` event that closes a streamed create without input, and `error` events for a failed input dispatch. A reconnecting client derives the current status from the snapshot.
 
 A turn that was open when the server stopped is closed after the restart: its `function_call` tool calls get a failed `function_call_output`, and the turn becomes `cancelled` with `error.code: "interrupted"`. A `tool_result` for a call parked before the restart answers 400 `unknown_call_id`. Cancel now reports `agent.session.turn.cancelled` when the Host ends the turn, a few milliseconds after the request, rather than inside the request.
 
 Known gap: the `session` objects inside replayed events show the session's current configuration, not the configuration at the time of the event, because configuration changes are not in the Session log. Subagent turns and items are in memory only and are lost on restart.
+
+MCP tool `headers` supplied in `agent.tools` (which may carry credentials) are stored as part of the agent and session configuration in Postgres (`agents.body`, `sessions.body`) at rest.
 
 A session that is not live after a restart is resumed from its Session log when an input event is posted to it. A session created before migration 0002 has no stored setup and answers 409 `session_not_resumable`; a resume failure answers 500 `session_resume_failed`.
 
