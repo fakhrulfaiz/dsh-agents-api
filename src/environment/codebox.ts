@@ -1,9 +1,14 @@
 /**
- * Small Codebox HTTP client for environment provision.
+ * Codebox environment provider and its HTTP client.
  *
- * Command execution inside a box still belongs to the Codebox profile plugin.
- * This client only creates, waits, writes starter files, and tears boxes down.
+ * Parked: `Config` rejects Codebox settings and no configuration path
+ * constructs this provider until per-session execution exists. Command
+ * execution inside a box would belong to a Codebox profile plugin; this
+ * client only creates, waits, runs setup, moves files, and tears boxes down.
  */
+
+import type { EnvironmentRecord, EnvironmentStatus } from '../environment-types.ts'
+import { toWorkspacePath, type EnvironmentProvider } from './provider.ts'
 
 /** Settings required before any Codebox call is made. */
 export interface CodeboxSettings {
@@ -287,4 +292,120 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => {
     setTimeout(resolve, ms)
   })
+}
+
+/** Provision settings for `createCodeboxProvider`, every field resolved. */
+export interface CodeboxProvisionSettings {
+  /** Image used when neither the request nor the template names one. */
+  image: string
+  /** Seconds to wait for a new box to reach `running`. */
+  readyTimeoutSeconds: number
+  /** Budget instance id, or empty for none. */
+  budgetInstanceId: string
+}
+
+/**
+ * @param record - stored Codebox environment.
+ * @returns its box id.
+ * @throws when the environment never got a box.
+ */
+function boxOf(record: EnvironmentRecord): string {
+  const id = record.provider_metadata.codebox_id
+  if (id === undefined || id === '') throw new Error(`environment ${record.id} has no codebox_id`)
+  return id
+}
+
+/**
+ * @param record - stored Codebox environment.
+ * @returns its box id when the environment is connected.
+ * @throws when the environment has no box or is not connected.
+ */
+function connectedBox(record: EnvironmentRecord): string {
+  const id = boxOf(record)
+  if (record.status !== 'connected') throw new Error(`environment ${record.id} is not connected (status=${record.status})`)
+  return id
+}
+
+/**
+ * Wrap a Codebox client as an `EnvironmentProvider`.
+ * @param client - Codebox control-plane client.
+ * @param settings - provision defaults.
+ * @returns the provider; `create` reports a failed provision as status `failed` with `error`.
+ */
+export function createCodeboxProvider(client: CodeboxClient, settings: CodeboxProvisionSettings): EnvironmentProvider {
+  return {
+    kind: 'codebox',
+    async create(_owner, environmentId, input) {
+      const template = input.template ?? {}
+      let codeboxId: string | undefined
+      try {
+        const created = await client.create({
+          label: environmentId,
+          image: input.image?.trim() || template.image || settings.image,
+          workdirRoot: '/workspace',
+          ...(settings.budgetInstanceId === '' ? {} : { budgetInstanceId: settings.budgetInstanceId }),
+        })
+        codeboxId = created.id
+        await client.waitUntilRunning(created.id, settings.readyTimeoutSeconds)
+        if (template.packages !== undefined && template.packages.length > 0) {
+          const pkgs = template.packages.map(pkg => `'${pkg.replaceAll("'", `'\\''`)}'`).join(' ')
+          await client.exec(
+            created.id,
+            `apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y ${pkgs}`,
+            { workdir: '/workspace', waitSeconds: 60 },
+          )
+        }
+        if (template.setup !== undefined && template.setup.trim() !== '') {
+          await client.exec(created.id, template.setup, {
+            workdir: '/workspace',
+            ...(template.default_env !== undefined ? { env: template.default_env } : {}),
+            waitSeconds: 60,
+          })
+        }
+        for (const file of template.starter_files ?? []) {
+          await client.writeFile(created.id, toWorkspacePath(file.path), file.content)
+        }
+        return { status: 'connected', workspacePath: '/workspace', codeboxId: created.id }
+      } catch (error: unknown) {
+        return {
+          status: 'failed',
+          workspacePath: '/workspace',
+          ...(codeboxId === undefined ? {} : { codeboxId }),
+          error: error instanceof Error ? error.message : String(error),
+        }
+      }
+    },
+    async status(record): Promise<EnvironmentStatus> {
+      if (record.status === 'deleted' || record.status === 'failed' || record.status === 'cleanup') return record.status
+      const remote = await client.get(boxOf(record))
+      if (remote.status === 'running') return 'connected'
+      if (remote.status === 'spawning') return 'pending'
+      if (remote.status === 'failed' || remote.status === 'terminated') return 'failed'
+      return record.status
+    },
+    async destroy(record) {
+      const id = record.provider_metadata.codebox_id
+      if (id === undefined || id === '') return
+      try {
+        await client.destroy(id)
+      } catch (error: unknown) {
+        // A box the control plane no longer knows is already destroyed.
+        if (!(error instanceof Error) || !error.message.includes('→ 404')) throw error
+      }
+    },
+    async listFiles(record) {
+      const result = await client.exec(
+        connectedBox(record),
+        'find /workspace -mindepth 1 -type f -printf "%P\\n" 2>/dev/null | sort',
+        { workdir: '/workspace', waitSeconds: 30 },
+      )
+      return result.stdout.split('\n').map(line => line.trim()).filter(line => line.length > 0)
+    },
+    async readFile(record, path) {
+      return client.readFile(connectedBox(record), toWorkspacePath(path))
+    },
+    async writeFile(record, path, content) {
+      await client.writeFile(connectedBox(record), toWorkspacePath(path), content)
+    },
+  }
 }

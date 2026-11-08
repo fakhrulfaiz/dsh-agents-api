@@ -63,6 +63,7 @@ pnpm typecheck && pnpm test && pnpm build
 - `typecheck` checks `src` against DSH declarations (`tsconfig.typecheck.json`), then `src`, `tests`, `scripts`, and `vitest.config.ts` (`tsconfig.test.json`).
 - `vitest.config.ts` imports `standardDecoratorPlugin` from DSH's internal `vitest.shared.ts`; check it when bumping the pin.
 - After a source change, run `pnpm build` and restart the profile that links this package.
+- `pnpm test` needs a running Docker daemon: the store contract tests and the Loader composition test start a `postgres:16-alpine` container through Testcontainers and remove it when the file finishes.
 
 ### What you get
 
@@ -82,8 +83,15 @@ REST and SSE under the configured prefix (`/v1` by default) for saved agents, se
 | `auth.devKey.owner`         | none    | Owner id the key acts as                                                                                  |
 | `auth.devKey.admin`         | `true`  | Grant `agentry-admin` to the key                                                                          |
 | `prefix`                    | `/v1`   | URL prefix for every Agents API route                                                                     |
+| `database.url`              | none    | Required. Postgres connection URL for agents, templates, environments, and the session index. The bundled patch reads it from `AGENTRY_DATABASE_URL` |
+| `workspaces`                | none    | Root of `<owner>/<session>/` session workspaces and `<owner>/<environment>/` local environments (env `AGENTS_API_WORKSPACES`). Unset: sessions run in the host cwd and environments go under the OS temp dir |
+| `artifacts.*`               | absent  | Optional S3 artifact backend (`endpoint`, `bucket`, `prefix`, `region`, `accessKeyId`, `secretAccessKey`); off unless endpoint and credentials are set |
+| `codebox`                   | —       | Rejected at load with `CodeboxDisabledError`, as are the `CODEBOX_BASE_URL` and `CODEBOX_API_KEY` env vars: Codebox environments are parked |
+| `dataDir`                   | —       | Removed; rejected at load. Records live in Postgres                                                       |
 
 The caller's owner is the token `sub`; roles come from `realm_access.roles` (`agentry-user`, `agentry-admin`). Missing or invalid credentials return 401 `unauthenticated` with `WWW-Authenticate: Bearer`; a principal holding neither `agentry-user` nor `agentry-admin` gets 403 `forbidden`. Tokens need `exp`, `sub`, and `typ: Bearer`. `/health` is unauthenticated. The bundled `cordis.patch.yml` runs in `development` mode with the key read from `AGENTRY_DEV_KEY`.
+
+Every agent, template, environment, and session route reads and writes only the caller's records; another owner's record answers 404, never 403. At startup the plugin applies the numbered migrations in `src/store/migrations/` and opens a connection pool. Until then, and for good after a failed migration or connection (logged as `StoreStartError`), `/v1` answers 503 `store_unavailable`. A database error during a request also answers 503 `store_unavailable`.
 
 
 The wire details for create, stream, and function tools live in [HTTP API](docs/http-api.md). The route list is below.
@@ -108,15 +116,15 @@ Paths other than `/health` sit under the configured `prefix` (default `/v1`). Se
 | `GET` | `/agents/environments/templates/{id}` | Read one template. |
 | `POST` | `/agents/environments/templates/{id}` | Update one template's name or config. |
 | `DELETE` | `/agents/environments/templates/{id}` | Delete one template. |
-| `POST` | `/agents/environments` | Create a live environment. With no Codebox client this is a local directory. `environment.type: "sandbox"` on a session is rejected. |
-| `GET` | `/agents/environments` | List live environments. |
-| `GET` | `/agents/environments/{id}` | Read one environment and refresh it from Codebox when a box id is known. |
-| `DELETE` | `/agents/environments/{id}` | Destroy the Codebox, when one exists, and delete the record. |
-| `POST` | `/agents/environments/{id}/files` | Write one file into a connected Codebox (`path` plus `content` or `content_base64`). |
-| `GET` | `/agents/environments/{id}/files` | List files under `/workspace` in a connected Codebox. |
-| `GET` | `/agents/environments/{id}/files/{path}` | Read one file from a connected Codebox. |
+| `POST` | `/agents/environments` | Create a local environment: the directory `<workspaces>/<owner>/<environment_id>/`. `template_id` and `session_id` must name the caller's records. `environment.type: "sandbox"` on a session is rejected. |
+| `GET` | `/agents/environments` | List the caller's environments. |
+| `GET` | `/agents/environments/{id}` | Read one environment; its status becomes `failed` when the directory is gone. |
+| `DELETE` | `/agents/environments/{id}` | Remove the directory and delete the record. |
+| `POST` | `/agents/environments/{id}/files` | Write one file (`path` plus `content` or `content_base64`). Paths that escape the workspace are rejected. |
+| `GET` | `/agents/environments/{id}/files` | List regular files in the workspace. |
+| `GET` | `/agents/environments/{id}/files/{path}` | Read one file. |
 | `POST` | `/agents/sessions` | Create a session from an inline `agent` and/or a saved `agent_id`. `stream: true` returns SSE. |
-| `GET` | `/agents/sessions` | List sessions. |
+| `GET` | `/agents/sessions` | List the caller's sessions, newest first (`limit`, `after`; `order` is ignored). |
 | `GET` | `/agents/sessions/{session_id}` | Read one session. |
 | `POST` | `/agents/sessions/{session_id}` | Update `model`, `reasoning.effort`, `service_tier`, or `metadata`. |
 | `DELETE` | `/agents/sessions/{session_id}` | Delete the session and any environments whose `session_id` is that session. |
@@ -144,7 +152,7 @@ Implementation internals
 
 `[cordis.patch.yml](cordis.patch.yml)` inserts this plugin after `dsh-base` and `dsh-web-app`. It does not insert a webserver. The plugin is a function plugin (`name` / `inject` / `Config` / `apply`, no default export). `apply` registers `/health` and a `/v1` prefix handler on the web app's `webServer`, and fans `session/event` into Agents API SSE events plus a live item list. `/agents/sessions` is matched before `/agents/:agent_id` so the literal `sessions` segment is never captured as an agent id.
 
-Each session calls `ctx.agents.create` with a `sess_*` id, `agentOptions.provider` from `agentDefaultModel`, and `agentOptions.model` from the wire agent, then `followup` or `steer`. Saved agents live only in this process; session-local inline agents are materialized without appearing in `GET /agents`. Item listing accumulates from live `session/event` records and does not read historical Session logs. A `turn/end` with `reason.kind === 'error'` becomes `agent.session.turn.failed`; other ends become `agent.session.turn.completed`.
+Each session calls `ctx.agents.create` with a `sess_*` id, `agentOptions.provider` from `agentDefaultModel`, and `agentOptions.model` from the wire agent, then `followup` or `steer`. Saved agents, templates, environments, and the session index live in Postgres through the `Store` interface (`src/store/`); session-local inline agents are materialized without appearing in `GET /agents`. Item listing accumulates from live `session/event` records and does not read historical Session logs. A `turn/end` with `reason.kind === 'error'` becomes `agent.session.turn.failed`; other ends become `agent.session.turn.completed`.
 
 
 | File                                                             | Role                                                                                                                                                                                              |
@@ -153,7 +161,13 @@ Each session calls `ctx.agents.create` with a `sess_*` id, `agentOptions.provide
 | `[src/index.ts](src/index.ts)`                                   | Plugin entry, prefix registration, Session-event bridge                                                                                                                                           |
 | `[src/gateway.ts](src/gateway.ts)`                               | Ordered HTTP routes and Host agent lifecycle                                                                                                                                                      |
 | `[src/session-registry.ts](src/session-registry.ts)`             | Session, turn, item, and SSE subscriber directory                                                                                                                                                 |
-| `[src/agent-store.ts](src/agent-store.ts)`                       | Saved-agent CRUD                                                                                                                                                                                  |
+| `[src/agent-records.ts](src/agent-records.ts)`                   | Saved-agent record construction and update merge                                                                                                                                                  |
+| `[src/store/store.ts](src/store/store.ts)`                       | `Store` interface, session cursor, outage errors                                                                                                                                                  |
+| `[src/store/postgres.ts](src/store/postgres.ts)`                 | `Store` over a `pg` pool                                                                                                                                                                          |
+| `[src/store/migrate.ts](src/store/migrate.ts)`                   | Forward-only, advisory-locked migrations from `src/store/migrations/`                                                                                                                             |
+| `[src/environment/provider.ts](src/environment/provider.ts)`     | `EnvironmentProvider` interface                                                                                                                                                                   |
+| `[src/environment/local.ts](src/environment/local.ts)`           | Local provider: `<workspaces>/<owner>/<environment_id>/` directories                                                                                                                              |
+| `[src/environment/codebox.ts](src/environment/codebox.ts)`       | Parked Codebox client and provider; no configuration constructs it                                                                                                                                |
 | `[src/items.ts](src/items.ts)`                                   | One Session event to saved items                                                                                                                                                                  |
 | `[src/bridge.ts](src/bridge.ts)`                                 | Session events to Agents API output events                                                                                                                                                        |
 | `[src/pending-function-calls.ts](src/pending-function-calls.ts)` | Parked client function-tool waiters and `requires_action`                                                                                                                                         |

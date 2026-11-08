@@ -24,21 +24,21 @@ import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { AgentStore } from './agent-store.ts'
 import { firstThen, type Authenticator } from './auth/authenticator.ts'
 import { createKeycloakAuthenticator } from './auth/keycloak.ts'
 import { createStaticKeyAuthenticator } from './auth/static-key.ts'
 import { bridgeChildSessionEvent, bridgeSessionEvent } from './bridge.ts'
-import { CodeboxClient } from './codebox-client.ts'
-import { FsAgentsApiStore, FsEnvironmentApiStore } from './durable-store.ts'
-import { EnvironmentDirectory } from './environment-service.ts'
+import { createLocalProvider } from './environment/local.ts'
 import { AgentsGateway } from './gateway.ts'
-import { resolveRuntimeConfig, type RuntimeConfigInput } from './runtime-config.ts'
+import { CodeboxDisabledError, resolveRuntimeConfig, type RuntimeConfigInput } from './runtime-config.ts'
 import { SessionRegistry } from './session-registry.ts'
+import { migrate } from './store/migrate.ts'
+import { openPostgresStore } from './store/postgres.ts'
+import { StoreStartError, type Store } from './store/store.ts'
 
 export * from './types.ts'
 export * from './sse.ts'
-export * from './agent-store.ts'
+export * from './agent-records.ts'
 export * from './session-registry.ts'
 export * from './items.ts'
 export * from './http.ts'
@@ -53,8 +53,13 @@ export * from './mount-mcp-tools.ts'
 export * from './host-tools.ts'
 export * from './environment-types.ts'
 export * from './runtime-config.ts'
-export * from './durable-store.ts'
 export * from './artifacts.ts'
+export * from './store/store.ts'
+export { migrate, MigrationError } from './store/migrate.ts'
+export { openPostgresStore } from './store/postgres.ts'
+export * from './environment/provider.ts'
+export { createLocalProvider, directorySegment } from './environment/local.ts'
+export { CodeboxClient, createCodeboxProvider, type CodeboxExecResult, type CodeboxProvisionSettings, type CodeboxSettings } from './environment/codebox.ts'
 export { bearerToken, firstThen, ownerId, requireAnyRole, requireRole, unauthenticated } from './auth/authenticator.ts'
 export type { AuthResult, Authenticator, OwnerId, Principal, Role as AuthRole } from './auth/authenticator.ts'
 export { createKeycloakAuthenticator, type KeycloakAuthConfig } from './auth/keycloak.ts'
@@ -118,10 +123,23 @@ export interface Config extends RuntimeConfigInput {
   }
   /** API path prefix (default `/v1`). */
   prefix?: string
+  /** Agentry's Postgres database. Required. */
+  database?: {
+    /** Connection URL, for example `postgres://agentry:…@postgres:5432/agentry`. */
+    url: string
+  }
+  /** Rejected with `CodeboxDisabledError`: Codebox environments are parked. */
+  codebox?: unknown
+  /** Rejected: removed when records moved from JSON files to Postgres (`database.url`). */
+  dataDir?: unknown
 }
 
-/** `Config` after validation: `auth` and `prefix` are always present and defaulted. */
-export type ResolvedConfig = Omit<Config, 'auth' | 'prefix'> & { auth: ResolvedAuthConfig; prefix: string }
+/** `Config` after validation: `auth`, `prefix`, and `database` are always present; `codebox` and `dataDir` never are. */
+export type ResolvedConfig = Omit<Config, 'auth' | 'prefix' | 'database' | 'codebox' | 'dataDir'> & {
+  auth: ResolvedAuthConfig
+  prefix: string
+  database: { url: string }
+}
 
 /** Schemastery types `.default` as the object's value; `null` is how an optional nested object is left absent at runtime. */
 const ABSENT = null as never
@@ -145,15 +163,13 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
     }).default(ABSENT),
   }).default(ABSENT),
   prefix: z.string().default('/v1'),
-  dataDir: z.string(),
+  database: z.object({
+    url: z.string().required(),
+  }).required(),
+  // Declared only so the transform can reject them by name.
+  dataDir: z.any(),
+  codebox: z.any(),
   workspaces: z.string(),
-  codebox: z.object({
-    baseUrl: z.string(),
-    apiKey: z.string(),
-    image: z.string(),
-    readyTimeoutSeconds: z.number(),
-    budgetInstanceId: z.string(),
-  }),
   artifacts: z.object({
     endpoint: z.string(),
     bucket: z.string(),
@@ -161,9 +177,13 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
     region: z.string(),
     accessKeyId: z.string(),
     secretAccessKey: z.string(),
-  }),
+  }).default(ABSENT),
 }), (config) => {
   validateAuth(config.auth as ResolvedAuthConfig | undefined)
+  if (config.codebox !== undefined && config.codebox !== null) throw new CodeboxDisabledError('the "codebox" config block')
+  if (config.dataDir !== undefined && config.dataDir !== null) {
+    throw new Error('agents-api: "dataDir" was removed; agents, environments, and the session index live in Postgres (database.url)')
+  }
   return config
 }, true) as unknown as z<Config, ResolvedConfig>
 
@@ -205,34 +225,24 @@ export function createAuthenticator(auth: ResolvedAuthConfig, warn: (message: st
 }
 
 /**
- * Register the Agents API prefix route and Session-event bridge.
+ * Register the Agents API prefix route and Session-event bridge, then migrate
+ * and open the Postgres store in the background. Until the store is open
+ * `/v1` answers 503 `store_unavailable`; when migration or connection fails,
+ * a `StoreStartError` is logged and `/v1` keeps answering 503 with its message.
  * @param ctx - plugin context with `webServer`, `sessions`, `agents`, `agentDefaultModel`, and `tools`.
- * @param config - `auth` block and path prefix.
+ * @param config - validated config.
  */
 export function apply(ctx: Context, config: ResolvedConfig): void {
   const prefix = config.prefix
   const runtime = resolveRuntimeConfig(config)
-  const agentStore = new AgentStore()
   const sessionRegistry = new SessionRegistry()
-  const environments = new EnvironmentDirectory(
-    runtime.codebox === undefined ? undefined : new CodeboxClient(runtime.codebox),
-    runtime.codebox ?? {},
-    runtime.workspacesRoot,
-  )
-  const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth, message => ctx.logger.warn(message)), prefix, agentStore, sessionRegistry, {
-    environments,
+  const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth, message => ctx.logger.warn(message)), prefix, undefined, sessionRegistry, {
+    environments: createLocalProvider(runtime.environmentsRoot),
     ...(runtime.workspacesRoot === undefined ? {} : { workspacesRoot: runtime.workspacesRoot }),
     ...(runtime.artifacts === undefined ? {} : { artifacts: runtime.artifacts }),
   })
-  if (runtime.dataDir !== undefined) {
-    gateway.ready = false
-    const dataDir = runtime.dataDir
-    void openDataDir(dataDir, agentStore, environments).then(() => {
-      gateway.ready = true
-    }, (error: unknown) => {
-      gateway.startError = error instanceof Error ? error.message : String(error)
-    })
-  }
+
+  ctx.effect(() => openStore(ctx, config.database.url, gateway), 'agents-api: postgres store')
 
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     const parent = session.header?.parentSession
@@ -273,25 +283,27 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
 }
 
 /**
- * Load agents and environments before routes answer.
- * @param dataDir - directory from config or `AGENTS_API_DATA_DIR`.
- * @param agentStore - in-memory agent directory.
- * @param environments - in-memory environment directory.
+ * Migrate, open, and attach the store; the returned disposer detaches and closes it.
+ * @param ctx - plugin context, for logging.
+ * @param url - Postgres connection URL.
+ * @param gateway - gateway that serves from the store.
+ * @returns the effect disposer.
+ * @throws StoreStartError after recording it on the gateway and logging it.
  */
-async function openDataDir(
-  dataDir: string,
-  agentStore: AgentStore,
-  environments: EnvironmentDirectory,
-): Promise<void> {
-  const agents = new FsAgentsApiStore(dataDir)
-  const envs = new FsEnvironmentApiStore(dataDir)
-  await agents.open()
-  agentStore.load(await agents.loadAll())
-  agentStore.bindPersistence({
-    put: agent => agents.putAgent(agent),
-    remove: async (id) => {
-      await agents.deleteAgent(id)
-    },
-  })
-  await environments.openDisk(envs)
+async function openStore(ctx: Context, url: string, gateway: AgentsGateway): Promise<() => Promise<void>> {
+  let store: Store
+  try {
+    await migrate(url)
+    store = await openPostgresStore(url, error => ctx.logger.warn(`agents-api: idle Postgres connection failed: ${error.message}`))
+  } catch (error: unknown) {
+    const failure = new StoreStartError(error)
+    gateway.failStore(failure.message)
+    ctx.logger.error(failure)
+    throw failure
+  }
+  gateway.attachStore(store)
+  return async () => {
+    gateway.detachStore()
+    await store.close()
+  }
 }

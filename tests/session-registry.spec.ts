@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { materializeAgent } from '../src/agent-store.ts'
+import { materializeAgent } from '../src/agent-records.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
 
 describe('SessionRegistry', () => {

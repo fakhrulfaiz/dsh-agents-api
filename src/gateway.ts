@@ -16,7 +16,7 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { AgentStore, materializeAgent } from './agent-store.ts'
+import { materializeAgent, updatedAgent } from './agent-records.ts'
 import { mintEventId } from './bridge.ts'
 import { AgentsApiRequestError } from './errors.ts'
 import {
@@ -40,9 +40,16 @@ import { SessionRegistry } from './session-registry.ts'
 import { writeEvent, writeSSEHeaders } from './sse.ts'
 import type { ArtifactS3Config } from './artifacts.ts'
 import { getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath } from './artifacts.ts'
-import { EnvironmentDirectory } from './environment-service.ts'
-import type { EnvironmentTemplateConfig } from './environment-types.ts'
-import type { SubagentState } from './session-registry.ts'
+import { directorySegment } from './environment/local.ts'
+import type { CreateEnvironmentInput, EnvironmentProvider } from './environment/provider.ts'
+import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, EnvironmentTemplateConfig } from './environment-types.ts'
+import type { RegisteredSessionState, SubagentState } from './session-registry.ts'
+import {
+  StoreUnavailableError,
+  encodeSessionCursor,
+  guardStore,
+  type Store,
+} from './store/store.ts'
 import type {
   CreateAgentParams,
   CreateSessionParams,
@@ -57,7 +64,7 @@ import type {
 } from './types.ts'
 
 import { requireAnyRole } from './auth/authenticator.ts'
-import type { AuthResult, Authenticator, Principal } from './auth/authenticator.ts'
+import type { AuthResult, Authenticator, OwnerId, Principal } from './auth/authenticator.ts'
 
 interface Route {
   method: string
@@ -71,86 +78,125 @@ interface Route {
   ) => Promise<void>
 }
 
-/** Optional backends wired by plugin apply. Tests omit all of them. */
+/** Backends wired by plugin apply. */
 export interface GatewayOptions {
-  environments?: EnvironmentDirectory
+  /** Workspace backend for `/agents/environments`. */
+  environments: EnvironmentProvider
+  /** Root of `<owner>/<session>/` default session workspaces; omitted to run sessions in the host cwd. */
   workspacesRoot?: string
   artifacts?: ArtifactS3Config
 }
 
-interface DockerSandboxService {
-  create(options: { codeboxId?: string; name?: string; persist?: boolean; network?: boolean }): Promise<unknown>
-}
-
-/** Request dispatcher registered on `ctx.webServer`. */
+/**
+ * Request dispatcher registered on `ctx.webServer`.
+ *
+ * Every agent, template, environment, and session read and write is scoped
+ * to the authenticated owner; another owner's record answers 404. Until a
+ * store is attached, and after a store call rejects, routes answer 503
+ * `store_unavailable`.
+ */
 export class AgentsGateway {
   private readonly handles = new Map<string, AgentHandle>()
   private readonly pendingBySession = new Map<string, PendingFunctionCalls>()
-  private readonly environments: EnvironmentDirectory
+  private readonly environments: EnvironmentProvider
   private readonly workspacesRoot: string | undefined
   private readonly artifacts: ArtifactS3Config | undefined
   private readonly routes: Route[]
-  /** False while the data directory is still opening. */
-  ready = true
-  /** Set when opening the data directory fails. Routes stay at 503. */
-  startError: string | undefined
+  #store: Store | undefined
+  #storeError: string | undefined
+  /** Owners whose `owners` row this store already holds. */
+  readonly #knownOwners = new Set<OwnerId>()
 
   /**
    * @param ctx - plugin context with `webServer`, `sessions`, and `agents`.
    * @param authenticator - resolves the caller of every request under the prefix.
    * @param prefix - URL prefix, default `/v1`.
-   * @param agentStore - saved-agent directory.
+   * @param store - durable records, or `undefined` until `attachStore`.
    * @param sessionRegistry - live session directory.
+   * @param options - environment provider and optional workspace and artifact backends.
    */
   constructor(
     private readonly ctx: Context,
     private readonly authenticator: Authenticator,
     private readonly prefix: string,
-    private readonly agentStore: AgentStore,
+    store: Store | undefined,
     private readonly sessionRegistry: SessionRegistry,
-    options: GatewayOptions = {},
+    options: GatewayOptions,
   ) {
-    this.environments = options.environments ?? new EnvironmentDirectory()
+    if (store !== undefined) this.attachStore(store)
+    this.environments = options.environments
     this.workspacesRoot = options.workspacesRoot
     this.artifacts = options.artifacts
     this.routes = [
-      { method: 'POST', pattern: '/agents', handler: (req, res) => this.createAgent(req, res) },
-      { method: 'GET', pattern: '/agents', handler: (_req, res, url) => this.listAgents(res, url) },
-      { method: 'GET', pattern: '/agents/tools', handler: (_req, res, url) => this.listHostTools(res, url) },
-      { method: 'POST', pattern: '/agents/environments/templates', handler: (req, res) => this.createTemplate(req, res) },
-      { method: 'GET', pattern: '/agents/environments/templates', handler: (_req, res) => this.listTemplates(res) },
-      { method: 'GET', pattern: '/agents/environments/templates/:template_id', handler: (_req, res, _url, params) => this.getTemplate(res, params) },
-      { method: 'POST', pattern: '/agents/environments/templates/:template_id', handler: (req, res, _url, params) => this.updateTemplate(req, res, params) },
-      { method: 'DELETE', pattern: '/agents/environments/templates/:template_id', handler: (_req, res, _url, params) => this.deleteTemplate(res, params) },
-      { method: 'POST', pattern: '/agents/environments', handler: (req, res) => this.createEnvironment(req, res) },
-      { method: 'GET', pattern: '/agents/environments', handler: (_req, res) => this.listEnvironments(res) },
-      { method: 'POST', pattern: '/agents/environments/:environment_id/files', handler: (req, res, _url, params) => this.writeEnvironmentFile(req, res, params) },
-      { method: 'GET', pattern: '/agents/environments/:environment_id/files/*path', handler: (_req, res, _url, params) => this.readEnvironmentFile(res, params) },
-      { method: 'GET', pattern: '/agents/environments/:environment_id/files', handler: (_req, res, _url, params) => this.listEnvironmentFiles(res, params) },
-      { method: 'GET', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params) => this.getEnvironment(res, params) },
-      { method: 'DELETE', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params) => this.deleteEnvironment(res, params) },
-      { method: 'POST', pattern: '/agents/sessions', handler: (req, res, url) => this.createSession(req, res, url) },
-      { method: 'GET', pattern: '/agents/sessions', handler: (_req, res, url) => this.listSessions(res, url) },
-      { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts/*path', handler: (_req, res, _url, params) => this.getArtifact(res, params) },
-      { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts', handler: (_req, res, _url, params) => this.listArtifacts(res, params) },
-      { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id/items', handler: (_req, res, _url, params) => this.listSubagentTurnItems(res, params) },
-      { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id', handler: (_req, res, _url, params) => this.getSubagentTurn(res, params) },
-      { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns', handler: (_req, res, _url, params) => this.listSubagentTurns(res, params) },
-      { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/items', handler: (_req, res, _url, params) => this.listSubagentItems(res, params) },
-      { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id', handler: (_req, res, _url, params) => this.getSubagent(res, params) },
-      { method: 'GET', pattern: '/agents/sessions/:session_id/subagents', handler: (_req, res, _url, params) => this.listSubagents(res, params) },
-      { method: 'POST', pattern: '/agents/sessions/:session_id/events', handler: (req, res, _url, params) => this.postEvents(req, res, params) },
-      { method: 'GET', pattern: '/agents/sessions/:session_id/events', handler: (req, res, _url, params) => this.streamEvents(req, res, params) },
-      { method: 'GET', pattern: '/agents/sessions/:session_id/items', handler: (_req, res, url, params) => this.listItems(res, url, params) },
-      { method: 'GET', pattern: '/agents/sessions/:session_id/turns/:turn_id', handler: (_req, res, _url, params) => this.getTurn(res, params) },
-      { method: 'GET', pattern: '/agents/sessions/:session_id/turns', handler: (_req, res, url, params) => this.listTurns(res, url, params) },
-      { method: 'POST', pattern: '/agents/sessions/:session_id', handler: (req, res, _url, params) => this.updateSession(req, res, params) },
-      { method: 'GET', pattern: '/agents/sessions/:session_id', handler: (_req, res, _url, params) => this.getSession(res, params) },
-      { method: 'DELETE', pattern: '/agents/sessions/:session_id', handler: (_req, res, _url, params) => this.deleteSession(res, params) },
-      { method: 'GET', pattern: '/agents/:agent_id', handler: (_req, res, _url, params) => this.getAgent(res, params) },
-      { method: 'POST', pattern: '/agents/:agent_id', handler: (req, res, _url, params) => this.updateAgent(req, res, params) },
-      { method: 'DELETE', pattern: '/agents/:agent_id', handler: (_req, res, _url, params) => this.deleteAgent(res, params) },
+      { method: 'POST', pattern: '/agents', handler: (req, res, _url, _params, p) => this.createAgent(req, res, p.owner) },
+      { method: 'GET', pattern: '/agents', handler: (_req, res, url, _params, p) => this.listAgents(res, url, p.owner) },
+      { method: 'GET', pattern: '/agents/tools', handler: (_req, res, url, _params, p) => this.listHostTools(res, url, p.owner) },
+      { method: 'POST', pattern: '/agents/environments/templates', handler: (req, res, _url, _params, p) => this.createTemplate(req, res, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/templates', handler: (_req, res, url, _params, p) => this.listTemplates(res, url, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/templates/:template_id', handler: (_req, res, _url, params, p) => this.getTemplate(res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/environments/templates/:template_id', handler: (req, res, _url, params, p) => this.updateTemplate(req, res, params, p.owner) },
+      { method: 'DELETE', pattern: '/agents/environments/templates/:template_id', handler: (_req, res, _url, params, p) => this.deleteTemplate(res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/environments', handler: (req, res, _url, _params, p) => this.createEnvironment(req, res, p.owner) },
+      { method: 'GET', pattern: '/agents/environments', handler: (_req, res, url, _params, p) => this.listEnvironments(res, url, p.owner) },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/files', handler: (req, res, _url, params, p) => this.writeEnvironmentFile(req, res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/:environment_id/files/*path', handler: (_req, res, _url, params, p) => this.readEnvironmentFile(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/:environment_id/files', handler: (_req, res, _url, params, p) => this.listEnvironmentFiles(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.getEnvironment(res, params, p.owner) },
+      { method: 'DELETE', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.deleteEnvironment(res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/sessions', handler: (req, res, url, _params, p) => this.createSession(req, res, url, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions', handler: (_req, res, url, _params, p) => this.listSessions(res, url, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts/*path', handler: (_req, res, _url, params, p) => this.getArtifact(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts', handler: (_req, res, _url, params, p) => this.listArtifacts(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id/items', handler: (_req, res, _url, params, p) => this.listSubagentTurnItems(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id', handler: (_req, res, _url, params, p) => this.getSubagentTurn(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns', handler: (_req, res, _url, params, p) => this.listSubagentTurns(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/items', handler: (_req, res, _url, params, p) => this.listSubagentItems(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id', handler: (_req, res, _url, params, p) => this.getSubagent(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/subagents', handler: (_req, res, _url, params, p) => this.listSubagents(res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/sessions/:session_id/events', handler: (req, res, _url, params, p) => this.postEvents(req, res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/events', handler: (req, res, _url, params, p) => this.streamEvents(req, res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/items', handler: (_req, res, url, params, p) => this.listItems(res, url, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/turns/:turn_id', handler: (_req, res, _url, params, p) => this.getTurn(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/turns', handler: (_req, res, url, params, p) => this.listTurns(res, url, params, p.owner) },
+      { method: 'POST', pattern: '/agents/sessions/:session_id', handler: (req, res, _url, params, p) => this.updateSession(req, res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id', handler: (_req, res, _url, params, p) => this.getSession(res, params, p.owner) },
+      { method: 'DELETE', pattern: '/agents/sessions/:session_id', handler: (_req, res, _url, params, p) => this.deleteSession(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/:agent_id', handler: (_req, res, _url, params, p) => this.getAgent(res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/:agent_id', handler: (req, res, _url, params, p) => this.updateAgent(req, res, params, p.owner) },
+      { method: 'DELETE', pattern: '/agents/:agent_id', handler: (_req, res, _url, params, p) => this.deleteAgent(res, params, p.owner) },
     ]
+  }
+
+  /**
+   * Serve requests from `store`. Clears an earlier start failure.
+   * @param store - opened store; its rejections answer 503 `store_unavailable`.
+   */
+  attachStore(store: Store): void {
+    this.#store = guardStore(store)
+    this.#storeError = undefined
+    this.#knownOwners.clear()
+  }
+
+  /** Stop using the attached store; routes answer 503 until the next `attachStore`. */
+  detachStore(): void {
+    this.#store = undefined
+    this.#knownOwners.clear()
+  }
+
+  /**
+   * Record that the store could not start; routes answer 503 with `message`.
+   * @param message - start failure shown to clients.
+   */
+  failStore(message: string): void {
+    this.#store = undefined
+    this.#storeError = message
+    this.#knownOwners.clear()
+  }
+
+  /** The attached store; a detach during a request surfaces as a store outage. */
+  private get store(): Store {
+    if (this.#store === undefined) throw new StoreUnavailableError(this.#storeError ?? 'agents store is not attached')
+    return this.#store
   }
 
   /**
@@ -165,15 +211,26 @@ export class AgentsGateway {
       return
     }
     const { principal } = auth
-    if (!this.ready) {
-      json(res, 503, {
-        error: {
-          type: 'server_error',
-          message: this.startError ?? 'agents store is opening',
-          code: 'starting',
-        },
-      })
+    if (this.#store === undefined) {
+      storeUnavailable(res, this.#storeError ?? 'agents store is opening')
       return
+    }
+    try {
+      await this.dispatch(req, res, principal)
+    } catch (error: unknown) {
+      if (error instanceof StoreUnavailableError) {
+        if (res.headersSent) res.end()
+        else storeUnavailable(res, error.message)
+        return
+      }
+      throw error
+    }
+  }
+
+  private async dispatch(req: IncomingMessage, res: ServerResponse, principal: Principal): Promise<void> {
+    if (!this.#knownOwners.has(principal.owner)) {
+      await this.store.ensureOwner(principal.owner)
+      this.#knownOwners.add(principal.owner)
     }
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
     const method = (req.method ?? 'GET').toUpperCase()
@@ -211,7 +268,7 @@ export class AgentsGateway {
     })
   }
 
-  private async createAgent(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async createAgent(req: IncomingMessage, res: ServerResponse, owner: OwnerId): Promise<void> {
     const body = await readBody(req) as unknown as CreateAgentParams
     if (typeof body.model !== 'string' || body.model === '') {
       badRequest(res, 'Field "model" is required')
@@ -227,17 +284,14 @@ export class AgentsGateway {
       badRequest(res, hostToolsError)
       return
     }
-    const agent = this.agentStore.create(body)
-    if (!await this.flushAgents(res)) return
-    json(res, 200, agent)
+    json(res, 200, await this.store.agents.create(owner, materializeAgent(body)))
   }
 
-  private listAgents(res: ServerResponse, url: URL): Promise<void> {
-    json(res, 200, this.agentStore.list(listQuery(url)))
-    return Promise.resolve()
+  private async listAgents(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
+    json(res, 200, await this.store.agents.list(owner, listQuery(url)))
   }
 
-  private async listHostTools(res: ServerResponse, url: URL): Promise<void> {
+  private async listHostTools(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
     const sessionId = url.searchParams.get('session_id')
     const schemas = await this.hostToolSchemas()
     let data = schemas.map(schema => ({
@@ -247,15 +301,11 @@ export class AgentsGateway {
       source: 'host' as const,
     }))
     if (sessionId) {
-      const state = this.sessionRegistry.get(sessionId)
-      if (!state) {
-        notFound(res, `Session "${sessionId}" not found`)
-        return Promise.resolve()
-      }
+      const state = await this.requireSession(res, owner, sessionId)
+      if (!state) return
       data = maskHostCatalog(data, state.agent.host_tools)
     }
     json(res, 200, { object: 'list', data })
-    return Promise.resolve()
   }
 
   /**
@@ -283,18 +333,17 @@ export class AgentsGateway {
     return this.ctx.tools.schemas()
   }
 
-  private getAgent(res: ServerResponse, params: Record<string, string>): Promise<void> {
+  private async getAgent(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const agentId = routeParam(params, 'agent_id')
-    const agent = this.agentStore.get(agentId)
+    const agent = await this.store.agents.get(owner, agentId)
     if (!agent) {
       notFound(res, `Agent "${agentId}" not found`)
-      return Promise.resolve()
+      return
     }
     json(res, 200, agent)
-    return Promise.resolve()
   }
 
-  private async updateAgent(req: IncomingMessage, res: ServerResponse, params: Record<string, string>): Promise<void> {
+  private async updateAgent(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const agentId = routeParam(params, 'agent_id')
     const body = await readBody(req) as unknown as UpdateAgentParams
     if (body.tools !== undefined && body.tools !== null) {
@@ -311,28 +360,27 @@ export class AgentsGateway {
         return
       }
     }
-    const updated = this.agentStore.update(agentId, body)
+    const existing = await this.store.agents.get(owner, agentId)
+    const updated = existing === undefined ? undefined : await this.store.agents.update(owner, agentId, updatedAgent(existing, body))
     if (!updated) {
       notFound(res, `Agent "${agentId}" not found`)
       return
     }
-    if (!await this.flushAgents(res)) return
     json(res, 200, updated)
   }
 
-  private async deleteAgent(res: ServerResponse, params: Record<string, string>): Promise<void> {
+  private async deleteAgent(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const agentId = routeParam(params, 'agent_id')
-    if (!this.agentStore.delete(agentId)) {
+    if (!await this.store.agents.delete(owner, agentId)) {
       notFound(res, `Agent "${agentId}" not found`)
       return
     }
-    if (!await this.flushAgents(res)) return
     json(res, 200, { id: agentId, object: 'agent.deleted', deleted: true })
   }
 
-  private async createSession(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  private async createSession(req: IncomingMessage, res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
     const body = await readBody(req) as unknown as CreateSessionParams
-    const resolved = this.resolveSessionAgent(body, res)
+    const resolved = await this.resolveSessionAgent(body, res, owner)
     if (!resolved) return
 
     const toolError = validateMountableTools(resolved.tools)
@@ -349,12 +397,10 @@ export class AgentsGateway {
     const sessionId = SessionId(`sess_${randomUUID().replaceAll('-', '')}`)
     let cwd: string
     let environment: OAIEnvironmentConfig
-    let codeboxId: string | undefined
     try {
-      const workspace = await this.resolveSessionWorkspace(body.environment, sessionId)
+      const workspace = await this.resolveSessionWorkspace(body.environment, owner, sessionId)
       cwd = workspace.cwd
       environment = workspace.environment
-      codeboxId = workspace.codeboxId
     } catch (error: unknown) {
       badRequest(res, errorMessage(error))
       return
@@ -392,12 +438,20 @@ export class AgentsGateway {
       })
       this.handles.set(sessionId, handle)
       this.pendingBySession.set(sessionId, pending)
-      if (codeboxId !== undefined) {
-        const sandbox = this.dockerSandbox()
-        if (sandbox) {
-          await sandbox.create({ codeboxId, name: sessionId, persist: true, network: true })
-        }
-      }
+      const now = new Date()
+      await this.store.sessions.insert({
+        id: sessionId,
+        ownerId: owner,
+        agentId: typeof body.agent_id === 'string' && body.agent_id !== '' ? body.agent_id : null,
+        environmentId: null,
+        dshSessionId: sessionId,
+        status: 'idle',
+        lastError: null,
+        model: resolved.model,
+        reasoningEffort: resolved.reasoning?.effort ?? null,
+        createdAt: now,
+        updatedAt: now,
+      })
     } catch (error: unknown) {
       pending.rejectAll(new Error('session create failed'))
       const created = this.handles.get(sessionId)
@@ -410,6 +464,7 @@ export class AgentsGateway {
           // Host teardown already ran.
         }
       }
+      if (error instanceof StoreUnavailableError) throw error
       if (error instanceof AgentsApiMcpConfigError) {
         badRequest(res, error.message)
         return
@@ -483,45 +538,75 @@ export class AgentsGateway {
     json(res, 200, this.sessionPayload(sessionId) ?? { ...oaiSession, session: oaiSession, items: [], turns: [] })
   }
 
-  private listSessions(res: ServerResponse, url: URL): Promise<void> {
-    json(res, 200, this.sessionRegistry.list(listQuery(url)))
-    return Promise.resolve()
+  /**
+   * Newest first. `after` names the last session of the previous page;
+   * `first_id` and `last_id` come from the index page so paging advances
+   * past rows whose live state is gone.
+   */
+  private async listSessions(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
+    const query = listQuery(url)
+    const after = query.after === undefined ? undefined : await this.store.sessions.get(query.after, owner)
+    const page = await this.store.sessions.list({
+      owner,
+      limit: query.limit,
+      ...(after === undefined ? {} : { cursor: encodeSessionCursor(after.createdAt, after.id) }),
+    })
+    json(res, 200, {
+      object: 'list',
+      data: page.data
+        .map(row => this.sessionRegistry.getOAISession(row.id))
+        .filter(session => session !== undefined),
+      first_id: page.data[0]?.id ?? null,
+      last_id: page.data.at(-1)?.id ?? null,
+      has_more: page.nextCursor !== null,
+    })
   }
 
-  private getSession(res: ServerResponse, params: Record<string, string>): Promise<void> {
-    const sessionId = routeParam(params, 'session_id')
-    const session = this.sessionRegistry.getOAISession(sessionId)
-    if (!session) {
-      notFound(res, `Session "${sessionId}" not found`)
-      return Promise.resolve()
-    }
-    json(res, 200, session)
-    return Promise.resolve()
+  /**
+   * Find a live session the owner holds, or answer 404.
+   * @param res - response that receives the 404.
+   * @param owner - calling principal.
+   * @param sessionId - session id from the route.
+   * @returns the live state, or `undefined` after a 404 was written.
+   */
+  private async requireSession(res: ServerResponse, owner: OwnerId, sessionId: string): Promise<RegisteredSessionState | undefined> {
+    const state = await this.store.sessions.get(sessionId, owner) === undefined ? undefined : this.sessionRegistry.get(sessionId)
+    if (!state) notFound(res, `Session "${sessionId}" not found`)
+    return state
   }
 
-  private async updateSession(req: IncomingMessage, res: ServerResponse, params: Record<string, string>): Promise<void> {
+  private async getSession(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    if (!this.sessionRegistry.get(sessionId)) {
-      notFound(res, `Session "${sessionId}" not found`)
-      return
-    }
+    const state = await this.requireSession(res, owner, sessionId)
+    if (!state) return
+    json(res, 200, this.sessionRegistry.project(state))
+  }
+
+  private async updateSession(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const sessionId = routeParam(params, 'session_id')
+    if (!await this.requireSession(res, owner, sessionId)) return
     const body = await readBody(req) as unknown as UpdateSessionParams
     if (body.agent?.model === null || body.agent?.model === '') {
       badRequest(res, 'Field "agent.model" cannot be null or empty')
       return
     }
-    json(res, 200, this.sessionRegistry.updateSession(sessionId, body))
+    const session = this.sessionRegistry.updateSession(sessionId, body)
+    if (session !== undefined) {
+      await this.store.sessions.update(sessionId, owner, {
+        model: session.agent.model,
+        reasoningEffort: session.agent.reasoning?.effort ?? null,
+      })
+    }
+    json(res, 200, session)
   }
 
-  private async deleteSession(res: ServerResponse, params: Record<string, string>): Promise<void> {
+  private async deleteSession(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    if (!this.sessionRegistry.get(sessionId)) {
-      notFound(res, `Session "${sessionId}" not found`)
-      return
-    }
+    if (!await this.requireSession(res, owner, sessionId)) return
+    await this.deleteEnvironmentsForSession(owner, sessionId)
+    await this.store.sessions.delete(sessionId, owner)
     this.pendingBySession.get(sessionId)?.rejectAll(new Error(`Session "${sessionId}" was deleted`))
     this.pendingBySession.delete(sessionId)
-    await this.environments.deleteEnvironmentsForSession(sessionId)
     this.sessionRegistry.delete(sessionId)
     const handle = this.handles.get(sessionId)
     this.handles.delete(sessionId)
@@ -535,9 +620,10 @@ export class AgentsGateway {
     json(res, 200, { id: sessionId, object: 'agent.session.deleted', deleted: true })
   }
 
-  private async postEvents(req: IncomingMessage, res: ServerResponse, params: Record<string, string>): Promise<void> {
+  private async postEvents(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    const state = this.sessionRegistry.get(sessionId)
+    const owned = await this.store.sessions.get(sessionId, owner)
+    const state = owned === undefined ? undefined : this.sessionRegistry.get(sessionId)
     if (!state || !this.ctx.sessions.get(SessionId(sessionId))) {
       notFound(res, `Session "${sessionId}" not found`)
       return
@@ -588,13 +674,10 @@ export class AgentsGateway {
     }
   }
 
-  private streamEvents(req: IncomingMessage, res: ServerResponse, params: Record<string, string>): Promise<void> {
+  private async streamEvents(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    const state = this.sessionRegistry.get(sessionId)
-    if (!state) {
-      notFound(res, `Session "${sessionId}" not found`)
-      return Promise.resolve()
-    }
+    const state = await this.requireSession(res, owner, sessionId)
+    if (!state) return
     writeSSEHeaders(res)
     const header = req.headers['last-event-id']
     const raw = Array.isArray(header) ? header[0] : header
@@ -619,44 +702,35 @@ export class AgentsGateway {
           : 'agent.session.idle'
       this.sessionRegistry.emit(sessionId, { type, event_id: mintEventId(), session })
     }
-    return Promise.resolve()
   }
 
-  private listItems(res: ServerResponse, url: URL, params: Record<string, string>): Promise<void> {
+  private async listItems(res: ServerResponse, url: URL, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    if (!this.sessionRegistry.get(sessionId)) {
-      notFound(res, `Session "${sessionId}" not found`)
-      return Promise.resolve()
-    }
+    if (!await this.requireSession(res, owner, sessionId)) return
     json(res, 200, this.sessionRegistry.listItems(sessionId, listQuery(url)))
-    return Promise.resolve()
   }
 
-  private listTurns(res: ServerResponse, url: URL, params: Record<string, string>): Promise<void> {
+  private async listTurns(res: ServerResponse, url: URL, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    if (!this.sessionRegistry.get(sessionId)) {
-      notFound(res, `Session "${sessionId}" not found`)
-      return Promise.resolve()
-    }
+    if (!await this.requireSession(res, owner, sessionId)) return
     json(res, 200, this.sessionRegistry.listTurns(sessionId, listQuery(url)))
-    return Promise.resolve()
   }
 
-  private getTurn(res: ServerResponse, params: Record<string, string>): Promise<void> {
+  private async getTurn(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
     const turnId = routeParam(params, 'turn_id')
+    if (!await this.requireSession(res, owner, sessionId)) return
     const turn = this.sessionRegistry.getTurn(sessionId, turnId)
     if (!turn) {
       notFound(res, `Turn "${turnId}" not found`)
-      return Promise.resolve()
+      return
     }
     json(res, 200, turn)
-    return Promise.resolve()
   }
 
-  private resolveSessionAgent(body: CreateSessionParams, res: ServerResponse): OAIAgent | undefined {
+  private async resolveSessionAgent(body: CreateSessionParams, res: ServerResponse, owner: OwnerId): Promise<OAIAgent | undefined> {
     if (typeof body.agent_id === 'string' && body.agent_id !== '') {
-      const saved = this.agentStore.get(body.agent_id)
+      const saved = await this.store.agents.get(owner, body.agent_id)
       if (!saved) {
         notFound(res, `Agent "${body.agent_id}" not found`)
         return undefined
@@ -676,8 +750,9 @@ export class AgentsGateway {
 
   private async resolveSessionWorkspace(
     environment: OAIEnvironmentConfig | undefined,
+    owner: OwnerId,
     sessionId: string,
-  ): Promise<{ cwd: string; environment: OAIEnvironmentConfig; codeboxId?: string }> {
+  ): Promise<{ cwd: string; environment: OAIEnvironmentConfig }> {
     if (environment?.type === 'self_hosted' && environment.workspace_directory) {
       if (!isAbsolute(environment.workspace_directory)) {
         throw new Error('environment.workspace_directory must be an absolute path')
@@ -693,48 +768,18 @@ export class AgentsGateway {
     if (environment?.type === 'sandbox') {
       throw new Error('sandbox environments are not available')
     }
-    const cwd = await this.defaultWorkspace(sessionId)
+    const cwd = await this.defaultWorkspace(owner, sessionId)
     if (environment === undefined || environment.type === 'none') {
       return { cwd, environment: { type: 'local', workspace_directory: cwd } }
     }
     return { cwd, environment }
   }
 
-  private async defaultWorkspace(sessionId: string): Promise<string> {
+  private async defaultWorkspace(owner: OwnerId, sessionId: string): Promise<string> {
     if (this.workspacesRoot === undefined) return process.cwd()
-    const dir = join(this.workspacesRoot, sessionId)
+    const dir = join(this.workspacesRoot, directorySegment(owner, 'owner'), sessionId)
     await mkdir(dir, { recursive: true })
     return dir
-  }
-
-  private dockerSandbox(): DockerSandboxService | undefined {
-    const get = (this.ctx as { get?: (name: string) => unknown }).get
-    if (typeof get !== 'function') return undefined
-    try {
-      const service = get.call(this.ctx, 'dockerSandbox')
-      if (service && typeof (service as DockerSandboxService).create === 'function') {
-        return service as DockerSandboxService
-      }
-    } catch {
-      return undefined
-    }
-    return undefined
-  }
-
-  private async flushAgents(res: ServerResponse): Promise<boolean> {
-    try {
-      await this.agentStore.settled()
-      return true
-    } catch (error: unknown) {
-      json(res, 500, {
-        error: {
-          type: 'server_error',
-          message: errorMessage(error),
-          code: 'store_write_failed',
-        },
-      })
-      return false
-    }
   }
 
   private async applyInputEvent(sessionId: string, evt: OAIInputEvent): Promise<void> {
@@ -815,103 +860,185 @@ export class AgentsGateway {
     }
   }
 
-  private async createTemplate(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async createTemplate(req: IncomingMessage, res: ServerResponse, owner: OwnerId): Promise<void> {
     const body = await readBody(req) as { name?: string; config?: EnvironmentTemplateConfig }
     if (typeof body.name !== 'string' || body.name.trim() === '') {
       badRequest(res, 'Field "name" is required')
       return
     }
-    const template = this.environments.createTemplate({
+    const template: EnvironmentTemplate = {
+      id: `tpl_${randomUUID().replaceAll('-', '')}`,
+      object: 'environment.template',
       name: body.name,
-      ...(body.config !== undefined ? { config: body.config } : {}),
-    })
-    await this.environments.settled()
-    json(res, 201, template)
+      provider: 'codebox',
+      config: body.config ?? {},
+      created_at: Math.floor(Date.now() / 1000),
+    }
+    json(res, 201, await this.store.templates.create(owner, template))
   }
 
-  private listTemplates(res: ServerResponse): Promise<void> {
-    json(res, 200, { object: 'list', data: [...this.environments.templates.values()] })
-    return Promise.resolve()
+  private async listTemplates(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
+    json(res, 200, await this.store.templates.list(owner, listQuery(url)))
   }
 
-  private getTemplate(res: ServerResponse, params: Record<string, string>): Promise<void> {
-    const template = this.environments.templates.get(routeParam(params, 'template_id'))
+  private async getTemplate(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const template = await this.store.templates.get(owner, routeParam(params, 'template_id'))
     if (!template) {
       notFound(res, 'template not found')
-      return Promise.resolve()
+      return
     }
     json(res, 200, template)
-    return Promise.resolve()
   }
 
-  private async updateTemplate(req: IncomingMessage, res: ServerResponse, params: Record<string, string>): Promise<void> {
+  private async updateTemplate(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const templateId = routeParam(params, 'template_id')
-    if (!this.environments.templates.has(templateId)) {
+    const existing = await this.store.templates.get(owner, templateId)
+    if (!existing) {
       notFound(res, 'template not found')
       return
     }
     const body = await readBody(req) as { name?: string; config?: EnvironmentTemplateConfig }
-    const updated = this.environments.updateTemplate(templateId, {
+    const updated = await this.store.templates.update(owner, templateId, {
+      ...existing,
       ...(typeof body.name === 'string' ? { name: body.name } : {}),
       ...(body.config !== undefined ? { config: body.config } : {}),
+      updated_at: Math.floor(Date.now() / 1000),
     })
-    await this.environments.settled()
-    json(res, 200, updated)
-  }
-
-  private async deleteTemplate(res: ServerResponse, params: Record<string, string>): Promise<void> {
-    const templateId = routeParam(params, 'template_id')
-    if (!this.environments.deleteTemplate(templateId)) {
+    if (!updated) {
       notFound(res, 'template not found')
       return
     }
-    await this.environments.settled()
+    json(res, 200, updated)
+  }
+
+  private async deleteTemplate(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const templateId = routeParam(params, 'template_id')
+    if (!await this.store.templates.delete(owner, templateId)) {
+      notFound(res, 'template not found')
+      return
+    }
     json(res, 200, { id: templateId, object: 'environment.template.deleted', deleted: true })
   }
 
-  private async createEnvironment(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async createEnvironment(req: IncomingMessage, res: ServerResponse, owner: OwnerId): Promise<void> {
     const body = await readBody(req) as { template_id?: string; session_id?: string; image?: string }
+    const input: CreateEnvironmentInput = {
+      ...(typeof body.template_id === 'string' ? { template_id: body.template_id } : {}),
+      ...(typeof body.session_id === 'string' ? { session_id: body.session_id } : {}),
+      ...(typeof body.image === 'string' ? { image: body.image } : {}),
+    }
+    if (input.template_id !== undefined) {
+      const template = await this.store.templates.get(owner, input.template_id)
+      if (template === undefined) {
+        badRequest(res, `template not found: ${input.template_id}`)
+        return
+      }
+      input.template = template.config
+    }
+    if (input.session_id !== undefined && await this.store.sessions.get(input.session_id, owner) === undefined) {
+      badRequest(res, `session not found: ${input.session_id}`)
+      return
+    }
+    const id = `env_${randomUUID().replaceAll('-', '')}`
+    let created: Awaited<ReturnType<EnvironmentProvider['create']>>
     try {
-      const env = await this.environments.createEnvironment({
-        ...(typeof body.template_id === 'string' ? { template_id: body.template_id } : {}),
-        ...(typeof body.session_id === 'string' ? { session_id: body.session_id } : {}),
-        ...(typeof body.image === 'string' ? { image: body.image } : {}),
-        provision: true,
-      })
-      await this.environments.settled()
-      json(res, 201, env)
+      created = await this.environments.create(owner, id, input)
     } catch (error: unknown) {
       badRequest(res, errorMessage(error))
+      return
     }
+    const record: EnvironmentRecord = {
+      id,
+      object: 'environment',
+      status: created.status,
+      provider: this.environments.kind,
+      provider_metadata: this.environments.kind === 'local'
+        ? { workspace_directory: created.workspacePath }
+        : created.codeboxId === undefined ? {} : { codebox_id: created.codeboxId },
+      created_at: Math.floor(Date.now() / 1000),
+      ...(input.template_id !== undefined ? { template_id: input.template_id } : {}),
+      ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
+      ...(created.error !== undefined ? { error: created.error } : {}),
+    }
+    try {
+      await this.store.environments.create(owner, record)
+    } catch (error: unknown) {
+      await this.environments.destroy(record).catch((destroyError: unknown) => {
+        this.ctx.logger.warn(`agents-api: environment ${id} was not recorded and could not be destroyed: ${errorMessage(destroyError)}`)
+      })
+      throw error
+    }
+    json(res, 201, record)
   }
 
-  private listEnvironments(res: ServerResponse): Promise<void> {
-    json(res, 200, { object: 'list', data: [...this.environments.environments.values()] })
-    return Promise.resolve()
+  private async listEnvironments(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
+    json(res, 200, await this.store.environments.list(owner, listQuery(url)))
   }
 
-  private async getEnvironment(res: ServerResponse, params: Record<string, string>): Promise<void> {
-    const env = await this.environments.refreshEnvironment(routeParam(params, 'environment_id'))
-    if (!env) {
+  /** Read the backend status and store it when it changed. */
+  private async getEnvironment(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!record) {
       notFound(res, 'environment not found')
       return
     }
-    json(res, 200, env)
+    let status: EnvironmentStatus
+    let error: string | undefined
+    try {
+      status = await this.environments.status(record)
+    } catch (statusError: unknown) {
+      status = 'failed'
+      error = errorMessage(statusError)
+    }
+    if (status === record.status && error === undefined) {
+      json(res, 200, record)
+      return
+    }
+    const { error: _previous, ...rest } = record
+    const next: EnvironmentRecord = {
+      ...rest,
+      status,
+      updated_at: Math.floor(Date.now() / 1000),
+      ...(error !== undefined ? { error } : status === 'failed' && record.error !== undefined ? { error: record.error } : {}),
+    }
+    json(res, 200, await this.store.environments.update(owner, record.id, next) ?? next)
   }
 
-  private async deleteEnvironment(res: ServerResponse, params: Record<string, string>): Promise<void> {
+  private async deleteEnvironment(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const environmentId = routeParam(params, 'environment_id')
-    if (!await this.environments.deleteEnvironment(environmentId)) {
+    const record = await this.store.environments.get(owner, environmentId)
+    if (!record) {
       notFound(res, 'environment not found')
       return
     }
-    await this.environments.settled()
+    await this.environments.destroy(record)
+    await this.store.environments.delete(owner, environmentId)
     json(res, 200, { id: environmentId, object: 'environment.deleted', deleted: true })
   }
 
-  private async writeEnvironmentFile(req: IncomingMessage, res: ServerResponse, params: Record<string, string>): Promise<void> {
-    const environmentId = routeParam(params, 'environment_id')
-    if (!this.environments.environments.has(environmentId)) {
+  /**
+   * Destroy and forget every environment of `owner` attached to a session.
+   * @param owner - session owner.
+   * @param sessionId - deleted session.
+   */
+  private async deleteEnvironmentsForSession(owner: OwnerId, sessionId: string): Promise<void> {
+    const attached: EnvironmentRecord[] = []
+    let after: string | undefined
+    for (;;) {
+      const page = await this.store.environments.list(owner, { limit: 100, order: 'asc', ...(after === undefined ? {} : { after }) })
+      attached.push(...page.data.filter(env => env.session_id === sessionId))
+      if (!page.has_more || page.last_id === null) break
+      after = page.last_id
+    }
+    for (const env of attached) {
+      await this.environments.destroy(env)
+      await this.store.environments.delete(owner, env.id)
+    }
+  }
+
+  private async writeEnvironmentFile(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!record) {
       notFound(res, 'environment not found')
       return
     }
@@ -921,7 +1048,7 @@ export class AgentsGateway {
       return
     }
     const content = typeof body.content === 'string'
-      ? body.content
+      ? Buffer.from(body.content, 'utf8')
       : typeof body.content_base64 === 'string'
         ? Buffer.from(body.content_base64, 'base64')
         : undefined
@@ -930,30 +1057,30 @@ export class AgentsGateway {
       return
     }
     try {
-      await this.environments.writeFile(environmentId, body.path, content)
+      await this.environments.writeFile(record, body.path, content)
       json(res, 201, { object: 'environment.file', path: body.path, written: true })
     } catch (error: unknown) {
       badRequest(res, errorMessage(error))
     }
   }
 
-  private async listEnvironmentFiles(res: ServerResponse, params: Record<string, string>): Promise<void> {
-    const environmentId = routeParam(params, 'environment_id')
-    if (!this.environments.environments.has(environmentId)) {
+  private async listEnvironmentFiles(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!record) {
       notFound(res, 'environment not found')
       return
     }
     try {
-      const files = await this.environments.listFiles(environmentId)
+      const files = await this.environments.listFiles(record)
       json(res, 200, { object: 'list', data: files.map(path => ({ path })) })
     } catch (error: unknown) {
       badRequest(res, errorMessage(error))
     }
   }
 
-  private async readEnvironmentFile(res: ServerResponse, params: Record<string, string>): Promise<void> {
-    const environmentId = routeParam(params, 'environment_id')
-    if (!this.environments.environments.has(environmentId)) {
+  private async readEnvironmentFile(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!record) {
       notFound(res, 'environment not found')
       return
     }
@@ -963,7 +1090,7 @@ export class AgentsGateway {
       return
     }
     try {
-      const bytes = await this.environments.readFile(environmentId, filePath)
+      const bytes = await this.environments.readFile(record, filePath)
       res.statusCode = 200
       res.setHeader('Content-Type', 'application/octet-stream')
       res.end(Buffer.from(bytes))
@@ -972,26 +1099,20 @@ export class AgentsGateway {
     }
   }
 
-  private async listArtifacts(res: ServerResponse, params: Record<string, string>): Promise<void> {
+  private async listArtifacts(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    const state = this.sessionRegistry.get(sessionId)
-    if (!state) {
-      notFound(res, `Session "${sessionId}" not found`)
-      return
-    }
+    const state = await this.requireSession(res, owner, sessionId)
+    if (!state) return
     const data = this.artifacts !== undefined
       ? await listS3Artifacts(this.artifacts, sessionId)
       : await listWorkspaceArtifacts(state.workspace ?? process.cwd())
     json(res, 200, { object: 'list', data })
   }
 
-  private async getArtifact(res: ServerResponse, params: Record<string, string>): Promise<void> {
+  private async getArtifact(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    const state = this.sessionRegistry.get(sessionId)
-    if (!state) {
-      notFound(res, `Session "${sessionId}" not found`)
-      return
-    }
+    const state = await this.requireSession(res, owner, sessionId)
+    if (!state) return
     const rawPath = params['path'] ?? ''
     if (sanitizeRelativePath(rawPath) === undefined) {
       badRequest(res, 'artifact path escapes the session workspace')
@@ -1009,90 +1130,71 @@ export class AgentsGateway {
     res.end(body)
   }
 
-  private listSubagents(res: ServerResponse, params: Record<string, string>): Promise<void> {
+  private async listSubagents(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    if (!this.sessionRegistry.get(sessionId)) {
-      notFound(res, `Session "${sessionId}" not found`)
-      return Promise.resolve()
-    }
+    if (!await this.requireSession(res, owner, sessionId)) return
     json(res, 200, {
       object: 'list',
       data: this.sessionRegistry.listSubagents(sessionId).map(projectSubagent),
     })
-    return Promise.resolve()
   }
 
-  private getSubagent(res: ServerResponse, params: Record<string, string>): Promise<void> {
-    const sessionId = routeParam(params, 'session_id')
-    const subagentId = routeParam(params, 'subagent_id')
-    if (!this.sessionRegistry.get(sessionId)) {
-      notFound(res, `Session "${sessionId}" not found`)
-      return Promise.resolve()
-    }
-    const child = this.sessionRegistry.getSubagent(sessionId, subagentId)
-    if (!child) {
-      notFound(res, 'subagent not found')
-      return Promise.resolve()
-    }
-    json(res, 200, projectSubagent(child))
-    return Promise.resolve()
+  private async getSubagent(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const located = await this.requireSubagent(res, params, owner)
+    if (!located) return
+    json(res, 200, projectSubagent(located.child))
   }
 
-  private listSubagentTurns(res: ServerResponse, params: Record<string, string>): Promise<void> {
-    const located = this.requireSubagent(res, params)
-    if (!located) return Promise.resolve()
+  private async listSubagentTurns(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const located = await this.requireSubagent(res, params, owner)
+    if (!located) return
     json(res, 200, { object: 'list', data: this.sessionRegistry.listChildTurns(located.sessionId, located.subagentId) ?? [] })
-    return Promise.resolve()
   }
 
-  private getSubagentTurn(res: ServerResponse, params: Record<string, string>): Promise<void> {
-    const located = this.requireSubagent(res, params)
-    if (!located) return Promise.resolve()
+  private async getSubagentTurn(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const located = await this.requireSubagent(res, params, owner)
+    if (!located) return
     const turn = this.sessionRegistry.getChildTurn(located.sessionId, located.subagentId, routeParam(params, 'turn_id'))
     if (!turn) {
       notFound(res, 'turn not found')
-      return Promise.resolve()
+      return
     }
     json(res, 200, turn)
-    return Promise.resolve()
   }
 
-  private listSubagentItems(res: ServerResponse, params: Record<string, string>): Promise<void> {
-    const located = this.requireSubagent(res, params)
-    if (!located) return Promise.resolve()
+  private async listSubagentItems(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const located = await this.requireSubagent(res, params, owner)
+    if (!located) return
     json(res, 200, { object: 'list', data: this.sessionRegistry.listChildItems(located.sessionId, located.subagentId) ?? [] })
-    return Promise.resolve()
   }
 
-  private listSubagentTurnItems(res: ServerResponse, params: Record<string, string>): Promise<void> {
-    const located = this.requireSubagent(res, params)
-    if (!located) return Promise.resolve()
+  private async listSubagentTurnItems(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const located = await this.requireSubagent(res, params, owner)
+    if (!located) return
     const turnId = routeParam(params, 'turn_id')
     if (!this.sessionRegistry.getChildTurn(located.sessionId, located.subagentId, turnId)) {
       notFound(res, 'turn not found')
-      return Promise.resolve()
+      return
     }
     const items = (this.sessionRegistry.listChildItems(located.sessionId, located.subagentId) ?? [])
       .filter(item => item.turn_id === turnId)
     json(res, 200, { object: 'list', data: items })
-    return Promise.resolve()
   }
 
-  private requireSubagent(
+  private async requireSubagent(
     res: ServerResponse,
     params: Record<string, string>,
-  ): { sessionId: string; subagentId: string } | undefined {
+    owner: OwnerId,
+  ): Promise<{ sessionId: string; subagentId: string; child: SubagentState } | undefined> {
     const sessionId = routeParam(params, 'session_id')
     const subagentId = routeParam(params, 'subagent_id')
-    if (!this.sessionRegistry.get(sessionId)) {
-      notFound(res, `Session "${sessionId}" not found`)
-      return undefined
-    }
-    if (!this.sessionRegistry.getSubagent(sessionId, subagentId)) {
+    if (!await this.requireSession(res, owner, sessionId)) return undefined
+    const child = this.sessionRegistry.getSubagent(sessionId, subagentId)
+    if (!child) {
       notFound(res, 'subagent not found')
       return undefined
     }
-    return { sessionId, subagentId }
+    return { sessionId, subagentId, child }
   }
 
   private triggerTurn(sessionId: string, userText: string): Promise<void> {
@@ -1226,4 +1328,13 @@ function projectSubagent(child: SubagentState): Omit<SubagentState, 'turns' | 'i
     created_at: child.created_at,
     ...(child.closed_at !== undefined ? { closed_at: child.closed_at } : {}),
   }
+}
+
+/**
+ * Write the 503 answered while the store is opening, failed, or rejecting calls.
+ * @param res - outgoing response.
+ * @param message - outage detail.
+ */
+function storeUnavailable(res: ServerResponse, message: string): void {
+  json(res, 503, { error: { type: 'server_error', message, code: 'store_unavailable' } })
 }

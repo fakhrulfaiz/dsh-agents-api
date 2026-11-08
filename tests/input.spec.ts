@@ -6,7 +6,7 @@ import {
   toOAIUsage,
   userTextFromInput,
 } from '../src/input.ts'
-import { materializeAgent } from '../src/agent-store.ts'
+import { materializeAgent } from '../src/agent-records.ts'
 
 describe('userTextFromInput', () => {
   it('flattens strings, message arrays, and unknown JSON', () => {

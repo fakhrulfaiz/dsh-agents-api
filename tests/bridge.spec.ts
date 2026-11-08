@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { materializeAgent } from '../src/agent-store.ts'
+import { materializeAgent } from '../src/agent-records.ts'
 import { bridgeSessionEvent, mintEventId } from '../src/bridge.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
 

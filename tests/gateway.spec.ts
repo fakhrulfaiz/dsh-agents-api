@@ -5,9 +5,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import { AgentStore } from '../src/agent-store.ts'
+import { materializeAgent } from '../src/agent-records.ts'
+import { createLocalProvider } from '../src/environment/local.ts'
+import type { CreateAgentParams, OAIAgent } from '../src/types.ts'
+import { MemoryStore } from './support/memory-store.ts'
 import { createStaticKeyAuthenticator } from '../src/auth/static-key.ts'
-import { ownerId } from '../src/auth/authenticator.ts'
+import { ownerId, type Authenticator } from '../src/auth/authenticator.ts'
 import { openAuthenticator } from './open-auth.ts'
 import { AgentsGateway } from '../src/gateway.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
@@ -19,6 +22,13 @@ vi.mock('@deepseek-ai/dsh-mcp-client', () => ({
 }))
 
 const servers: Server[] = []
+const TEST_OWNER = ownerId('test')
+const environments = createLocalProvider(join(tmpdir(), 'agentry-gateway-spec'))
+
+async function seedAgent(store: MemoryStore, params: CreateAgentParams): Promise<OAIAgent> {
+  await store.ensureOwner(TEST_OWNER)
+  return store.agents.create(TEST_OWNER, materializeAgent(params))
+}
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map(server => new Promise<void>((resolve) => {
@@ -157,7 +167,7 @@ function gateway(apiKey = '', options?: {
   omitSystemPrompt?: boolean
 }): {
   base: Promise<string>
-  store: AgentStore
+  store: MemoryStore
   registry: SessionRegistry
   agents: Map<string, FakeAgent>
   registeredTools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }>
@@ -166,9 +176,9 @@ function gateway(apiKey = '', options?: {
   pluginCalls: Array<Record<string, unknown>>
 } {
   const { ctx, agents, registeredTools, restrictCalls, promptSections, pluginCalls } = fakeContext(options)
-  const store = new AgentStore()
+  const store = new MemoryStore()
   const registry = new SessionRegistry()
-  const api = new AgentsGateway(ctx, apiKey ? createStaticKeyAuthenticator({ key: apiKey, owner: 'test', admin: true }) : openAuthenticator, '/v1', store, registry)
+  const api = new AgentsGateway(ctx, apiKey ? createStaticKeyAuthenticator({ key: apiKey, owner: 'test', admin: true }) : openAuthenticator, '/v1', store, registry, { environments })
   return {
     base: listen((req, res) => api.handle(req, res)),
     store,
@@ -216,7 +226,7 @@ describe('AgentsGateway', () => {
   it('answers 403 forbidden when the principal holds neither agentry role', async () => {
     const { ctx } = fakeContext()
     const noRoles = { authenticate: () => Promise.resolve({ ok: true as const, principal: { owner: ownerId('x'), roles: new Set<never>() } }) }
-    const api = new AgentsGateway(ctx, noRoles, '/v1', new AgentStore(), new SessionRegistry())
+    const api = new AgentsGateway(ctx, noRoles, '/v1', new MemoryStore(), new SessionRegistry(), { environments })
     const base = await listen((req, res) => api.handle(req, res))
     const denied = await fetch(`${base}/v1/agents`)
     expect(denied.status).toBe(403)
@@ -243,7 +253,7 @@ describe('AgentsGateway', () => {
     expect((await fetch(`${root}/v1/agents/missing`, { method: 'POST', body: '{}' })).status).toBe(404)
     expect((await fetch(`${root}/v1/agents`)).status).toBe(200)
     expect((await fetch(`${root}/v1/agents/${created.id}`, { method: 'DELETE' })).status).toBe(200)
-    expect(store.get(created.id)).toBeUndefined()
+    expect(await store.agents.get(TEST_OWNER, created.id)).toBeUndefined()
     expect((await fetch(`${root}/v1/agents/missing`, { method: 'DELETE' })).status).toBe(404)
   })
 
@@ -260,7 +270,7 @@ describe('AgentsGateway', () => {
       body: JSON.stringify({ agent_id: 'missing' }),
     })).status).toBe(404)
 
-    const saved = store.create({ model: 'deepseek-chat', instructions: 'saved' })
+    const saved = await seedAgent(store, { model: 'deepseek-chat', instructions: 'saved' })
     const fromId = await (await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
       body: JSON.stringify({
@@ -512,7 +522,7 @@ describe('AgentsGateway', () => {
 
   it('defaults missing request fields and tears down a registry-only session', async () => {
     const { ctx } = fakeContext()
-    const api = new AgentsGateway(ctx, openAuthenticator, '/v1', new AgentStore(), new SessionRegistry())
+    const api = new AgentsGateway(ctx, openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), { environments })
     const chunks: Buffer[] = []
     const res = {
       setHeader() {},
@@ -604,7 +614,7 @@ describe('AgentsGateway', () => {
 
     const { base, registry, store, agents } = gateway()
     const root = await base
-    const saved = store.create({ model: 'deepseek-chat', instructions: 'saved' })
+    const saved = await seedAgent(store, { model: 'deepseek-chat', instructions: 'saved' })
     const reused = await (await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
       body: JSON.stringify({
@@ -623,6 +633,11 @@ describe('AgentsGateway', () => {
     })).status).toBe(200)
 
     registry.register('sess_orphan', saved)
+    const now = new Date()
+    await store.sessions.insert({
+      id: 'sess_orphan', ownerId: TEST_OWNER, agentId: saved.id, environmentId: null, dshSessionId: 'sess_orphan',
+      status: 'idle', lastError: null, model: 'deepseek-chat', reasoningEffort: null, createdAt: now, updatedAt: now,
+    })
     expect((await fetch(`${root}/v1/agents/sessions/sess_orphan`, { method: 'DELETE' })).status).toBe(200)
 
     const liveId = reused.id
@@ -777,7 +792,7 @@ describe('AgentsGateway', () => {
       }),
     })).json() as { id: string; host_tools: { deny: string[] } }
     expect(saved.host_tools).toEqual({ deny: ['web_search'] })
-    expect(store.get(saved.id)?.host_tools).toEqual({ deny: ['web_search'] })
+    expect((await store.agents.get(TEST_OWNER, saved.id))?.host_tools).toEqual({ deny: ['web_search'] })
 
     expect((await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -921,5 +936,106 @@ describe('AgentsGateway', () => {
       cwd,
       failOnStartupError: false,
     })
+  })
+})
+
+describe('AgentsGateway store and owner scoping', () => {
+  /** Authenticates every request as the owner named by `x-owner`. */
+  const ownerHeader: Authenticator = {
+    authenticate: req => Promise.resolve({
+      ok: true as const,
+      principal: { owner: ownerId(String(req.headers['x-owner'] ?? 'nobody')), roles: new Set(['agentry-user' as const]) },
+    }),
+  }
+
+  it('store outage returns 503', async () => {
+    const store = new MemoryStore()
+    store.failure = new Error('connection refused')
+    const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), { environments })
+    const root = await listen((req, res) => api.handle(req, res))
+    const response = await fetch(`${root}/v1/agents`)
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({ error: { type: 'server_error', code: 'store_unavailable' } })
+  })
+
+  it('answers 503 store_unavailable until a store is attached, and with the start error after a failure', async () => {
+    const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', undefined, new SessionRegistry(), { environments })
+    const root = await listen((req, res) => api.handle(req, res))
+    const opening = await fetch(`${root}/v1/agents`)
+    expect(opening.status).toBe(503)
+    expect(await opening.json()).toMatchObject({ error: { code: 'store_unavailable' } })
+    api.failStore('migration 0001-initial.sql failed')
+    const failed = await fetch(`${root}/v1/agents`)
+    expect(failed.status).toBe(503)
+    expect(await failed.json()).toMatchObject({ error: { code: 'store_unavailable', message: 'migration 0001-initial.sql failed' } })
+    api.attachStore(new MemoryStore())
+    expect((await fetch(`${root}/v1/agents`)).status).toBe(200)
+    api.detachStore()
+    expect((await fetch(`${root}/v1/agents`)).status).toBe(503)
+  })
+
+  it('records the owner on first request and hides other owners\' records as 404', async () => {
+    const store = new MemoryStore()
+    const api = new AgentsGateway(fakeContext().ctx, ownerHeader, '/v1', store, new SessionRegistry(), { environments })
+    const root = await listen((req, res) => api.handle(req, res))
+    const as = (owner: string, init: RequestInit = {}) => ({ ...init, headers: { 'x-owner': owner, ...(init.headers ?? {}) } })
+
+    const agent = await (await fetch(`${root}/v1/agents`, as('alice', { method: 'POST', body: JSON.stringify({ model: 'deepseek-chat' }) }))).json() as { id: string }
+    expect((await fetch(`${root}/v1/agents/${agent.id}`, as('bob'))).status).toBe(404)
+    expect((await fetch(`${root}/v1/agents/${agent.id}`, as('bob', { method: 'POST', body: '{"name":"x"}' }))).status).toBe(404)
+    expect((await fetch(`${root}/v1/agents/${agent.id}`, as('bob', { method: 'DELETE' }))).status).toBe(404)
+    expect((await (await fetch(`${root}/v1/agents`, as('bob'))).json() as { data: unknown[] }).data).toEqual([])
+    expect((await fetch(`${root}/v1/agents/sessions`, as('bob', { method: 'POST', body: JSON.stringify({ agent_id: agent.id }) }))).status).toBe(404)
+
+    const session = await (await fetch(`${root}/v1/agents/sessions`, as('alice', { method: 'POST', body: JSON.stringify({ agent_id: agent.id }) }))).json() as { id: string }
+    expect(await store.sessions.get(session.id, ownerId('alice'))).toMatchObject({ agentId: agent.id, status: 'idle', model: 'deepseek-chat' })
+    expect((await fetch(`${root}/v1/agents/sessions/${session.id}`, as('alice'))).status).toBe(200)
+    for (const path of ['', '/items', '/turns', '/events', '/artifacts', '/subagents']) {
+      expect((await fetch(`${root}/v1/agents/sessions/${session.id}${path}`, as('bob'))).status).toBe(404)
+    }
+    expect((await fetch(`${root}/v1/agents/tools?session_id=${session.id}`, as('bob'))).status).toBe(404)
+    expect((await fetch(`${root}/v1/agents/sessions/${session.id}/events`, as('bob', { method: 'POST', body: '{}' }))).status).toBe(404)
+    expect((await fetch(`${root}/v1/agents/sessions/${session.id}`, as('bob', { method: 'POST', body: '{}' }))).status).toBe(404)
+    expect((await fetch(`${root}/v1/agents/sessions/${session.id}`, as('bob', { method: 'DELETE' }))).status).toBe(404)
+    const bobSessions = await (await fetch(`${root}/v1/agents/sessions`, as('bob'))).json() as { data: unknown[] }
+    expect(bobSessions.data).toEqual([])
+    const aliceSessions = await (await fetch(`${root}/v1/agents/sessions`, as('alice'))).json() as { data: Array<{ id: string }> }
+    expect(aliceSessions.data.map(row => row.id)).toEqual([session.id])
+
+    const updated = await (await fetch(`${root}/v1/agents/sessions/${session.id}`, as('alice', {
+      method: 'POST',
+      body: JSON.stringify({ agent: { model: 'deepseek-v4', reasoning: { effort: 'high' } } }),
+    }))).json() as { agent: { model: string } }
+    expect(updated.agent.model).toBe('deepseek-v4')
+    expect(await store.sessions.get(session.id, 'any')).toMatchObject({ model: 'deepseek-v4', reasoningEffort: 'high' })
+
+    const template = await (await fetch(`${root}/v1/agents/environments/templates`, as('alice', { method: 'POST', body: '{"name":"base"}' }))).json() as { id: string }
+    expect((await fetch(`${root}/v1/agents/environments/templates/${template.id}`, as('bob'))).status).toBe(404)
+    const env = await (await fetch(`${root}/v1/agents/environments`, as('alice', { method: 'POST', body: '{}' }))).json() as { id: string; provider_metadata: { workspace_directory: string } }
+    expect(env.provider_metadata.workspace_directory).toBe(join(tmpdir(), 'agentry-gateway-spec', 'alice', env.id))
+    expect((await fetch(`${root}/v1/agents/environments/${env.id}`, as('bob'))).status).toBe(404)
+    expect((await fetch(`${root}/v1/agents/environments/${env.id}/files`, as('bob'))).status).toBe(404)
+    expect((await fetch(`${root}/v1/agents/environments`, as('bob', { method: 'POST', body: JSON.stringify({ template_id: template.id }) }))).status).toBe(400)
+
+    expect((await fetch(`${root}/v1/agents/sessions/${session.id}`, as('alice', { method: 'DELETE' }))).status).toBe(200)
+    expect(await store.sessions.get(session.id, 'any')).toBeUndefined()
+    expect((await fetch(`${root}/v1/agents/environments/${env.id}`, as('alice', { method: 'DELETE' }))).status).toBe(200)
+  })
+
+  it('pages sessions newest first with after', async () => {
+    const { base } = gateway()
+    const root = await base
+    const ids: string[] = []
+    for (let index = 0; index < 3; index += 1) {
+      const created = await (await fetch(`${root}/v1/agents/sessions`, { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' } }) })).json() as { id: string }
+      ids.push(created.id)
+      await new Promise(resolve => setTimeout(resolve, 2))
+    }
+    const first = await (await fetch(`${root}/v1/agents/sessions?limit=2`)).json() as { data: Array<{ id: string }>; has_more: boolean; last_id: string }
+    expect(first.data.map(row => row.id)).toEqual([ids[2], ids[1]])
+    expect(first.has_more).toBe(true)
+    const second = await (await fetch(`${root}/v1/agents/sessions?limit=2&after=${first.last_id}`)).json() as { data: Array<{ id: string }>; has_more: boolean }
+    expect(second.data.map(row => row.id)).toEqual([ids[0]])
+    expect(second.has_more).toBe(false)
   })
 })

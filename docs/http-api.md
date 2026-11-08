@@ -12,12 +12,12 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 | `GET` | `/agents/tools` | List Host profile tools. `?session_id=` keeps only that session's `host_tools` mask; omit it for the full catalog |
 | `POST` `GET` | `/agents/environments/templates` | Create or list environment templates |
 | `GET` `POST` `DELETE` | `/agents/environments/templates/{id}` | Retrieve, update, or delete one template |
-| `POST` `GET` | `/agents/environments` | Create or list live environments. No Codebox client returns `provider: "local"` |
-| `GET` `DELETE` | `/agents/environments/{id}` | Retrieve (refresh) or delete one environment |
-| `POST` `GET` | `/agents/environments/{id}/files` | Write or list files in a connected Codebox |
-| `GET` | `/agents/environments/{id}/files/{path}` | Read one Codebox file |
+| `POST` `GET` | `/agents/environments` | Create or list environments. Each is a local directory `<workspaces>/<owner>/<environment_id>/` with `provider: "local"` |
+| `GET` `DELETE` | `/agents/environments/{id}` | Retrieve (status `failed` when the directory is gone) or delete one environment and its directory |
+| `POST` `GET` | `/agents/environments/{id}/files` | Write or list files in the environment workspace |
+| `GET` | `/agents/environments/{id}/files/{path}` | Read one environment file |
 | `GET` `POST` `DELETE` | `/agents/{agent_id}` | Retrieve, update, or delete a saved agent |
-| `POST` `GET` | `/agents/sessions` | Create or list sessions (`agent` object and/or `agent_id`) |
+| `POST` `GET` | `/agents/sessions` | Create or list sessions (`agent` object and/or `agent_id`). The list is newest first; `order` is ignored |
 | `GET` `POST` `DELETE` | `/agents/sessions/{session_id}` | Retrieve, update (`model` / `reasoning.effort` / `service_tier` / `metadata`), or delete |
 | `POST` `GET` | `/agents/sessions/{session_id}/events` | Submit input events; `GET` is the SSE stream (`?stream=true`) |
 | `GET` | `/agents/sessions/{session_id}/items` | List saved items (`order=asc` by default) |
@@ -35,6 +35,16 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 ## Authentication errors
 
 Every route under the prefix needs `Authorization: Bearer <token>`. A missing or invalid credential returns 401 with error code `unauthenticated` and `WWW-Authenticate: Bearer`. A principal holding neither `agentry-user` nor `agentry-admin` returns 403 with error code `forbidden`. `/health` is unauthenticated.
+
+## Owner scoping and store errors
+
+Agents, templates, environments, and sessions belong to the authenticated owner. Every read, update, delete, and list sees only the caller's records; another owner's id answers 404 `resource_not_found`, as an unknown id does. A `template_id` or `session_id` of another owner on `POST /agents/environments` answers 400.
+
+While the Postgres store is opening, after it failed to start, or when a database call fails, routes answer 503:
+
+```json
+{ "error": { "type": "server_error", "message": "agents store unavailable: …", "code": "store_unavailable" } }
+```
 
 ## Session create and follow-up
 

@@ -1,3 +1,7 @@
 autoInstallPeers: false
 allowBuilds:
   esbuild: true
+  # Optional native addons of the Testcontainers Docker client; its pure-JS paths suffice.
+  cpu-features: false
+  protobufjs: false
+  ssh2: false

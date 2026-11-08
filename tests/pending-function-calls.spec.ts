@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { materializeAgent } from '../src/agent-store.ts'
+import { materializeAgent } from '../src/agent-records.ts'
 import { PendingFunctionCalls } from '../src/pending-function-calls.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
 

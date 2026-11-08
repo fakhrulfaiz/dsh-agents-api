@@ -7,7 +7,7 @@ import type { KeycloakAuthConfig } from '../src/auth/keycloak.ts'
 import { firstThen, requireAnyRole, requireRole } from '../src/auth/authenticator.ts'
 import { createKeycloakAuthenticator } from '../src/auth/keycloak.ts'
 import { createStaticKeyAuthenticator } from '../src/auth/static-key.ts'
-import { Config, createAuthenticator } from '../src/index.ts'
+import { CodeboxDisabledError, Config, createAuthenticator } from '../src/index.ts'
 
 const servers: Server[] = []
 afterEach(async () => {
@@ -259,33 +259,54 @@ describe('static key authenticator', () => {
 describe('auth Config', () => {
   const keycloak = { issuer: 'http://kc/realms/r', audience: 'agentry' }
   const devKey = { key: 'k', owner: 'dev' }
+  const database = { url: 'postgres://agentry@db/agentry' }
 
   it('production mode rejects devKey config', () => {
-    expect(() => Config({ auth: { mode: 'production', keycloak, devKey } } as never)).toThrow(/devKey/)
+    expect(() => Config({ database, auth: { mode: 'production', keycloak, devKey } } as never)).toThrow(/devKey/)
   })
 
   it('production mode requires keycloak', () => {
-    expect(() => Config({ auth: { mode: 'production' } } as never)).toThrow(/keycloak/)
+    expect(() => Config({ database, auth: { mode: 'production' } } as never)).toThrow(/keycloak/)
   })
 
   it('development mode needs devKey or keycloak', () => {
-    expect(() => Config({ auth: { mode: 'development' } } as never)).toThrow(/devKey/)
-    expect(Config({ auth: { mode: 'development', devKey } } as never).auth?.devKey).toMatchObject({ owner: 'dev', admin: true })
+    expect(() => Config({ database, auth: { mode: 'development' } } as never)).toThrow(/devKey/)
+    expect(Config({ database, auth: { mode: 'development', devKey } } as never).auth?.devKey).toMatchObject({ owner: 'dev', admin: true })
   })
 
   it('applies keycloak defaults', () => {
-    expect(Config({ auth: { mode: 'production', keycloak } } as never).auth?.keycloak).toMatchObject({
+    expect(Config({ database, auth: { mode: 'production', keycloak } } as never).auth?.keycloak).toMatchObject({
       jwksTtlSeconds: 600, jwksCooldownSeconds: 30, algorithms: ['RS256'], clockToleranceSeconds: 5,
     })
   })
 
   it('rejects empty or unsupported keycloak algorithms', () => {
-    expect(() => Config({ auth: { mode: 'production', keycloak: { ...keycloak, algorithms: [] } } } as never)).toThrow(/algorithms must not be empty/)
-    expect(() => Config({ auth: { mode: 'production', keycloak: { ...keycloak, algorithms: ['RS256', 'HS256', 'none'] } } } as never)).toThrow(/unsupported entries: HS256, none/)
-    expect(Config({ auth: { mode: 'production', keycloak: { ...keycloak, algorithms: ['ES256'] } } } as never).auth?.keycloak?.algorithms).toEqual(['ES256'])
+    expect(() => Config({ database, auth: { mode: 'production', keycloak: { ...keycloak, algorithms: [] } } } as never)).toThrow(/algorithms must not be empty/)
+    expect(() => Config({ database, auth: { mode: 'production', keycloak: { ...keycloak, algorithms: ['RS256', 'HS256', 'none'] } } } as never)).toThrow(/unsupported entries: HS256, none/)
+    expect(Config({ database, auth: { mode: 'production', keycloak: { ...keycloak, algorithms: ['ES256'] } } } as never).auth?.keycloak?.algorithms).toEqual(['ES256'])
   })
 
   it('rejects an empty devKey.key', () => {
-    expect(() => Config({ auth: { mode: 'development', devKey: { key: '', owner: 'dev' } } } as never)).toThrow(/empty/)
+    expect(() => Config({ database, auth: { mode: 'development', devKey: { key: '', owner: 'dev' } } } as never)).toThrow(/empty/)
+  })
+})
+
+describe('store and backend Config', () => {
+  const auth = { mode: 'development', devKey: { key: 'k', owner: 'dev' } }
+
+  it('requires database.url', () => {
+    expect(() => Config({ auth } as never)).toThrow(/database/)
+    expect(() => Config({ auth, database: {} } as never)).toThrow(/url/)
+    expect(Config({ auth, database: { url: 'postgres://db/agentry' } } as never).database).toEqual({ url: 'postgres://db/agentry' })
+  })
+
+  it('codebox config is rejected', () => {
+    const codebox = { baseUrl: 'http://codebox', apiKey: 'k' }
+    expect(() => Config({ auth, database: { url: 'postgres://db/a' }, codebox } as never)).toThrow(CodeboxDisabledError)
+  })
+
+  it('rejects the removed dataDir and leaves S3 artifacts absent by default', () => {
+    expect(() => Config({ auth, database: { url: 'postgres://db/a' }, dataDir: './data' } as never)).toThrow(/dataDir/)
+    expect(Config({ auth, database: { url: 'postgres://db/a' } } as never).artifacts).toBeUndefined()
   })
 })

@@ -1,26 +1,80 @@
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { apply } from '../src/index.ts'
 
-describe('apply', () => {
-  it('registers the prefix handler and ignores events for unknown sessions', () => {
-    const listeners: Array<(session: { id: string; header?: { origin?: string; parentSession?: string } }, event: { type: string; seq: number; time: number; data: unknown }) => void> = []
-    const register = vi.fn(() => () => {})
-    const ctx = {
-      on(_name: string, fn: (typeof listeners)[number]) {
-        listeners.push(fn)
-        return () => {}
+type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void
+
+function fakeContext(): {
+  ctx: Context
+  register: ReturnType<typeof vi.fn>
+  routes: Map<string, Handler>
+  listeners: Array<(session: { id: string; header?: { origin?: string; parentSession?: string } }, event: { type: string; seq: number; time: number; data: unknown }) => void>
+  effects: Array<Promise<unknown>>
+  errors: unknown[]
+} {
+  const listeners: ReturnType<typeof fakeContext>['listeners'] = []
+  const routes = new Map<string, Handler>()
+  const effects: Array<Promise<unknown>> = []
+  const errors: unknown[] = []
+  const register = vi.fn((route: { path: string; handler: Handler }) => {
+    routes.set(route.path, route.handler)
+    return () => {}
+  })
+  const ctx = {
+    on(_name: string, fn: (typeof listeners)[number]) {
+      listeners.push(fn)
+      return () => {}
+    },
+    effect(fn: () => unknown) {
+      const result = fn()
+      if (result instanceof Promise) effects.push(result.catch(() => undefined))
+      return result
+    },
+    logger: { error: (error: unknown) => errors.push(error), warn: () => undefined },
+    webServer: { register },
+  }
+  return { ctx: ctx as unknown as Context, register, routes, listeners, effects, errors }
+}
+
+function call(handler: Handler, url: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve) => {
+    let status = 0
+    const res = {
+      statusCode: 0,
+      setHeader() {},
+      writeHead(code: number) {
+        status = code
       },
-      effect(fn: () => () => void) {
-        return fn()
+      end(chunk?: string) {
+        resolve({ status: status || res.statusCode, body: chunk ?? '' })
       },
-      webServer: { register },
     }
-    const auth = { mode: 'development' as const, devKey: { key: 'k', owner: 'dev', admin: true } }
-    apply(ctx as unknown as Context, { auth, prefix: '/v1' })
-    apply(ctx as unknown as Context, { auth, prefix: '/v1' })
+    void handler({ url, method: 'GET', headers: { authorization: 'Bearer k', host: 'localhost' } } as unknown as IncomingMessage, res as unknown as ServerResponse)
+  })
+}
+
+const auth = { mode: 'development' as const, devKey: { key: 'k', owner: 'dev', admin: true } }
+const unreachable = { url: 'postgres://agentry@127.0.0.1:1/agentry' }
+
+describe('apply', () => {
+  it('registers the prefix handler and ignores events for unknown sessions', async () => {
+    const { ctx, register, listeners, effects } = fakeContext()
+    apply(ctx, { auth, prefix: '/v1', database: unreachable })
+    apply(ctx, { auth, prefix: '/v1', database: unreachable })
     expect(register).toHaveBeenCalledTimes(4)
     expect(listeners).toHaveLength(4)
     listeners[0]!({ id: 'missing', header: {} }, { type: 'turn/start', seq: 1, time: 1, data: {} })
+    await Promise.all(effects)
+  })
+
+  it('keeps /v1 at 503 store_unavailable and logs a named error when the database is unreachable', async () => {
+    const { ctx, routes, effects, errors } = fakeContext()
+    apply(ctx, { auth, prefix: '/v1', database: unreachable })
+    await Promise.all(effects)
+    expect(errors).toEqual([expect.objectContaining({ name: 'StoreStartError' })])
+    const response = await call(routes.get('/v1')!, '/v1/agents')
+    expect(response.status).toBe(503)
+    expect(JSON.parse(response.body)).toMatchObject({ error: { code: 'store_unavailable', message: expect.stringContaining('agents store failed to start') } })
   })
 })

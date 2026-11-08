@@ -9,15 +9,40 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
 import * as AgentsApi from '../src/index.ts'
+import { startPostgres, type TestPostgres } from './support/postgres.ts'
 
 let root: string | undefined
 let context: Context | undefined
+let postgres: TestPostgres | undefined
+
+beforeAll(async () => {
+  postgres = await startPostgres()
+}, 180_000)
+
+afterAll(async () => {
+  await postgres?.stop()
+})
+
+/**
+ * Retry until the store finishes migrating and routes stop answering 503.
+ * @param send - issues one request.
+ * @returns the first response that is not 503.
+ */
+async function whenStoreReady(send: () => Promise<Response>): Promise<Response> {
+  const deadline = Date.now() + 30_000
+  for (;;) {
+    const response = await send()
+    if (response.status !== 503 || Date.now() > deadline) return response
+    await response.body?.cancel()
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+}
 
 afterEach(async () => {
   await context?.fiber.dispose()
@@ -39,6 +64,8 @@ describe('real Loader composition', () => {
       "- name: '@agentry/api'",
       '  config:',
       "    prefix: '/v1'",
+      '    database:',
+      `      url: '${postgres!.url}'`,
       '    auth:',
       '      mode: development',
       '      devKey:',
@@ -91,11 +118,11 @@ describe('real Loader composition', () => {
     await context.loader.await()
     expect([...context.loader.entries()].filter(entry => entry.fiber === undefined && !entry.disabled)).toEqual([])
 
-    const response = await fetch(`http://127.0.0.1:${String(context.webServer.port)}/v1/agents`, {
+    const response = await whenStoreReady(() => fetch(`http://127.0.0.1:${String(context!.webServer.port)}/v1/agents`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: 'Bearer loader-key' },
       body: JSON.stringify({ model: 'deepseek-chat', name: 'loader' }),
-    })
+    }))
     expect(response.status).toBe(200)
     const body = await response.json() as { object: string; name: string }
     expect(body).toMatchObject({ object: 'agent', name: 'loader' })

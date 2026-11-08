@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -6,15 +6,15 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { AgentStore } from '../src/agent-store.ts'
+import { ownerId } from '../src/auth/authenticator.ts'
 import { bridgeChildSessionEvent } from '../src/bridge.ts'
-import { FsAgentsApiStore, FsEnvironmentApiStore } from '../src/durable-store.ts'
-import { EnvironmentDirectory } from '../src/environment-service.ts'
+import { createLocalProvider } from '../src/environment/local.ts'
 import { AgentsGateway } from '../src/gateway.ts'
 import { openAuthenticator } from './open-auth.ts'
 import { sanitizeRelativePath } from '../src/artifacts.ts'
 import { resolveRuntimeConfig } from '../src/runtime-config.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
+import { MemoryStore } from './support/memory-store.ts'
 
 vi.mock('@deepseek-ai/dsh-mcp-client', () => ({
   Config: (input: Record<string, unknown>) => ({ ...input }),
@@ -92,48 +92,25 @@ async function tempDir(): Promise<string> {
   return dir
 }
 
-describe('durable stores and local config', () => {
-  it('reloads saved agents and environment rows from dataDir', async () => {
-    const dataDir = await tempDir()
-    const agents = new FsAgentsApiStore(dataDir)
-    const envs = new FsEnvironmentApiStore(dataDir)
-    const first = new AgentStore()
-    await agents.open()
-    first.bindPersistence({
-      put: agent => agents.putAgent(agent),
-      remove: async (id) => {
-        await agents.deleteAgent(id)
-      },
+describe('local config', () => {
+  it('resolves only the configured local paths', () => {
+    const scratch = join(tmpdir(), 'agents-api-environments')
+    expect(resolveRuntimeConfig({}, {})).toEqual({ environmentsRoot: scratch })
+    expect(resolveRuntimeConfig({}, { AGENTS_API_DATA_DIR: './data', AGENTS_API_WORKSPACES: '/tmp/ws' })).toEqual({
+      workspacesRoot: '/tmp/ws',
+      environmentsRoot: '/tmp/ws',
     })
-    const saved = first.create({ model: 'deepseek-chat', name: 'kept' })
-    await first.settled()
-    const environments = new EnvironmentDirectory()
-    const template = environments.createTemplate({ name: 'base', config: { image: 'base' } })
-    await environments.openDisk(envs)
-    environments.templates.set(template.id, template)
-    await envs.putTemplate(template)
-    const second = new AgentStore()
-    second.load(await agents.loadAll())
-    const reloadedEnv = new EnvironmentDirectory()
-    await reloadedEnv.openDisk(envs)
-    expect(second.get(saved.id)?.name).toBe('kept')
-    expect(reloadedEnv.templates.get(template.id)?.name).toBe('base')
-    expect(await readFile(join(dataDir, 'SCHEMA_VERSION'), 'utf8')).toBe('1\n')
   })
 
-  it('stays off when dataDir, Codebox, and S3 are unset', () => {
-    expect(resolveRuntimeConfig({}, {})).toEqual({})
-    expect(resolveRuntimeConfig({}, { AGENTS_API_DATA_DIR: './data', AGENTS_API_WORKSPACES: '/tmp/ws' })).toEqual({
-      dataDir: './data',
-      workspacesRoot: '/tmp/ws',
-    })
+  it('rejects Codebox settings from the environment', () => {
+    expect(() => resolveRuntimeConfig({}, { CODEBOX_BASE_URL: 'http://codebox' })).toThrow(expect.objectContaining({ name: 'CodeboxDisabledError' }))
   })
 })
 
 describe('CoreAgent routes on the plugin gateway', () => {
   it('returns a local environment when Codebox is unset and rejects sandbox sessions', async () => {
-    const environments = new EnvironmentDirectory()
-    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new AgentStore(), new SessionRegistry(), { environments })
+    const environments = createLocalProvider(await tempDir())
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), { environments })
     const root = await listen((req, res) => api.handle(req, res))
     const created = await fetch(`${root}/v1/agents/environments`, {
       method: 'POST',
@@ -165,8 +142,9 @@ describe('CoreAgent routes on the plugin gateway', () => {
   })
 
   it('rejects sandbox attach even when dockerSandbox is present', async () => {
-    const environments = new EnvironmentDirectory()
-    environments.environments.set('env_box', {
+    const store = new MemoryStore()
+    await store.ensureOwner(ownerId('test'))
+    await store.environments.create(ownerId('test'), {
       id: 'env_box',
       object: 'environment',
       status: 'connected',
@@ -175,7 +153,7 @@ describe('CoreAgent routes on the plugin gateway', () => {
       created_at: 1,
     })
     const create = vi.fn(async () => undefined)
-    const api = new AgentsGateway(fakeContext({ create }), openAuthenticator, '/v1', new AgentStore(), new SessionRegistry(), { environments })
+    const api = new AgentsGateway(fakeContext({ create }), openAuthenticator, '/v1', store, new SessionRegistry(), { environments: createLocalProvider(await tempDir()) })
     const root = await listen((req, res) => api.handle(req, res))
     const session = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -192,7 +170,7 @@ describe('CoreAgent routes on the plugin gateway', () => {
   it('rejects artifact paths that escape the session workspace', async () => {
     const workspace = await tempDir()
     await writeFile(join(workspace, 'note.txt'), 'hello')
-    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new AgentStore(), new SessionRegistry())
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), { environments: createLocalProvider(join(tmpdir(), 'agentry-surface-spec')) })
     const root = await listen((req, res) => api.handle(req, res))
     const session = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -212,7 +190,7 @@ describe('CoreAgent routes on the plugin gateway', () => {
 
   it('keeps subagent turns and items off the parent list', async () => {
     const registry = new SessionRegistry()
-    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new AgentStore(), registry)
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), registry, { environments: createLocalProvider(join(tmpdir(), 'agentry-surface-spec')) })
     const root = await listen((req, res) => api.handle(req, res))
     const session = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -241,7 +219,7 @@ describe('CoreAgent routes on the plugin gateway', () => {
 
   it('replays SSE events after Last-Event-ID', async () => {
     const registry = new SessionRegistry()
-    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new AgentStore(), registry)
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), registry, { environments: createLocalProvider(join(tmpdir(), 'agentry-surface-spec')) })
     const root = await listen((req, res) => api.handle(req, res))
     const created = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -265,7 +243,7 @@ describe('CoreAgent routes on the plugin gateway', () => {
   })
 
   it('masks the tool catalog only when session_id is set', async () => {
-    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new AgentStore(), new SessionRegistry())
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), { environments: createLocalProvider(join(tmpdir(), 'agentry-surface-spec')) })
     const root = await listen((req, res) => api.handle(req, res))
     const full = await fetch(`${root}/v1/agents/tools`)
     expect((await full.json() as { data: Array<{ name: string }> }).data.map(row => row.name)).toEqual(['web_search', 'web_fetch'])
