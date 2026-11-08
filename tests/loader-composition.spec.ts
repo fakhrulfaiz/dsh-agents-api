@@ -57,10 +57,10 @@ afterEach(async () => {
  * Boot the webserver and Agents API through the Loader, with fake Host services.
  * @param databaseUrl - Postgres database the plugin migrates and opens.
  * @param query - fake Session log behind `sessionQuery`.
- * @param factory - whether `agents` reports a registered agent factory.
+ * @param factory - `present`: a factory is registered; `unset`: the registry's `factory` field is undefined; `absent`: the registry has no such field (unrecognized DSH shape).
  * @returns the HTTP origin of the webserver.
  */
-async function boot(databaseUrl: string, query: FakeSessionQuery, factory = true): Promise<string> {
+async function boot(databaseUrl: string, query: FakeSessionQuery, factory: 'present' | 'unset' | 'absent' = 'present'): Promise<string> {
   const configPath = join(root!, 'cordis.yml')
   await writeFile(configPath, [
     '- name: fixture-dependencies',
@@ -103,7 +103,7 @@ async function boot(databaseUrl: string, query: FakeSessionQuery, factory = true
           return { agent, dispose: async () => {} }
         },
         get: (id: string) => agents.get(id),
-        ...(factory ? { factory: {} } : {}),
+        ...(factory === 'present' ? { factory: {} } : factory === 'unset' ? { factory: undefined } : {}),
       } as never)
       ctx.provide('agentDefaultModel', {
         currentSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }),
@@ -202,6 +202,37 @@ describe('real Loader composition', () => {
     expect(text).toMatch(/^id: 9\nevent: agent\.session\.turn\.completed\n/u)
   })
 
+  it('fails the store start, closes the pool, and answers 503 when the agent registry has an unrecognized shape', { timeout: 90_000 }, async () => {
+    root = await mkdtemp(join(tmpdir(), 'dsh-agents-api-loader-'))
+    const url = await postgres!.createDatabase('badshape')
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const origin = await boot(url, new FakeSessionQuery(), 'absent')
+      const deadline = Date.now() + 15_000
+      let response = await fetch(`${origin}/v1/agents`, { headers })
+      while (!(await response.clone().text()).includes('factory') && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 100))
+        response = await fetch(`${origin}/v1/agents`, { headers })
+      }
+      expect(response.status).toBe(503)
+      expect(await response.json()).toMatchObject({ error: { code: 'store_unavailable', message: expect.stringContaining('cannot probe the agent registry') } })
+      const direct = new pg.Client({ connectionString: postgres!.url })
+      await direct.connect()
+      try {
+        const { rows } = await direct.query<{ n: string }>('select count(*) as n from pg_stat_activity where datname = $1', ['badshape'])
+        expect(Number(rows[0]!.n)).toBe(0)
+      } finally {
+        await direct.end()
+      }
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
   it('serves requests and leaves rows alone when the agent factory is missing at store open, then resumes on first access', { timeout: 90_000 }, async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-agents-api-loader-'))
     const url = await postgres!.createDatabase('nofactory')
@@ -229,7 +260,7 @@ describe('real Loader composition', () => {
     await context?.fiber.dispose()
     context = undefined
     query.crash()
-    origin = await boot(url, query, false)
+    origin = await boot(url, query, 'unset')
     expect((await whenStoreReady(() => fetch(`${origin}/v1/agents`, { headers }))).status).toBe(200)
     expect(await statusOf()).toBe('in_progress')
     const posted = await fetch(`${origin}/v1/agents/sessions/${created.id}/events`, { method: 'POST', headers, body: '{"events":[]}' })

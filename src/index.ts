@@ -360,11 +360,19 @@ async function openStore(ctx: Context, url: string, gateway: AgentsGateway): Pro
     ctx.logger.error(failure)
     throw failure
   }
+  let unavailable: ReturnType<typeof recoveryUnavailable>
+  try {
+    unavailable = recoveryUnavailable(ctx.agents, ctx.sessionPersistence)
+  } catch (error: unknown) {
+    const failure = new StoreStartError(error)
+    gateway.failStore(failure.message)
+    await store.close()
+    ctx.logger.error(failure)
+    throw failure
+  }
   gateway.attachStore(store)
-  const unavailable = recoveryUnavailable(ctx.agents, ctx.sessionPersistence)
   if (unavailable !== undefined) {
-    ctx.logger.warn(`agents-api: ${unavailable.message}; rows are left as they are and sessions resume on first access`)
-    ctx.logger.info('agents-api: recovery: skipped (agent loop not ready; sessions resume lazily)')
+    ctx.logger.warn(`agents-api: recovery: skipped (${unavailable.message}); rows are left as they are and sessions resume lazily`)
   } else {
     try {
       const recovered = await recoverSessions({ store, resume: row => gateway.resumeSession(row) })
