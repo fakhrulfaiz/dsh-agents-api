@@ -31,6 +31,9 @@
       "patch": "./cordis.patch.yml"
     }
   },
+  "dependencies": {
+    "jose": "6.2.3"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh-agent": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-agent-default-model": ">=0.2.2-rc.1",

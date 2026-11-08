@@ -56,6 +56,8 @@ import type {
   UpdateSessionParams,
 } from './types.ts'
 
+import type { AuthResult, Authenticator, Principal } from './auth/authenticator.ts'
+
 interface Route {
   method: string
   pattern: string
@@ -64,6 +66,7 @@ interface Route {
     res: ServerResponse,
     url: URL,
     params: Record<string, string>,
+    principal: Principal,
   ) => Promise<void>
 }
 
@@ -93,14 +96,14 @@ export class AgentsGateway {
 
   /**
    * @param ctx - plugin context with `webServer`, `sessions`, and `agents`.
-   * @param apiKey - required bearer token; empty string disables auth.
+   * @param authenticator - resolves the caller of every request under the prefix.
    * @param prefix - URL prefix, default `/v1`.
    * @param agentStore - saved-agent directory.
    * @param sessionRegistry - live session directory.
    */
   constructor(
     private readonly ctx: Context,
-    private readonly apiKey: string,
+    private readonly authenticator: Authenticator,
     private readonly prefix: string,
     private readonly agentStore: AgentStore,
     private readonly sessionRegistry: SessionRegistry,
@@ -155,7 +158,12 @@ export class AgentsGateway {
    * @param res - outgoing response.
    */
   async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (!this.checkAuth(req, res)) return
+    const auth = await this.authenticator.authenticate(req)
+    if (!auth.ok) {
+      this.rejectAuth(res, auth)
+      return
+    }
+    const { principal } = auth
     if (!this.ready) {
       json(res, 503, {
         error: {
@@ -177,31 +185,29 @@ export class AgentsGateway {
       if (route.method !== method) continue
       if (!route.pattern.includes(':') && !route.pattern.includes('*')) {
         if (subpath === route.pattern) {
-          await route.handler(req, res, url, {})
+          await route.handler(req, res, url, {}, principal)
           return
         }
         continue
       }
       const params = matchRoute(route.pattern, subpath)
       if (params) {
-        await route.handler(req, res, url, params)
+        await route.handler(req, res, url, params, principal)
         return
       }
     }
     notFound(res, `Cannot ${method} ${pathname}`)
   }
 
-  private checkAuth(req: IncomingMessage, res: ServerResponse): boolean {
-    if (!this.apiKey) return true
-    if (req.headers.authorization === `Bearer ${this.apiKey}`) return true
-    json(res, 401, {
+  private rejectAuth(res: ServerResponse, failure: Extract<AuthResult, { ok: false }>): void {
+    if (failure.status === 401) res.setHeader('WWW-Authenticate', 'Bearer')
+    json(res, failure.status, {
       error: {
-        type: 'authentication_error',
-        message: 'Invalid API key provided',
-        code: 'invalid_api_key',
+        type: failure.status === 401 ? 'authentication_error' : 'permission_error',
+        message: failure.message,
+        code: failure.code,
       },
     })
-    return false
   }
 
   private async createAgent(req: IncomingMessage, res: ServerResponse): Promise<void> {

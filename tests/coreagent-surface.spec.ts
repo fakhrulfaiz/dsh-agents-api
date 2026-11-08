@@ -11,6 +11,7 @@ import { bridgeChildSessionEvent } from '../src/bridge.ts'
 import { FsAgentsApiStore, FsEnvironmentApiStore } from '../src/durable-store.ts'
 import { EnvironmentDirectory } from '../src/environment-service.ts'
 import { AgentsGateway } from '../src/gateway.ts'
+import { openAuthenticator } from './open-auth.ts'
 import { sanitizeRelativePath } from '../src/artifacts.ts'
 import { resolveRuntimeConfig } from '../src/runtime-config.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
@@ -132,7 +133,7 @@ describe('durable stores and local config', () => {
 describe('CoreAgent routes on the plugin gateway', () => {
   it('returns a local environment when Codebox is unset and rejects sandbox sessions', async () => {
     const environments = new EnvironmentDirectory()
-    const api = new AgentsGateway(fakeContext(), '', '/v1', new AgentStore(), new SessionRegistry(), { environments })
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new AgentStore(), new SessionRegistry(), { environments })
     const root = await listen((req, res) => api.handle(req, res))
     const created = await fetch(`${root}/v1/agents/environments`, {
       method: 'POST',
@@ -174,7 +175,7 @@ describe('CoreAgent routes on the plugin gateway', () => {
       created_at: 1,
     })
     const create = vi.fn(async () => undefined)
-    const api = new AgentsGateway(fakeContext({ create }), '', '/v1', new AgentStore(), new SessionRegistry(), { environments })
+    const api = new AgentsGateway(fakeContext({ create }), openAuthenticator, '/v1', new AgentStore(), new SessionRegistry(), { environments })
     const root = await listen((req, res) => api.handle(req, res))
     const session = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -191,7 +192,7 @@ describe('CoreAgent routes on the plugin gateway', () => {
   it('rejects artifact paths that escape the session workspace', async () => {
     const workspace = await tempDir()
     await writeFile(join(workspace, 'note.txt'), 'hello')
-    const api = new AgentsGateway(fakeContext(), '', '/v1', new AgentStore(), new SessionRegistry())
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new AgentStore(), new SessionRegistry())
     const root = await listen((req, res) => api.handle(req, res))
     const session = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -211,7 +212,7 @@ describe('CoreAgent routes on the plugin gateway', () => {
 
   it('keeps subagent turns and items off the parent list', async () => {
     const registry = new SessionRegistry()
-    const api = new AgentsGateway(fakeContext(), '', '/v1', new AgentStore(), registry)
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new AgentStore(), registry)
     const root = await listen((req, res) => api.handle(req, res))
     const session = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -240,7 +241,7 @@ describe('CoreAgent routes on the plugin gateway', () => {
 
   it('replays SSE events after Last-Event-ID', async () => {
     const registry = new SessionRegistry()
-    const api = new AgentsGateway(fakeContext(), '', '/v1', new AgentStore(), registry)
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new AgentStore(), registry)
     const root = await listen((req, res) => api.handle(req, res))
     const created = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -264,7 +265,7 @@ describe('CoreAgent routes on the plugin gateway', () => {
   })
 
   it('masks the tool catalog only when session_id is set', async () => {
-    const api = new AgentsGateway(fakeContext(), '', '/v1', new AgentStore(), new SessionRegistry())
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new AgentStore(), new SessionRegistry())
     const root = await listen((req, res) => api.handle(req, res))
     const full = await fetch(`${root}/v1/agents/tools`)
     expect((await full.json() as { data: Array<{ name: string }> }).data.map(row => row.name)).toEqual(['web_search', 'web_fetch'])

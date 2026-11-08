@@ -6,5 +6,9 @@
     - id: agents-api
       name: '@agentry/api'
       config:
-        apiKey: ''
         prefix: '/v1'
+        auth:
+          mode: development
+          devKey:
+            key: !!js process.env.AGENTRY_DEV_KEY
+            owner: dev

@@ -69,10 +69,18 @@ pnpm typecheck && pnpm test && pnpm build
 REST and SSE under the configured prefix (`/v1` by default) for saved agents, sessions, events, items, and turns. Clients should send `OpenAI-Beta: agents=v1`. Follow-ups use `agent.session.input.message`; steering vs a new turn follows Host idle vs in-progress; cancel uses `agent.session.input.cancel`. Wire `type: "function"` tools park Host execution until the client posts a tool result. Non-empty `agent.instructions` and client-supplied `type: "mcp"` tools mount on that same session. Use `[dsh-acp](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/acp/acp/README.md)` for Agent Client Protocol stdio, and `[dsh-sdk-jsonrpc-server](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sdk/server/README.md)` for the first-party JSON-RPC SDK. This gateway does not implement Assistants v2 `/v1/threads`.
 
 
-| Field    | Default | Meaning                                                              |
-| -------- | ------- | -------------------------------------------------------------------- |
-| `apiKey` | `''`    | Bearer token required in `Authorization`; empty string disables auth |
-| `prefix` | `/v1`   | URL prefix for every Agents API route                                |
+| Field                       | Default | Meaning                                                                                                   |
+| --------------------------- | ------- | --------------------------------------------------------------------------------------------------------- |
+| `auth.mode`                 | none    | Required. `production` verifies Keycloak tokens and forbids `devKey`; `development` also allows `devKey`  |
+| `auth.keycloak.issuer`      | none    | Realm issuer URL; JWKS is read from `${issuer}/protocol/openid-connect/certs`                             |
+| `auth.keycloak.audience`    | none    | Required token `aud`                                                                                      |
+| `auth.keycloak.jwksTtlSeconds` | `600` | JWKS cache lifetime; an unknown `kid` triggers an immediate refetch                                      |
+| `auth.devKey.key`           | none    | Fixed bearer key (development only)                                                                       |
+| `auth.devKey.owner`         | none    | Owner id the key acts as                                                                                  |
+| `auth.devKey.admin`         | `true`  | Grant `agentry-admin` to the key                                                                          |
+| `prefix`                    | `/v1`   | URL prefix for every Agents API route                                                                     |
+
+The caller's owner is the token `sub`; roles come from `realm_access.roles` (`agentry-user`, `agentry-admin`). Missing or invalid credentials return 401 `unauthenticated` with `WWW-Authenticate: Bearer`; a missing role returns 403 `forbidden`. `/health` is unauthenticated. The bundled `cordis.patch.yml` runs in `development` mode with the key read from `AGENTRY_DEV_KEY`.
 
 
 The wire details for create, stream, and function tools live in [HTTP API](docs/http-api.md). The route list is below.

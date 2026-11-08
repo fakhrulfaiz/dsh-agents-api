@@ -16,8 +16,9 @@ describe('apply', () => {
       },
       webServer: { register },
     }
-    apply(ctx as unknown as Context)
-    apply(ctx as unknown as Context, { apiKey: 'k', prefix: '/v1' })
+    const auth = { mode: 'development' as const, devKey: { key: 'k', owner: 'dev' } }
+    apply(ctx as unknown as Context, { auth })
+    apply(ctx as unknown as Context, { auth, prefix: '/v1' })
     expect(register).toHaveBeenCalledTimes(4)
     expect(listeners).toHaveLength(4)
     listeners[0]!({ id: 'missing', header: {} }, { type: 'turn/start', seq: 1, time: 1, data: {} })

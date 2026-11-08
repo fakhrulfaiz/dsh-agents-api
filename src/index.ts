@@ -25,6 +25,9 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { AgentStore } from './agent-store.ts'
+import type { Authenticator } from './auth/authenticator.ts'
+import { createKeycloakAuthenticator } from './auth/keycloak.ts'
+import { createStaticKeyAuthenticator } from './auth/static-key.ts'
 import { bridgeChildSessionEvent, bridgeSessionEvent } from './bridge.ts'
 import { CodeboxClient } from './codebox-client.ts'
 import { FsAgentsApiStore, FsEnvironmentApiStore } from './durable-store.ts'
@@ -52,6 +55,10 @@ export * from './environment-types.ts'
 export * from './runtime-config.ts'
 export * from './durable-store.ts'
 export * from './artifacts.ts'
+export { bearerToken, ownerId, requireRole, unauthenticated } from './auth/authenticator.ts'
+export type { AuthResult, Authenticator, OwnerId, Principal, Role as AuthRole } from './auth/authenticator.ts'
+export { createKeycloakAuthenticator } from './auth/keycloak.ts'
+export { createStaticKeyAuthenticator } from './auth/static-key.ts'
 
 /** Cordis plugin name. */
 export const name = 'agents-api'
@@ -59,17 +66,55 @@ export const name = 'agents-api'
 /** Host services required before routes can register. */
 export const inject = ['webServer', 'sessions', 'agents', 'agentDefaultModel', 'tools']
 
+/** Authentication settings. */
+export interface AuthConfig {
+  /** `production` requires `keycloak` and forbids `devKey`; `development` needs `devKey` or `keycloak`. */
+  mode: 'production' | 'development'
+  /** Keycloak realm verification. */
+  keycloak?: {
+    /** Realm issuer URL, matched against the token `iss`; JWKS lives at `${issuer}/protocol/openid-connect/certs`. */
+    issuer: string
+    /** Required token `aud`. */
+    audience: string
+    /** JWKS cache lifetime in seconds (default 600). */
+    jwksTtlSeconds?: number
+  }
+  /** Fixed development bearer key. */
+  devKey?: {
+    key: string
+    /** Owner id the key acts as. */
+    owner: string
+    /** Grant the `agentry-admin` role (default true). */
+    admin?: boolean
+  }
+}
+
 /** Plugin configuration. Omitted backends stay off; env fills them in. */
 export interface Config extends RuntimeConfigInput {
-  /** Bearer token required in Authorization; empty string disables auth. */
-  apiKey?: string
+  /** Authentication. Required: `production` verifies Keycloak tokens, `development` accepts a fixed key. */
+  auth?: AuthConfig
   /** API path prefix (default `/v1`). */
   prefix?: string
 }
 
+/** Schemastery types `.default` as the object's value; `null` is how an optional nested object is left absent at runtime. */
+const ABSENT = null as never
+
 /** Validate and default plugin configuration. */
-export const Config: z<Config> = z.object({
-  apiKey: z.string().default(''),
+export const Config: z<Config> = z.transform(z.object({
+  auth: z.object({
+    mode: z.union([z.const('production'), z.const('development')]).required(),
+    keycloak: z.object({
+      issuer: z.string().required(),
+      audience: z.string().required(),
+      jwksTtlSeconds: z.number().default(600),
+    }).default(ABSENT),
+    devKey: z.object({
+      key: z.string().required(),
+      owner: z.string().required(),
+      admin: z.boolean().default(true),
+    }).default(ABSENT),
+  }).default(ABSENT),
   prefix: z.string().default('/v1'),
   dataDir: z.string(),
   workspaces: z.string(),
@@ -88,12 +133,38 @@ export const Config: z<Config> = z.object({
     accessKeyId: z.string(),
     secretAccessKey: z.string(),
   }),
-})
+}), (config) => {
+  createAuthenticator(config.auth as AuthConfig | undefined)
+  return config
+}) as unknown as z<Config>
+
+/**
+ * Build the request authenticator from the `auth` config block.
+ * @param auth - validated `auth` block.
+ * @returns a Keycloak authenticator, or a static-key authenticator in development with a `devKey`.
+ * @throws when `auth` is missing, `production` lacks `keycloak` or sets `devKey`, or `development` has neither.
+ */
+export function createAuthenticator(auth: AuthConfig | undefined): Authenticator {
+  if (auth === undefined) throw new Error('agents-api: "auth" is required (set auth.mode to production or development)')
+  const { mode, keycloak, devKey } = auth
+  if (mode === 'production') {
+    if (devKey !== undefined) throw new Error('agents-api: auth.devKey is not allowed when auth.mode is "production"')
+    if (keycloak === undefined) throw new Error('agents-api: auth.keycloak is required when auth.mode is "production"')
+  } else if (devKey === undefined && keycloak === undefined) {
+    throw new Error('agents-api: auth.mode "development" needs auth.devKey or auth.keycloak')
+  }
+  if (devKey !== undefined) {
+    if (!devKey.key) throw new Error('agents-api: auth.devKey.key must not be empty')
+    return createStaticKeyAuthenticator({ key: devKey.key, owner: devKey.owner, admin: devKey.admin ?? true })
+  }
+  const kc = keycloak!
+  return createKeycloakAuthenticator({ issuer: kc.issuer, audience: kc.audience, jwksTtlSeconds: kc.jwksTtlSeconds ?? 600 })
+}
 
 /**
  * Register the Agents API prefix route and Session-event bridge.
  * @param ctx - plugin context with `webServer`, `sessions`, `agents`, `agentDefaultModel`, and `tools`.
- * @param config - optional API key and path prefix.
+ * @param config - `auth` block and path prefix.
  */
 export function apply(ctx: Context, config: Config = {}): void {
   const prefix = config.prefix ?? '/v1'
@@ -105,7 +176,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     runtime.codebox ?? {},
     runtime.workspacesRoot,
   )
-  const gateway = new AgentsGateway(ctx, config.apiKey ?? '', prefix, agentStore, sessionRegistry, {
+  const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth), prefix, agentStore, sessionRegistry, {
     environments,
     ...(runtime.workspacesRoot === undefined ? {} : { workspacesRoot: runtime.workspacesRoot }),
     ...(runtime.artifacts === undefined ? {} : { artifacts: runtime.artifacts }),

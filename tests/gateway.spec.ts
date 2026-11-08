@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { AgentStore } from '../src/agent-store.ts'
+import { createStaticKeyAuthenticator } from '../src/auth/static-key.ts'
+import { openAuthenticator } from './open-auth.ts'
 import { AgentsGateway } from '../src/gateway.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
 import { badRequest, json, notFound, readBody } from '../src/http.ts'
@@ -165,7 +167,7 @@ function gateway(apiKey = '', options?: {
   const { ctx, agents, registeredTools, restrictCalls, promptSections, pluginCalls } = fakeContext(options)
   const store = new AgentStore()
   const registry = new SessionRegistry()
-  const api = new AgentsGateway(ctx, apiKey, '/v1', store, registry)
+  const api = new AgentsGateway(ctx, apiKey ? createStaticKeyAuthenticator({ key: apiKey, owner: 'test', admin: true }) : openAuthenticator, '/v1', store, registry)
   return {
     base: listen((req, res) => api.handle(req, res)),
     store,
@@ -201,9 +203,12 @@ describe('http body helpers', () => {
 })
 
 describe('AgentsGateway', () => {
-  it('rejects a missing bearer token when apiKey is set', async () => {
+  it('rejects a missing bearer token with a WWW-Authenticate challenge', async () => {
     const base = await gateway('secret').base
-    expect((await fetch(`${base}/v1/agents`)).status).toBe(401)
+    const denied = await fetch(`${base}/v1/agents`)
+    expect(denied.status).toBe(401)
+    expect(denied.headers.get('www-authenticate')).toBe('Bearer')
+    expect(await denied.json()).toMatchObject({ error: { code: 'unauthenticated' } })
     expect((await fetch(`${base}/v1/agents`, { headers: { authorization: 'Bearer secret' } })).status).toBe(200)
   })
 
@@ -496,7 +501,7 @@ describe('AgentsGateway', () => {
 
   it('defaults missing request fields and tears down a registry-only session', async () => {
     const { ctx } = fakeContext()
-    const api = new AgentsGateway(ctx, '', '/v1', new AgentStore(), new SessionRegistry())
+    const api = new AgentsGateway(ctx, openAuthenticator, '/v1', new AgentStore(), new SessionRegistry())
     const chunks: Buffer[] = []
     const res = {
       setHeader() {},

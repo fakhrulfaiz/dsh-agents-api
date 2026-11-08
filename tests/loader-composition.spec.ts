@@ -39,6 +39,11 @@ describe('real Loader composition', () => {
       "- name: '@agentry/api'",
       '  config:',
       "    prefix: '/v1'",
+      '    auth:',
+      '      mode: development',
+      '      devKey:',
+      '        key: loader-key',
+      '        owner: loader',
       '',
     ].join('\n'))
 
@@ -88,7 +93,7 @@ describe('real Loader composition', () => {
 
     const response = await fetch(`http://127.0.0.1:${String(context.webServer.port)}/v1/agents`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', authorization: 'Bearer loader-key' },
       body: JSON.stringify({ model: 'deepseek-chat', name: 'loader' }),
     })
     expect(response.status).toBe(200)
@@ -97,7 +102,7 @@ describe('real Loader composition', () => {
 
     const session = await fetch(`http://127.0.0.1:${String(context.webServer.port)}/v1/agents/sessions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', authorization: 'Bearer loader-key' },
       body: JSON.stringify({ agent: { model: 'deepseek-chat' }, input: 'hello' }),
     })
     expect(session.status).toBe(200)
