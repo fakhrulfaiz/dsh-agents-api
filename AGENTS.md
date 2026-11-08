@@ -35,7 +35,7 @@ Read this first in every session. It records decisions already made so they are 
 
 - Design for sub-project 1 (API hardening + admin API) and sub-project 2 (combined profile + VM container) is in progress; the spec will live in `docs/superpowers/specs/`.
 - Known gaps: sessions, items, and turns are memory-only (lost on restart); SSE has no replay; no approval channel for sandbox escalation or user questions over the API; session setting updates do not retarget the live agent; Codebox execution depends on a `dockerSandbox` service that no DSH package provides; `CHANGELOG.md` is missing from this repo (it exists only in the stale copy).
-- Verify after the DSH upgrade: the `Symbol.for` `TOOL_RUNTIME_SCHEDULER` fix this repo relied on was removed upstream (the symbol no longer exists). Re-run a live wire-function-tool turn end to end.
+- Wire function tools: rechecked live on DSH master fcc0ad4 (2026-11-08). The `Symbol.for` `TOOL_RUNTIME_SCHEDULER` workaround is no longer needed; a function-tool turn reaches `requires_action`, accepts `tool_result`, and completes. Verdict `resolved`, see `docs/changes/2026-11-08-tool-scheduler-recheck.md`. The smoke script's default model `deepseek/deepseek-v4.1-flash` is rejected by the DeepSeek API; the plugin passes model names through unchanged.
 
 ## Working rules
 

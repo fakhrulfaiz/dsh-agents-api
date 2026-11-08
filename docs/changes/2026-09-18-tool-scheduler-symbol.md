@@ -1,5 +1,7 @@
 # Host tool scheduler Symbol identity (2026-09-18)
 
+Status: superseded. `TOOL_RUNTIME_SCHEDULER` was removed upstream; the live recheck on DSH master fcc0ad4 is `resolved` (see `2026-11-08-tool-scheduler-recheck.md`).
+
 ## Summary
 
 Wire function-tool turns call into the Host tool pipeline. That pipeline looks up an internal scheduler on `ctx.tools` with `TOOL_RUNTIME_SCHEDULER` from `@deepseek-ai/dsh-tools`. The key must be process-global (`Symbol.for`) so a source-launch `src` copy and a runtime-resolved `lib` copy share one identity.
