@@ -1,45 +1,10 @@
 {
-  "extends": "../../../tsconfig.base.json",
+  "extends": "./tsconfig.dsh.json",
   "compilerOptions": {
     "rootDir": "src",
     "outDir": "lib/types"
   },
   "include": [
     "src"
-  ],
-  "references": [
-    {
-      "path": "../../../vendor/cosmokit"
-    },
-    {
-      "path": "../../../vendor/cordis"
-    },
-    {
-      "path": "../../../vendor/schemastery"
-    },
-    {
-      "path": "../../core/agent"
-    },
-    {
-      "path": "../../core/agent-default-model"
-    },
-    {
-      "path": "../../core/session"
-    },
-    {
-      "path": "../../core/system-prompt"
-    },
-    {
-      "path": "../../core/tools"
-    },
-    {
-      "path": "../../mcp/mcp-client"
-    },
-    {
-      "path": "../../host/webserver"
-    },
-    {
-      "path": "../../llm/llm"
-    }
   ]
 }

@@ -1,24 +1,22 @@
 {
-  "name": "@deepseek-ai/dsh-experimental-agents-api",
+  "name": "@agentry/api",
   "description": "OpenAI Agents API HTTP gateway for DeepSeek Harness",
-  "version": "0.1.6-alpha.2",
+  "version": "0.1.0",
   "publishConfig": {
     "access": "public"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/deepseek-ai/deepseek-harness.git",
-    "directory": "packages/experimental/dsh-agents-api"
+    "url": "git+https://github.com/fakhrulfaiz/agentry-api.git"
   },
   "type": "module",
-  "main": "./src/entry.js",
-  "types": "./src/index.ts",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/entry.js"
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
     },
-    "./src/*": "./src/*",
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
@@ -34,34 +32,36 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-agent": "workspace:^",
-    "@deepseek-ai/dsh-agent-default-model": "workspace:^",
-    "@deepseek-ai/dsh-host-webserver": "workspace:^",
-    "@deepseek-ai/dsh-llm": "workspace:^",
-    "@deepseek-ai/dsh-mcp-client": "workspace:^",
-    "@deepseek-ai/dsh-session": "workspace:^",
-    "@deepseek-ai/dsh-system-prompt": "workspace:^",
-    "@deepseek-ai/dsh-tools": "workspace:^",
-    "@deepseek-ai/cordis": "workspace:^",
-    "@aws-sdk/client-s3": "^3.0.0"
+    "@deepseek-ai/dsh-agent": ">=0.0.1-0",
+    "@deepseek-ai/dsh-agent-default-model": ">=0.0.1-0",
+    "@deepseek-ai/dsh-host-webserver": ">=0.0.1-0",
+    "@deepseek-ai/dsh-llm": ">=0.0.1-0",
+    "@deepseek-ai/dsh-mcp-client": ">=0.0.1-0",
+    "@deepseek-ai/dsh-session": ">=0.0.1-0",
+    "@deepseek-ai/dsh-system-prompt": ">=0.0.1-0",
+    "@deepseek-ai/dsh-tools": ">=0.0.1-0",
+    "@deepseek-ai/cordis": "^4.1.0",
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@deepseek-ai/schemastery": ">=0.0.1-0"
   },
   "peerDependenciesMeta": {
     "@aws-sdk/client-s3": {
       "optional": true
     }
   },
-  "dependencies": {
-    "@deepseek-ai/schemastery": "workspace:^"
-  },
   "devDependencies": {
-    "@deepseek-ai/dsh-agent": "workspace:^",
-    "@deepseek-ai/dsh-agent-default-model": "workspace:^",
-    "@deepseek-ai/dsh-host-webserver": "workspace:^",
-    "@deepseek-ai/dsh-llm": "workspace:^",
-    "@deepseek-ai/dsh-mcp-client": "workspace:^",
-    "@deepseek-ai/dsh-session": "workspace:^",
-    "@deepseek-ai/dsh-system-prompt": "workspace:^",
-    "@deepseek-ai/dsh-tools": "workspace:^",
-    "@deepseek-ai/cordis": "workspace:^"
+    "@types/node": "^22.20.1",
+    "vitest": "^4.1.11",
+    "vite-tsconfig-paths": "^6.1.1",
+    "typescript": "^6.0.3",
+    "tsdown": "^0.22.2",
+    "tsx": "^4.23.13"
+  },
+  "scripts": {
+    "dsh:link": "tsx scripts/link-dsh.ts",
+    "check:dsh-pin": "tsx scripts/check-dsh-pin.ts",
+    "typecheck": "pnpm dsh:link && tsc -p tsconfig.typecheck.json",
+    "test": "pnpm dsh:link && vitest run",
+    "build": "pnpm dsh:link && tsdown && tsc -p tsconfig.types.json"
   }
 }

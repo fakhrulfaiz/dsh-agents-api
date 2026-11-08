@@ -1,6 +1,6 @@
 # Agents API HTTP routes
 
-Route and wire detail for `@deepseek-ai/dsh-experimental-agents-api`. Install and profile composition live in the [package README](../README.md).
+Route and wire detail for `@agentry/api`. Install and profile composition live in the [package README](../README.md).
 
 ## Official routes
 

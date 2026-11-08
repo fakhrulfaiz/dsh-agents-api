@@ -36,7 +36,7 @@ describe('real Loader composition', () => {
       '  config:',
       "    host: '127.0.0.1'",
       '    port: 0',
-      "- name: '@deepseek-ai/dsh-experimental-agents-api'",
+      "- name: '@agentry/api'",
       '  config:',
       "    prefix: '/v1'",
       '',
@@ -70,7 +70,7 @@ describe('real Loader composition', () => {
     const modules = new Map<string, unknown>([
       ['fixture-dependencies', dependencies],
       ['@deepseek-ai/dsh-host-webserver', WebServer],
-      ['@deepseek-ai/dsh-experimental-agents-api', AgentsApi],
+      ['@agentry/api', AgentsApi],
     ])
     context.loader.internal = {
       version: 'v2',

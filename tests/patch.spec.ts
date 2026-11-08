@@ -14,13 +14,11 @@ describe('dsh-agents-api bundle', () => {
       dsh?: { bundle?: { patch?: string } }
     }
     expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
-    expect(manifest.dependencies).toEqual({
-      '@deepseek-ai/schemastery': 'workspace:^',
-    })
+    expect(manifest.dependencies).toBeUndefined()
     const patch = readFileSync(resolve(root, 'cordis.patch.yml'), 'utf8')
     expect(patch).not.toContain('- id: webserver')
     expect(patch).toContain('id: agents-api')
-    expect(patch).toContain("name: '@deepseek-ai/dsh-experimental-agents-api'")
+    expect(patch).toContain("name: '@agentry/api'")
     expect(patch).toContain("prefix: '/v1'")
   })
 })

@@ -2,7 +2,7 @@
 description: "Installable experimental profile layer that serves the OpenAI Agents API over REST and SSE for applications that already speak agents=v1."
 kind: "package-bundle"
 
-# @deepseek-ai/dsh-experimental-agents-api
+# @agentry/api
 
 ## Summary
 
@@ -31,30 +31,34 @@ Serve the [OpenAI Agents API](https://developers.openai.com/api/docs/guides/agen
 Add this package with `dsh plugin add` on the shipped `web` profile. That profile already runs `@deepseek-ai/dsh-base` and `@deepseek-ai/dsh-web-app`. The command writes the profile for you; do not edit `~/.dsh` by hand. The browser and the Agents API then share that webserver: the UI stays on the web origin, and clients call the same host and port with `/v1`. This patch does not insert a second `id: webserver`.
 
 ```sh
-pnpm dsh plugin --profile web add @deepseek-ai/dsh-experimental-agents-api
+pnpm dsh plugin --profile web add @agentry/api
 pnpm dsh --profile web
 ```
 
 Web owns the bind (default `127.0.0.1:3080`). This plugin adds `/v1` and `/health` on that server.
 
-From a harness checkout, clone this repo at `packages/experimental/dsh_agents_api` and point `add` at that directory:
+From a DSH checkout, point `add` at this repository (build it first with `pnpm build`; the plugin loads `lib/index.js`):
 
 ```sh
-pnpm dsh plugin --profile web add ./packages/experimental/dsh_agents_api
-pnpm dsh plugin --profile web remove @deepseek-ai/dsh-experimental-agents-api
+pnpm dsh plugin --profile web add ../dsh-agents-api
+pnpm dsh plugin --profile web remove @agentry/api
 ```
 
 Point the OpenAI client `baseURL` at the web server plus the prefix (for example `http://127.0.0.1:3080/v1`). Session create takes the Host provider from `ctx.agentDefaultModel.currentSelection()` and the model id from the Agents API `agent.model`.
 
 ### Develop in this repository
 
-When you change this package's source, restart the profile that linked it. `pnpm dsh` loads `src/entry.js`, which re-exports the TypeScript source, so there is no `lib/` build step.
+This repository builds and tests on its own against a pinned DSH checkout. `dsh.pin` names the DSH tag; check it out (for example as a worktree) and export `DSH_ROOT`:
 
 ```sh
-pnpm dsh --profile web
+git -C ../deepseek-harness worktree add ../dsh-pinned "$(cat dsh.pin)"
+(cd ../dsh-pinned && pnpm install)
+export DSH_ROOT=$PWD/../dsh-pinned
+pnpm install
+pnpm check:dsh-pin && pnpm typecheck && pnpm test && pnpm build
 ```
 
-A `link:` dependency from `dsh plugin add ./packages/experimental/dsh_agents_api` loads that tree. You do not add a path alias or write `lib/index.js`.
+`pnpm dsh:link` writes the untracked `tsconfig.dsh.json` that extends `$DSH_ROOT/tsconfig.base.json`; `typecheck` and `test` run it first. After a source change, run `pnpm build` and restart the profile that links this package.
 
 ### What you get
 

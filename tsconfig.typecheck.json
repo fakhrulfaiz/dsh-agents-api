@@ -1,0 +1,8 @@
+{
+  "extends": ["./tsconfig.json", "./tsconfig.dsh.types.json"],
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    "noEmit": true
+  }
+}

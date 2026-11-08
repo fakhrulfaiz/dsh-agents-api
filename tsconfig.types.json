@@ -1,0 +1,12 @@
+{
+  "extends": ["./tsconfig.json", "./tsconfig.dsh.types.json"],
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    "emitDeclarationOnly": true,
+    "declaration": true,
+    "declarationMap": false,
+    "sourceMap": false,
+    "noEmit": false
+  }
+}
