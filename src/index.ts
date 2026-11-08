@@ -364,10 +364,11 @@ async function openStore(ctx: Context, url: string, gateway: AgentsGateway): Pro
   const unavailable = recoveryUnavailable(ctx.agents, ctx.sessionPersistence)
   if (unavailable !== undefined) {
     ctx.logger.warn(`agents-api: ${unavailable.message}; rows are left as they are and sessions resume on first access`)
+    ctx.logger.info('agents-api: recovery: skipped (agent loop not ready; sessions resume lazily)')
   } else {
     try {
       const recovered = await recoverSessions({ store, resume: row => gateway.resumeSession(row) })
-      if (recovered.resumed.length > 0) ctx.logger.info(`agents-api: resumed ${String(recovered.resumed.length)} session(s)`)
+      ctx.logger.info(`agents-api: recovery: resumed ${String(recovered.resumed.length)}, interrupted ${String(recovered.interrupted.length)}`)
       for (const { id, reason } of recovered.interrupted) ctx.logger.warn(`agents-api: session ${id} marked interrupted: ${reason}`)
     } catch (error: unknown) {
       ctx.logger.error(`agents-api: session recovery stopped early: ${errorMessage(error)}`)

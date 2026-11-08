@@ -18,6 +18,15 @@ export class RecoveryUnavailableError extends Error {
   }
 }
 
+/** The Host's agent registry does not have the shape `recoveryUnavailable` probes; DSH changed and this plugin needs updating. */
+export class RecoveryProbeError extends Error {
+  /** @param detail - what was not found. */
+  constructor(detail: string) {
+    super(`cannot probe the agent registry: ${detail}`)
+    this.name = 'RecoveryProbeError'
+  }
+}
+
 /**
  * Check, without calling `resume`, that the Host can resume sessions. The agent
  * registry keeps the loop's factory in a field named `factory` that is `undefined`
@@ -25,9 +34,13 @@ export class RecoveryUnavailableError extends Error {
  * @param agents - `ctx.agents`.
  * @param sessionPersistence - `ctx.sessionPersistence`.
  * @returns an error naming the missing capability, or `undefined` when both exist.
+ * @throws RecoveryProbeError when `agents` has no `factory` field at all (not merely unset).
  */
 export function recoveryUnavailable(agents: unknown, sessionPersistence: unknown): RecoveryUnavailableError | undefined {
-  if ((agents as { factory?: unknown } | undefined)?.factory === undefined) return new RecoveryUnavailableError('no agent factory is registered yet')
+  if (typeof agents !== 'object' || agents === null || !('factory' in agents)) {
+    throw new RecoveryProbeError('ctx.agents has no `factory` field')
+  }
+  if ((agents as { factory?: unknown }).factory === undefined) return new RecoveryUnavailableError('no agent factory is registered yet')
   if (sessionPersistence === undefined) return new RecoveryUnavailableError('session persistence is not available')
   return undefined
 }

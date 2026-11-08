@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { materializeAgent } from '../src/agent-records.ts'
 import { ownerId } from '../src/auth/authenticator.ts'
-import { NO_STORED_CONFIG, RecoveryUnavailableError, recoverSessions, recoveryUnavailable } from '../src/recovery.ts'
+import { NO_STORED_CONFIG, RecoveryProbeError, RecoveryUnavailableError, recoverSessions, recoveryUnavailable } from '../src/recovery.ts'
 import type { SessionIndexRow } from '../src/store/store.ts'
 import { MemoryStore } from './support/memory-store.ts'
 
@@ -74,13 +77,31 @@ describe('recoverSessions', () => {
 
   it('reports a missing agent factory or session persistence before any resume', () => {
     expect(recoveryUnavailable({ factory: {} }, {})).toBeUndefined()
-    expect(recoveryUnavailable({}, {})).toBeInstanceOf(RecoveryUnavailableError)
-    expect(recoveryUnavailable(undefined, {})?.message).toMatch(/agent factory/)
+    expect(recoveryUnavailable({ factory: undefined }, {})).toBeInstanceOf(RecoveryUnavailableError)
+    expect(() => recoveryUnavailable({}, {})).toThrow(RecoveryProbeError)
+    expect(() => recoveryUnavailable(undefined, {})).toThrow(RecoveryProbeError)
     expect(recoveryUnavailable({ factory: {} }, undefined)?.message).toMatch(/persistence/)
   })
 
   it('does nothing when no session is running', async () => {
     const store = await seeded(row('sess_idle', 'idle'), row('sess_failed', 'failed'))
     expect(await recoverSessions({ store, resume: () => Promise.reject(new Error('unused')) })).toEqual({ resumed: [], interrupted: [] })
+  })
+})
+
+describe('recoveryUnavailable against the real agent registry', () => {
+  it('is unavailable before a factory is registered and available after setFactory', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
+    // Constructed directly: loading it as a plugin trips a const-enum import under this repository's Vite.
+    const registry = new AgentRegistry(ctx)
+    expect(recoveryUnavailable(registry, {})).toBeInstanceOf(RecoveryUnavailableError)
+    const dispose = registry.setFactory({
+      createAgent: () => Promise.reject(new Error('unused')),
+      resume: () => Promise.reject(new Error('unused')),
+    })
+    expect(recoveryUnavailable(registry, {})).toBeUndefined()
+    dispose()
+    expect(recoveryUnavailable(registry, {})).toBeInstanceOf(RecoveryUnavailableError)
   })
 })
