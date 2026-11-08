@@ -2,8 +2,9 @@
  * Maps DSH `tsconfig.base.json` source path aliases to the declaration files that
  * `pnpm run build:artifacts` emits under each package's `lib/types`.
  */
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import ts from 'typescript'
 
 /**
  * Converts one source alias target to its declaration target.
@@ -39,22 +40,49 @@ export interface DeclarationPaths {
  * @param dshRoot - DSH checkout directory.
  * @param sourcePaths - `compilerOptions.paths` of DSH's `tsconfig.base.json`.
  * @param required - Alias names this repository imports; their declaration files must exist.
+ * @param warn - Receives one line per alias skipped because its target has no `src` segment or has a wildcard before it.
  * @returns The mapping, plus `missing` listing required aliases whose declaration file does not exist.
  */
 export function buildDeclarationPaths(
   dshRoot: string,
   sourcePaths: Record<string, string[]>,
   required: ReadonlySet<string>,
+  warn: (message: string) => void = console.warn,
 ): DeclarationPaths {
   const root = resolve(dshRoot)
   const paths: Record<string, string[]> = {}
   const missing: string[] = []
   for (const [alias, targets] of Object.entries(sourcePaths)) {
     const mapped = targets.map((target) => declarationTarget(root, target))
-    if (mapped.some((target) => target === undefined)) continue
+    if (mapped.some((target) => target === undefined)) {
+      warn(`link-dsh: skipping alias ${alias}: target has no src segment or a wildcard before it`)
+      continue
+    }
     const declared = mapped as string[]
     paths[alias] = declared
-    if (required.has(alias) && declared.some((file) => !existsSync(file))) missing.push(alias)
+    // Wildcard targets are patterns, not files; only exact declaration files can be checked.
+    if (required.has(alias) && declared.some((file) => !file.includes('*') && !existsSync(file))) missing.push(alias)
   }
   return { paths, missing }
+}
+
+/**
+ * Lists the `@deepseek-ai/*` module specifiers imported anywhere under a directory.
+ *
+ * @param dir - Directory scanned recursively for `.ts` files.
+ * @returns Specifiers from static, type, re-export, side-effect, and dynamic imports.
+ */
+export function scanDshImports(dir: string): Set<string> {
+  const found = new Set<string>()
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      for (const specifier of scanDshImports(path)) found.add(specifier)
+    } else if (entry.name.endsWith('.ts')) {
+      for (const { fileName } of ts.preProcessFile(readFileSync(path, 'utf8'), true, true).importedFiles) {
+        if (fileName.startsWith('@deepseek-ai/')) found.add(fileName)
+      }
+    }
+  }
+  return found
 }

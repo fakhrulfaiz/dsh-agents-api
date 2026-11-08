@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { buildDeclarationPaths, declarationTarget } from '../scripts/dsh-paths.ts'
+import { buildDeclarationPaths, declarationTarget, scanDshImports } from '../scripts/dsh-paths.ts'
 
 const roots: string[] = []
 
@@ -42,5 +42,34 @@ describe('buildDeclarationPaths', () => {
     expect(result.missing).toEqual(['@x/b'])
     expect(result.paths['@x/a']).toEqual([join(root, 'packages/a/lib/types/index.d.ts')])
     expect(buildDeclarationPaths(root, sourcePaths, new Set(['@x/a'])).missing).toEqual([])
+  })
+
+  it('warns about skipped aliases and does not require wildcard declarations', () => {
+    const warnings: string[] = []
+    const result = buildDeclarationPaths(
+      '/dsh',
+      { '@x/flat': ['./packages/flat/index.ts'], '@x/wild/*': ['./packages/wild/src/*'] },
+      new Set(['@x/flat', '@x/wild/*']),
+      (message) => warnings.push(message),
+    )
+    expect(warnings).toEqual([expect.stringContaining('@x/flat')])
+    expect(result.missing).toEqual([])
+  })
+})
+
+describe('scanDshImports', () => {
+  it('finds dynamic and double-quoted imports in nested files', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-scan-'))
+    roots.push(dir)
+    await mkdir(join(dir, 'nested/deep'), { recursive: true })
+    await writeFile(join(dir, 'a.ts'), "import type { A } from '@deepseek-ai/dsh-a'\nimport '@deepseek-ai/dsh-side'\nexport * from '@deepseek-ai/dsh-re'\nimport x from 'left-pad'\n")
+    await writeFile(join(dir, 'nested/deep/b.ts'), 'import { B } from "@deepseek-ai/dsh-b"\nconst m = await import(\'@deepseek-ai/dsh-dyn\')\n')
+    expect([...scanDshImports(dir)].sort()).toEqual([
+      '@deepseek-ai/dsh-a',
+      '@deepseek-ai/dsh-b',
+      '@deepseek-ai/dsh-dyn',
+      '@deepseek-ai/dsh-re',
+      '@deepseek-ai/dsh-side',
+    ])
   })
 })

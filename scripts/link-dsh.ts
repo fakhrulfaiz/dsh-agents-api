@@ -6,12 +6,12 @@
  *   (`lib/types`), so `tsc` checks only this repository's files. DSH must have run
  *   `pnpm run build:artifacts`.
  */
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
-import { buildDeclarationPaths } from './dsh-paths.ts'
+import { buildDeclarationPaths, scanDshImports } from './dsh-paths.ts'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const dshRoot = process.env['DSH_ROOT']
@@ -27,13 +27,7 @@ if (!existsSync(base)) {
 const write = (name: string, value: unknown) =>
   writeFile(join(repoRoot, name), `${JSON.stringify(value, null, 2)}\n`)
 
-const srcDir = join(repoRoot, 'src')
-const imported = new Set<string>()
-for (const file of readdirSync(srcDir).filter((name) => name.endsWith('.ts'))) {
-  for (const match of readFileSync(join(srcDir, file), 'utf8').matchAll(/from '(@deepseek-ai\/[^']+)'/g)) {
-    imported.add(match[1]!)
-  }
-}
+const imported = scanDshImports(join(repoRoot, 'src'))
 
 const parsed = ts.parseConfigFileTextToJson(base, readFileSync(base, 'utf8'))
 const sourcePaths: Record<string, string[]> = parsed.config?.compilerOptions?.paths ?? {}
