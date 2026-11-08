@@ -277,6 +277,56 @@ git add -A && git commit -m "feat(store): Postgres store with forward-only migra
 
 ---
 
+### Task 4b: `apiKeys` auth mode for simple hosting
+
+Implements spec section 5.7. Added 2026-11-08 at the user's request ("we want to have option for simple hosting").
+
+**Files:**
+- Create: `src/auth/api-keys.ts`, `scripts/keys-create.ts`, `tests/api-keys.spec.ts`, `docs/changes/2026-11-08-api-keys-mode.md`
+- Modify: `src/index.ts` (Config: `auth.mode` gains `'apiKeys'`; `auth.apiKeys` array; validation; `ResolvedAuthConfig`; `createAuthenticator`), `package.json` (script `keys:create`), `README.md` (auth modes table + key creation), `docs/http-api.md`, `docs/README.md`, `CHANGELOG.md`, `AGENTS.md` (decision 6)
+
+**Interfaces:**
+- Consumes: `Authenticator`, `Principal`, `OwnerId`, `ownerId`, `Role`, `firstThen` (Task 3); the `ResolvedAuthConfig` pattern (no `?? default`)
+- Produces:
+```ts
+export interface ApiKeyEntry { name: string; owner: string; roles: Role[]; hash: string } // hash = 'sha256:' + 64 lowercase hex
+export function createApiKeyAuthenticator(entries: readonly ApiKeyEntry[]): Authenticator
+export function hashApiKey(key: string): string            // 'sha256:<hex>'
+export function generateApiKey(): string                   // 'agk_' + base64url(32 random bytes), 47 chars
+```
+- Mode `apiKeys` with `auth.keycloak` also set → `firstThen(apiKeys, keycloak)`. Mode `production` stays Keycloak-only: `production` with `apiKeys` entries fails at load. `devKey` remains rejected outside `development`.
+
+- [ ] **Step 1: Write the failing tests** in `tests/api-keys.spec.ts`:
+  - `generateApiKey format` → matches `/^agk_[A-Za-z0-9_-]{43}$/`; two calls differ
+  - `hashApiKey format` → matches `/^sha256:[0-9a-f]{64}$/`; stable for the same key
+  - `accepts a configured key` → principal owner and roles come from the entry
+  - `rejects an unknown key, an empty bearer, and a missing header` → 401 `unauthenticated`
+  - `apiKeys config validation` → an empty list, duplicate `name`, malformed `hash`, empty `roles`, or unknown role makes `Config(...)` throw a named error
+  - `apiKeys mode with keycloak accepts either credential`
+  - `production mode rejects apiKeys entries` → `Config(...)` throws
+  - `keys:create prints a key and a matching entry` → run the script with `--name ci --owner ali`, parse the output, `hashApiKey(printedKey) === printedEntry.hash`, roles `['agentry-user']`; with `--admin` the roles include `agentry-admin`
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `pnpm vitest run tests/api-keys.spec.ts`
+Expected: FAIL (module not found).
+
+- [ ] **Step 3: Implement** `api-keys.ts` (hash the presented bearer once and compare it against every entry's digest with `timingSafeEqual`, without exiting early at the matching position), the Config changes, and `scripts/keys-create.ts` (prints the key once plus a YAML entry; writes no files).
+
+- [ ] **Step 4: Run the suite**
+
+Run: `export DSH_ROOT=/home/mffaiz/code/dsh-pinned && pnpm typecheck && pnpm test && pnpm build`
+Expected: PASS.
+
+- [ ] **Step 5: Docs and commit**
+
+Add a CHANGELOG bullet and `docs/changes/2026-11-08-api-keys-mode.md`; document the three modes in README and in AGENTS.md decision 6.
+```bash
+git add -A && git commit -m "feat(auth): apiKeys mode for simple self-hosting"
+```
+
+---
+
 ### Task 5: History from the DSH Session log, restart recovery, SSE replay
 
 **Files:**
@@ -433,7 +483,7 @@ git add -A && git commit -m "feat(admin): admin API with full per-step model req
 ### Task 8: `agentry` profile, image, compose, startup checks
 
 **Files:**
-- Create: `deploy/profile/package.json`, `deploy/profile/cordis.patch.yml`, `deploy/Dockerfile`, `deploy/compose.yml`, `deploy/Caddyfile`, `deploy/keycloak/realm-agentry.json`, `deploy/postgres/init.sql`, `deploy/.env.example`, `deploy/backup/pg-dump.sh`, `deploy/backup/snapshot-dsh.sh`, `deploy/README.md`, `src/startup-checks.ts`, `tests/startup-checks.spec.ts`
+- Create: `deploy/profile/package.json`, `deploy/profile/cordis.patch.yml`, `deploy/Dockerfile`, `deploy/compose.yml`, `deploy/compose.simple.yml` (spec 7.3 simple-hosting variant: caddy + postgres + agentry with `auth.mode: apiKeys`, no Keycloak; verified with the same `/health` and sandbox-denial checks), `deploy/Caddyfile`, `deploy/keycloak/realm-agentry.json`, `deploy/postgres/init.sql`, `deploy/.env.example`, `deploy/backup/pg-dump.sh`, `deploy/backup/snapshot-dsh.sh`, `deploy/README.md`, `src/startup-checks.ts`, `tests/startup-checks.spec.ts`
 - Modify: `cordis.patch.yml` (insert only the `agents-api` row), `src/index.ts` (run startup checks before registering routes), `.gitignore` (`deploy/.env`)
 
 **Interfaces:**

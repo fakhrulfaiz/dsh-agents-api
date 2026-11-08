@@ -19,7 +19,7 @@ Success means all of the following hold on the pinned DSH release tag:
 
 ## 2. Out of scope
 
-Multi-user isolation (beyond `owner` columns and filters), per-session cloud sandboxes (Daytona/E2B), Codebox execution, S3 artifacts (code stays, disabled by default), cowork endpoints (jobs, schedules, deliverables, plan/todo/goal, team board), and the frontend (`agentry-web`). These belong to later sub-projects.
+Multi-user isolation (beyond `owner` columns and filters), per-session cloud sandboxes (Daytona/E2B), Codebox execution, S3 artifacts (code stays, disabled by default), cowork endpoints (jobs, schedules, deliverables, plan/todo/goal, team board), and the frontend (`agentry-web`). These belong to later sub-projects. A SQLite `Store` implementation for zero-dependency simple hosting is a planned follow-up behind the same `Store` interface; this round ships Postgres only.
 
 ## 3. Repository and packaging
 
@@ -88,6 +88,18 @@ When DSH raises an interaction request for a session (sandbox escalation, user q
 
 Every request is authenticated. Missing or invalid credentials return `401`; all reads and writes are restricted to `principal.owner`. Records of other owners return `404`, not `403`.
 
+### 5.7 Auth modes
+
+`auth.mode` selects how credentials are checked. All modes produce the same `Principal` and sit behind the `Authenticator` interface.
+
+| Mode | Credentials | Intended use |
+|---|---|---|
+| `production` | Keycloak access tokens (`auth.keycloak`) | Teams, SSO, the full VM stack |
+| `apiKeys` | Named API keys (`auth.apiKeys`), optionally plus Keycloak tokens when `auth.keycloak` is also set | Simple self-hosting without Keycloak |
+| `development` | One shared `devKey`, optionally plus Keycloak tokens | Local development only |
+
+`apiKeys` entries are `{ name, owner, roles, hash }`. Keys have the form `agk_` + 43 base64url characters (32 random bytes); `hash` is `sha256:` + the lowercase hex SHA-256 of the full key. Config holds hashes only, never plaintext keys. Verification hashes the presented bearer and compares it against every entry with `timingSafeEqual`. `name` values are unique, `roles` is a non-empty subset of `agentry-user`/`agentry-admin`, and an empty list, a duplicate name, or a malformed hash fails at load. Revoking a key means removing its entry. `pnpm keys:create --name <name> --owner <owner> [--admin]` prints a new key once and the matching config entry; it writes no files. `devKey` stays rejected outside `development`.
+
 ## 6. Admin API (`/admin/v1`)
 
 ### 6.1 Routes
@@ -137,6 +149,8 @@ Requires the `agentry-admin` realm role (`403` otherwise). Every call writes one
 
 `deploy/compose.yml` services: `caddy` (public `:443`, TLS), `keycloak` (realm import from `deploy/keycloak/realm-agentry.json` with roles `agentry-user` and `agentry-admin`), `postgres` (databases `agentry` and `keycloak`), and `agentry` (private network only; optional `runtime: runsc`). Secrets come from an untracked `deploy/.env` with a committed `deploy/.env.example`. The DSH web UI at `/` is not routed publicly; reach it through an SSH tunnel. Nightly `pg_dump` and `/data/dsh` snapshot scripts live in `deploy/backup/`.
 
+`deploy/compose.simple.yml` is the simple-hosting variant: `caddy`, `postgres` (database `agentry` only), and `agentry` with `auth.mode: apiKeys`; no Keycloak service.
+
 ### 7.4 Startup checks
 
 Startup fails with a named error when: Postgres is unreachable, a migration fails, the Keycloak JWKS endpoint is unreachable (production mode), the static-key authenticator is configured in production mode, `DEEPSEEK_API_KEY` is unset, or `sandbox-local` reports `SANDBOX_UNAVAILABLE`. The enforcement level (`full` or `partial`) is logged at startup.
@@ -162,6 +176,7 @@ Startup fails with a named error when: Postgres is unreachable, a migration fail
 2. Repository rename, packaging, DSH pin, `CHANGELOG.md` restore, stale copy removal.
 3. `Authenticator` with the Keycloak and static-key implementations.
 4. Postgres `Store` and migrations; replace the in-memory and JSON stores.
+4b. `apiKeys` auth mode and the `keys:create` command (section 5.7).
 5. Session history from the DSH log; restart recovery; SSE replay.
 6. Approvals bridge; live session updates.
 7. Request-reconstruction spike, then the admin API.
