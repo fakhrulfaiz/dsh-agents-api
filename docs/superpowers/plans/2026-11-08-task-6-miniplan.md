@@ -1,0 +1,93 @@
+# Task 6 mini-plan: approvals bridge and live session updates (2026-11-08)
+
+Evidence: DSH pin `/home/mffaiz/code/dsh-pinned/packages/...` (`P/`), this repo at `dc129d4`. Where this file conflicts with the Task 6 text of the main plan, this file wins. Task 5 mini-plan ("Task 5 mini-plan" section of the main plan) is assumed implemented.
+
+## Answers
+
+1. **Registration and scoping.** Both seams are Cordis waterfalls, not a registry. There is no `registerAnswerer` call.
+   - Approvals: `ctx.on('approval/request', (req: ApprovalRequestEvent, next) => Promise<ApprovalOutcome>)` (`P/interaction/user-approval/src/types.ts:87`). `ApprovalRequestEvent { agent: Agent; toolName: string; callId?: ToolCallId; reason?: string; displayReason?; signal?: AbortSignal }` (`types.ts:63`). `ApprovalOutcome = 'allowed-once'|'rejected'|'cancelled'|'unavailable'` (`types.ts:32`).
+   - Questions: `ctx.on('user-questions/request', (req: AskUserQuestionRequestEvent, next) => Promise<AskUserQuestionAnswer>)` (`P/interaction/user-questions/src/types.ts:174`). `AskUserQuestionRequestEvent { questions: AskUserQuestionItem[]; agent?: Agent; signal?; wait?: { callId; timed? } }` (`types.ts:146`). `AskUserQuestionAnswer { answers: { id; selected: string[]; custom? }[] }` (`types.ts:73-86`).
+   - Scoping: register globally (plain `ctx.on`, inside `ctx.effect`) and claim only our agents; everything else calls `next()`. This is the shipped pattern: `P/acp/acp/src/index.ts:158` does `ownedRecord(request.agent)`, else `next()`. Ours: `claims(agent) = gateway.hasSession(agent.session.id)` (a `handles`/registry lookup, true for both created and resumed sessions). The DSH web UI keeps its answerer because we delegate with `next()`. Never register with `prepend: true`. Never return `'unavailable'` for a foreign agent.
+   - Policy: `ApprovalService.decide` returns `'rejected'` before any listener when the session policy is `never` (`user-approval/src/index.ts:301`). The base profile sets `never` only for `DSH_PERMISSION_MODE=danger-full-access` (`bundle/base/cordis.patch.yml:260-262`). Both `approval` (`:260`) and `user-questions` (`:79`) are mounted in `base`; `tool-ask-user` is mounted in `sdk-app` only (`bundle/sdk-app/cordis.patch.yml:67`), so confirm the `agentry` profile (Task 8) mounts it, with `mode: legacy` (default, `tool-ask-user/src/index.ts:35`).
+2. **Mapping to the wire.** `OAIRequiredAction` gains `{ type:'approval'; id; kind; prompt; options: string[]; tool_name?: string; call_id?: string; questions?: AskUserQuestionItem[] }` (the two optional fields and `questions` are additions to the main plan, so clients can render without parsing `prompt`).
+   - `approval/request` -> `kind: 'sandbox_escalation'` when `req.reason` starts with `escalate sandbox to ` (`P/sandbox/sandbox/src/escalation.ts:193`, the only producer), else `'tool_approval'` (`P/core/tools/src/pipeline.ts:449`, reason is the tool policy's). `prompt = req.displayReason?.en ?? req.reason ?? 'Approve ' + toolName`. `options: ['approve','deny']`. `tool_name = req.toolName`, `call_id = req.callId`.
+   - `user-questions/request` -> `kind: 'user_question'`. `prompt = questions.map(q => q.question).join('\n')`; `options` = the labels of `questions[0].options` when there is exactly one question, else `[]`; `questions` carries the full items for multi-question or multi-select requests. A question with `intent.kind === 'approval'` stays `user_question` (its `approve`/`reject` labels are in `options`).
+   - `decision` semantics: `approve` -> `'allowed-once'`. `deny` -> `'rejected'`. For a question, `deny` resolves a skipped batch `{answers: questions.map(q => ({id: q.id, selected: []}))}` (the model contract: empty `selected` and no `custom` means skipped, `tool-ask-user/src/timed.ts:27`). `answer` is valid only for `user_question`; `payload` must be `{ answers: [...] }` or, for a one-question request, `{ selected: string[]; custom?: string }` (expanded to the full batch). Anything else -> `400 invalid_request_error`/`invalid_approval_response`. `approve`/`deny` on a question and `answer` on an approval -> `400 decision_not_applicable`.
+   - The wire `id`: approvals use the `ApprovalRequestId` that DSH logs in `approval/asked` (`user-approval/src/index.ts:251-257`), so the id is stable across SSE replay. The request event does not carry it. The bridge listens to `session/event` (global, synchronous, `P/user-questions/src/index.ts:109` is an example) and keeps a per-session FIFO of `approval/asked {id, toolName, callId}`. `asked` is appended before the waterfall runs (`index.ts:252` then `:258`), so the listener pairs by `callId` and `toolName` (FIFO fallback when `callId` is absent). Questions have no log event in legacy mode, so they get `appr_<randomUUID>` (or `wait.callId` when set).
+3. **Answer path, cancel, delete, restart.**
+   - Answer: `answer()` finds the pending entry, deletes it, resolves the parked listener promise with the mapped outcome or batch, then updates required actions. DSH continues the tool call; `approval/decided` is appended by DSH itself (`index.ts:259`). Returns `'resolved'`, else `'not_found'` -> gateway throws `AgentsApiRequestError(404, 'approval_not_found')`. Gateway maps it in `postEvents` (it already turns `AgentsApiRequestError` into the JSON error body, `gateway.ts:635-644`).
+   - Cancel: `input.cancel` calls `agent.cancel(...)`, which aborts the tool `exec.signal` passed as `req.signal` (`pipeline.ts:449`); `decide()` already resolves `'cancelled'` on abort (`index.ts:321-325`) and discards a late answer. The bridge also removes the entry on `req.signal` abort (listener `abort`, `{ once: true }`, same shape as `pending-function-calls.ts:79-90`), and `applyInputEvent` cancel additionally calls `bridge.cancelAll(sessionId)` for the case where no signal is wired (resolves `'cancelled'`; question listener throws `Error('question cancelled')`; `ask()` maps abort to `ASK_ABORTED`, `user-questions/src/index.ts:357`). The cancel, delete, and restart paths all end with the id unknown, so a later answer is `404 approval_not_found` (test 3).
+   - Delete (`gateway.ts:609`): call `bridge.cancelAll(sessionId)` next to `pendingBySession...rejectAll`, before disposing the handle.
+   - Restart: pending state is in memory only. DSH repair closes the turn (`interrupted`), so no approval is pending after resume; `asked` without `decided` is audit noise. After resume the old id is unknown -> 404. No persistence needed.
+   - Not supported: timed questions (`tool-ask-user` `mode: 'timed'`, `wait.timed`) rely on a client `attachWait` claim (`user-questions/src/index.ts:221`, RPC only). With no claim the DSH deadline aborts `req.signal` and the model continues with `pending: true`. The bridge treats that abort as cancellation. Answering a `continued` question would need `ctx.userQuestions.answer(agent, callId, batch)` (`:170`); out of scope, document in `docs/http-api.md`.
+4. **Live model/effort change.**
+   - API: `agent.model.select(selection: Readonly<ModelSelection>): void` (`P/core/agent/src/runtime-types.ts:71`; `Agent.model` at `:197`). `ModelSelection { provider: string; model: string; reasoningEffort?: ReasoningEffortId }` (`core/agent/src/types.ts:79-86`; `ReasoningEffortId` from `@deepseek-ai/dsh-llm`, `llm/llm/src/brand.ts:67-75`). `select` replaces the whole selection (omitted effort means adapter default, no inheritance), appends the log-only `model/selection` event, and applies from the next model step; an in-flight step is unchanged (`model-selection.ts:112-114`). So effort changes live too, but always send the complete selection.
+   - Build the selection from current state: `{ provider: await providerForModel(ctx, model, current.provider), model, reasoningEffort: effort }` where `current = agent.model.current()`. The wire effort is currently never passed to DSH on create (`gateway.ts:419-424` uses `defaults.reasoningEffort`); Task 6 must also pass `reasoning.effort` there, otherwise a live effort and the created effort disagree.
+   - Validate before storing: `await ctx.llm.resolveCallConfig({ provider, model, reasoningEffort })` (`llm/llm/src/index.ts:895`) rejects unsupported model or effort before any I/O (no clamping). Rejection -> `409 session_setting_not_live` with the error message (the setting cannot be applied live), nothing stored, `select` not called.
+   - 409 conditions, all checked before `store.sessions.update`: (a) no live agent for the session (`ctx.agents.get(SessionId)` undefined: not resumed or crashed; Task 5's `ensureLive` runs first, so this means resume failed); (b) `agent.model` is missing (type-only guard for fakes: not needed in prod); (c) `resolveCallConfig` rejects; (d) `select` throws (session closed or persistence failure). Order in `updateSession`: validate `agent.model` non-empty (400, existing) -> `applyLive` -> `store.sessions.update` -> registry update -> 200. `service_tier` and `metadata` changes do not need a live agent.
+   - Mid-turn updates are allowed (the change applies to the next step). If a product decision prefers rejecting while `in_progress`, that is a separate `409`; not planned.
+5. **Task 5 interaction.** Task 5 derives status from `tool/call` and `turn/end` through `WireProjector.apply` -> `gateway.recordStatus(id, status, error)` -> `store.sessions.update(id,'any',{status,lastError})` (Task 5 answer 5). Approval and question requests are not in that fold (questions) or lack the request-time id (approvals), so Task 6 overlays them: it adds `SessionRegistry.setInteractionActions(sessionId, actions: OAIRequiredAction[]): { session: OAIAgentSession; status: SessionStatus } | undefined`. It replaces the projector's `requiredActions` view with `functionCallActions ++ actions`, recomputes status (non-empty -> `requires_action`; empty and a turn open -> `in_progress`), and fans out the ephemeral `agent.session.requires_action` / `agent.session.in_progress` frame via `emitEphemeral` (no seq, so replay is unaffected). The bridge's `onChange(sessionId)` is wired in `index.ts` to `() => { const r = registry.setInteractionActions(...); gateway.recordStatus(id, r.status, null) }`. **The function Task 6 must call is `gateway.recordStatus`** (via `onChange`); if Task 5 lands under a different name, use that one and only rename in `index.ts`. `recordStatus` never throws into the DSH listener (StatusWriter chain).
+   - Replace the main plan's `deps: { registry; onChange }` with `deps: { claims(agent: Agent): string | undefined; onChange(sessionId: string, actions: OAIRequiredAction[]): void }`. `claims` returns the Agents API session id for an owned agent, else `undefined`. This keeps the bridge free of registry/gateway classes and testable with plain fakes.
+   - Interleaving: a `tool_result` completing the last function call while an approval is pending must keep `requires_action`. That is why the overlay merges rather than overwrites.
+
+## Final interfaces
+
+```ts
+// src/approvals/approval-bridge.ts
+export type ApprovalDecision = 'approve' | 'deny' | 'answer'
+export type ApprovalAction = Extract<OAIRequiredAction, { type: 'approval' }>
+export interface ApprovalBridge {
+  pending(sessionId: string): ApprovalAction[]
+  answer(sessionId: string, approvalId: string, decision: ApprovalDecision, payload?: unknown):
+    'resolved' | 'not_found'                       // sync: nothing awaits; mismatches throw AgentsApiRequestError(400)
+  cancelAll(sessionId: string): void               // cancel, delete
+}
+export function installApprovalBridge(ctx: Context, deps: {
+  claims(agent: Agent): string | undefined
+  onChange(sessionId: string, actions: OAIRequiredAction[]): void
+}): ApprovalBridge                                  // listeners and the session/event hook registered via ctx.effect/ctx.on
+// src/input.ts
+export interface ApprovalResponseInput { type: 'agent.session.input.approval_response'; id: string; decision: ApprovalDecision; payload?: unknown }
+export function parseApprovalResponse(raw: Record<string, unknown>): ApprovalResponseInput   // throws AgentsApiRequestError 400
+// src/gateway.ts
+private async applyLiveModel(sessionId: string, patch: UpdateSessionParams['agent']): Promise<void>  // throws AgentsApiRequestError(409,'session_setting_not_live')
+```
+`answer` is synchronous rather than `Promise<...>` in the main plan: resolving a parked promise needs no await, and gateway test ordering is simpler.
+
+## Steps
+
+1. Pin types: module JSDoc of `approval-bridge.ts` quotes the two event signatures and outcome vocabulary above (main plan step 1).
+2. Types: add the `approval` variant (with `tool_name?`, `call_id?`, `questions?`) to `OAIRequiredAction`, and `OAIApprovalResponseInputEvent` to `OAIInputEvent` in `src/types.ts`. Update `exhaustive` switches (`tsc` finds them).
+3. `src/input.ts`: `parseApprovalResponse` (id non-empty string; decision one of three; reject unknown keys not needed).
+4. Bridge: pending map `sessionId -> Map<id, Entry{action, resolve, reject, signal, abortListener}>`; per-session `asked` FIFO from `session/event`; two `ctx.on` listeners that call `next()` when `claims(agent) === undefined`, `req.signal?.aborted`, or the request is a timed wait; the cancellation shape copies `PendingFunctionCalls`. Drop `asked` entries on `approval/decided` and `session/disposed`.
+5. Gateway: construct the bridge in `index.ts` (needs `ctx.approval` and `ctx.userQuestions` present: add `'approval'`, `'userQuestions'` to `inject` so a missing service fails at load); `applyInputEvent` handles `approval_response`; cancel and delete call `cancelAll`; `updateSession` calls `applyLiveModel`; create passes `reasoning.effort`.
+6. Registry: `setInteractionActions` + ephemeral frames (depends on Task 5 `emitEphemeral`).
+7. Docs: `docs/http-api.md` (`approval_response`, action fields, 404/409 codes, timed-question limit), CHANGELOG, `docs/changes/2026-11-08-approvals.md`.
+
+## Tests
+
+Fakes use the real types: `ApprovalRequestEvent`, `AskUserQuestionRequestEvent`, `ModelSelection`, `Agent` (`Pick<Agent,'session'|'model'|'cancel'>` cast once in `tests/support/fake-agent.ts`). Drive the bridge by invoking the registered listener (capture from a fake `ctx.on`) and by calling the real `ApprovalService.request` in the composition spec.
+- `approval becomes requires_action with ids from the log`: emit `approval/asked {id:X}` then call the listener -> action `{id:X, kind:'tool_approval', options:['approve','deny'], call_id}`; `onChange` called with it; registry status `requires_action`; `recordStatus` called with `requires_action`.
+- `sandbox escalation reason maps to sandbox_escalation`: capture `request.reason` from the real exported `approveEscalation` (`dsh-sandbox`), feed it to the listener; kind is `sandbox_escalation`. Guards the prefix coupling.
+- `approve resolves allowed-once` / `deny resolves rejected`: listener promise settles with the outcome; status leaves `requires_action` (`in_progress` when a turn is open, `idle` otherwise unchanged); `pending()` empty.
+- `question answer resolves batch`: one question with options -> action options are the labels; `answer` with `{selected:['A']}` resolves `{answers:[{id,selected:['A']}]}`; multi-question requires full `{answers}`; incomplete -> 400 `invalid_approval_response`.
+- `deny on a question resolves a skipped batch`; `approve on a question` -> 400 `decision_not_applicable`; `answer on an approval` -> 400.
+- `foreign agent is delegated`: `claims` returns `undefined` -> listener returns `next()`'s value, nothing pending, `onChange` not called (both listeners).
+- `approval after cancel is not found`: park, `input.cancel` through gateway -> listener promise settles `cancelled`; `answer` -> HTTP 404 `approval_not_found`. Variants: abort `req.signal` only; `DELETE session`; late answer after `answer` already resolved (double answer -> 404).
+- `cancelled approval status returns to idle`: after cancel + `turn/end` the session is `idle` and `required_actions` is `[]`.
+- `function call and approval overlap`: both pending; completing the function call keeps `requires_action`; answering the approval then yields `in_progress`.
+- `timed question is not claimed`: `wait.timed === true` -> `next()`.
+- `model update applies live`: `PATCH {agent:{model:'m2', reasoning:{effort:'high'}}}` with fake agent -> `select` called once with `{provider, model:'m2', reasoningEffort:'high'}` (complete, branded), `llm.resolveCallConfig` called first, row and GET show it.
+- `effort-only update re-sends the current model` (select receives the full selection from `agent.model.current()`).
+- `unsupported live update is 409`: `resolveCallConfig` rejects -> `409 session_setting_not_live`, `select` not called, `store.sessions.update` not called, GET unchanged. Variants: no live agent; `select` throws.
+- `metadata-only update needs no live agent` (still 200 when the agent is gone).
+- Real-composition (extend `tests/loader-composition.spec.ts`): real `dsh-user-approval` + `dsh-session` with a fake agent: `approval.request` inside an open turn resolves `allowed-once` after `answer('approve')`, and a session with another id falls through to a second listener (the stand-in for the DSH web UI).
+
+## Risks
+
+- **Request-time id pairing** (`asked` FIFO) depends on `session/event` firing synchronously before the waterfall microtask. If a DSH change batches events, ids drift; fallback is a minted `appr_` id (stable only for the live connection). Test `approval becomes requires_action with ids from the log` pins the order.
+- **`sandbox_escalation` detection by reason prefix** is a text coupling to `escalation.ts:193`; the real-function test above catches drift.
+- **Child agents (subagents)**: `claims` matches only the root session id; a subagent's approval falls to `next()` -> `unavailable` (fail closed). Questions from children throw `DELEGATED_CALLER` in DSH itself (`user-questions/src/index.ts:144`). Document it; supporting children means mapping `agent.session.id` to the parent.
+- **Task 5 coupling**: `setInteractionActions` and `emitEphemeral` live in code the Task 5 implementer owns; Task 6 must start after Task 5 merges, or the overlay must be written in the same files.
+- **Live effort on create** (`gateway.ts:419`) changes create behaviour: sessions created with `reasoning.effort` now really use it; adapters reject unsupported efforts per request, so a create-time `resolveCallConfig` check (same 409-free path, 400 on create) is recommended.
+- **`ApprovalPolicy 'never'`** auto-rejects before our listener runs, so no `requires_action` ever appears under `DSH_PERMISSION_MODE=danger-full-access`; the `agentry` profile must keep the `ask` default.
