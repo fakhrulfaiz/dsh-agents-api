@@ -1,0 +1,80 @@
+import { describe, expect, it, vi } from 'vitest'
+import { materializeAgent } from '../src/agent-records.ts'
+import { ownerId } from '../src/auth/authenticator.ts'
+import { NO_STORED_CONFIG, recoverSessions } from '../src/recovery.ts'
+import type { SessionIndexRow } from '../src/store/store.ts'
+import { MemoryStore } from './support/memory-store.ts'
+
+const OWNER = ownerId('o')
+
+function row(id: string, status: SessionIndexRow['status'], withBody = true): SessionIndexRow {
+  const at = new Date('2026-11-08T10:00:00.000Z')
+  return {
+    id,
+    ownerId: OWNER,
+    agentId: null,
+    environmentId: null,
+    dshSessionId: id,
+    status,
+    lastError: null,
+    model: 'deepseek-chat',
+    reasoningEffort: null,
+    body: withBody ? { agent: materializeAgent({ model: 'deepseek-chat' }), environment: { type: 'none' }, metadata: {}, vault_ids: [] } : null,
+    createdAt: at,
+    updatedAt: at,
+  }
+}
+
+async function seeded(...rows: SessionIndexRow[]): Promise<MemoryStore> {
+  const store = new MemoryStore()
+  await store.ensureOwner(OWNER)
+  for (const next of rows) await store.sessions.insert(next)
+  return store
+}
+
+describe('recoverSessions', () => {
+  it('resumes in_progress and requires_action rows and leaves their status alone', async () => {
+    const store = await seeded(row('sess_a', 'in_progress'), row('sess_b', 'requires_action'), row('sess_idle', 'idle'))
+    const resume = vi.fn<(r: SessionIndexRow) => Promise<void>>(() => Promise.resolve())
+    const result = await recoverSessions({ store, resume })
+
+    expect(result).toEqual({ resumed: ['sess_a', 'sess_b'], interrupted: [] })
+    expect(resume.mock.calls.map(([called]) => called.id)).toEqual(['sess_a', 'sess_b'])
+    expect((await store.sessions.get('sess_a', 'any'))?.status).toBe('in_progress')
+    expect((await store.sessions.get('sess_b', 'any'))?.status).toBe('requires_action')
+  })
+
+  it('marks sessions that cannot be resumed interrupted with the error message', async () => {
+    const store = await seeded(row('sess_a', 'in_progress'), row('sess_b', 'in_progress'))
+    const resume = vi.fn<(r: SessionIndexRow) => Promise<void>>(r => r.id === 'sess_a' ? Promise.reject(new Error('log is corrupt')) : Promise.resolve())
+    const result = await recoverSessions({ store, resume })
+
+    expect(result).toEqual({ resumed: ['sess_b'], interrupted: [{ id: 'sess_a', reason: 'log is corrupt' }] })
+    expect(await store.sessions.get('sess_a', 'any')).toMatchObject({ status: 'interrupted', lastError: 'log is corrupt' })
+    expect((await store.sessions.get('sess_b', 'any'))?.status).toBe('in_progress')
+  })
+
+  it('marks rows without a stored setup interrupted without trying to resume them', async () => {
+    const store = await seeded(row('sess_old', 'in_progress', false))
+    const resume = vi.fn<(r: SessionIndexRow) => Promise<void>>(() => Promise.resolve())
+    const result = await recoverSessions({ store, resume })
+
+    expect(resume).not.toHaveBeenCalled()
+    expect(result.interrupted).toEqual([{ id: 'sess_old', reason: NO_STORED_CONFIG }])
+    expect(await store.sessions.get('sess_old', 'any')).toMatchObject({ status: 'interrupted', lastError: NO_STORED_CONFIG })
+  })
+
+  it.each([
+    'no agent factory registered (load an agent-loop plugin)',
+    'cannot resume: session persistence is not configured',
+  ])('rethrows a startup misconfiguration and leaves rows untouched: %s', async (message) => {
+    const store = await seeded(row('sess_a', 'in_progress'))
+    await expect(recoverSessions({ store, resume: () => Promise.reject(new Error(message)) })).rejects.toThrow(message)
+    expect(await store.sessions.get('sess_a', 'any')).toMatchObject({ status: 'in_progress', lastError: null })
+  })
+
+  it('does nothing when no session is running', async () => {
+    const store = await seeded(row('sess_idle', 'idle'), row('sess_failed', 'failed'))
+    expect(await recoverSessions({ store, resume: () => Promise.reject(new Error('unused')) })).toEqual({ resumed: [], interrupted: [] })
+  })
+})

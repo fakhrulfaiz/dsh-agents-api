@@ -118,7 +118,7 @@ auth:
       hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
 ```
 
-Every agent, template, environment, and session route reads and writes only the caller's records; another owner's record answers 404, never 403. At startup the plugin applies the numbered migrations in `src/store/migrations/` and opens a connection pool. Until then, and for good after a failed migration or connection (logged as `StoreStartError`), `/v1` answers 503 `store_unavailable`. A database error during a request also answers 503 `store_unavailable`.
+Every agent, template, environment, and session route reads and writes only the caller's records; another owner's record answers 404, never 403. At startup the plugin applies the numbered migrations in `src/store/migrations/` and opens a connection pool. Until then, and for good after a failed migration or connection (logged as `StoreStartError`), `/v1` answers 503 `store_unavailable`. A database error during a request also answers 503 `store_unavailable`. After the store opens, sessions that were `in_progress` or `requires_action` at shutdown are resumed from their Session log, or marked `interrupted` with the reason in `last_error`; if no agent factory or session persistence is available, startup fails with `StoreStartError` and `/v1` answers 503. Items, turns, and replayed events are read from the Session log through `sessionQuery`, so the profile must provide `sessionQuery` and `sessionPersistence` (the `dsh-base` bundle does).
 
 
 The wire details for create, stream, and function tools live in [HTTP API](docs/http-api.md). The route list is below.
@@ -156,7 +156,7 @@ Paths other than `/health` sit under the configured `prefix` (default `/v1`). Se
 | `POST` | `/agents/sessions/{session_id}` | Update `model`, `reasoning.effort`, `service_tier`, or `metadata`. |
 | `DELETE` | `/agents/sessions/{session_id}` | Delete the session and any environments whose `session_id` is that session. |
 | `POST` | `/agents/sessions/{session_id}/events` | Submit follow-up, cancel, or tool-result input. |
-| `GET` | `/agents/sessions/{session_id}/events` | SSE stream. `Last-Event-ID` replays newer buffered events, then continues live. |
+| `GET` | `/agents/sessions/{session_id}/events` | SSE stream. `Last-Event-ID` replays newer events from the Session log, then continues live. |
 | `GET` | `/agents/sessions/{session_id}/items` | List the parent session's saved items. Items that belong to a subagent are omitted. |
 | `GET` | `/agents/sessions/{session_id}/turns` | List the parent session's turns. |
 | `GET` | `/agents/sessions/{session_id}/turns/{turn_id}` | Read one parent turn. |
@@ -187,7 +187,10 @@ Each session calls `ctx.agents.create` with a `sess_*` id, `agentOptions.provide
 | `[cordis.patch.yml](cordis.patch.yml)`                           | Insert this plugin onto the web app's webserver                                                                                                                                                   |
 | `[src/index.ts](src/index.ts)`                                   | Plugin entry, prefix registration, Session-event bridge                                                                                                                                           |
 | `[src/gateway.ts](src/gateway.ts)`                               | Ordered HTTP routes and Host agent lifecycle                                                                                                                                                      |
-| `[src/session-registry.ts](src/session-registry.ts)`             | Session, turn, item, and SSE subscriber directory                                                                                                                                                 |
+| `[src/session-registry.ts](src/session-registry.ts)`             | Live sessions: one wire projector each, SSE subscribers, subagent state                                                                                                                           |
+| `[src/history/projector.ts](src/history/projector.ts)`           | Pure projection of Session events to wire events, items, turns, and status; live and replay share it                                                                                              |
+| `[src/history/session-history.ts](src/history/session-history.ts)` | Items, turns, and wire events folded from the Session log                                                                                                                                       |
+| `[src/recovery.ts](src/recovery.ts)`                             | Startup recovery: resume running sessions or mark them `interrupted`                                                                                                                              |
 | `[src/agent-records.ts](src/agent-records.ts)`                   | Saved-agent record construction and update merge                                                                                                                                                  |
 | `[src/store/store.ts](src/store/store.ts)`                       | `Store` interface, session cursor, outage errors                                                                                                                                                  |
 | `[src/store/postgres.ts](src/store/postgres.ts)`                 | `Store` over a `pg` pool                                                                                                                                                                          |

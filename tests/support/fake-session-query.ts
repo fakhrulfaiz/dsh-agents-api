@@ -33,6 +33,10 @@ export class FakeSessionQuery implements Pick<SessionQueryEngine, 'readSession'>
   cwd = '/tmp/agentry-fake-cwd'
   /** Counts `readSession` calls. */
   reads = 0
+  /** When set, `readSession` waits for it before observing the log, so events appended meanwhile are in the snapshot. */
+  gateBeforeSnapshot: Promise<void> | undefined
+  /** When set, `readSession` waits for it after observing the log, so events appended meanwhile are missing from the snapshot. */
+  gateAfterSnapshot: Promise<void> | undefined
 
   /**
    * Append an event to a live session's log, creating the log on first use.
@@ -58,20 +62,22 @@ export class FakeSessionQuery implements Pick<SessionQueryEngine, 'readSession'>
     }
   }
 
-  readSession: SessionQueryEngine['readSession'] = (sessionId) => {
+  readSession: SessionQueryEngine['readSession'] = async (sessionId) => {
     this.reads += 1
     const id = String(sessionId)
+    await this.gateBeforeSnapshot
     const live = this.live.get(id)
     const cold = this.cold.get(id)
     if (live === undefined && cold === undefined) {
-      return Promise.reject(new SessionQueryError(`session "${id}" not found`, 'SESSION_QUERY_SESSION_NOT_FOUND'))
+      throw new SessionQueryError(`session "${id}" not found`, 'SESSION_QUERY_SESSION_NOT_FOUND')
     }
-    const events = live ?? [...cold!, ...interruptedTurnClosers(cold!)]
-    return Promise.resolve({
+    const events = structuredClone(live ?? [...cold!, ...interruptedTurnClosers(cold!)])
+    await this.gateAfterSnapshot
+    return {
       session: { version: 4, id: SessionId(id), createdAt: 0, cwd: this.cwd, isSeeded: false } as unknown as SessionHeader,
       inheritedEventCount: 0,
-      events: structuredClone(events),
-    } as Awaited<ReturnType<SessionQueryEngine['readSession']>>)
+      events,
+    } as Awaited<ReturnType<SessionQueryEngine['readSession']>>
   }
 }
 

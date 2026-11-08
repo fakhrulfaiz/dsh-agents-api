@@ -69,7 +69,19 @@ Non-empty `agent.instructions` is mounted as Host system-prompt section `agents-
 
 Session create accepts `environment.type` `local` with an absolute `workspace_directory` (same cwd as `self_hosted`). `environment.type` `sandbox` returns an error; there is no sandbox. Omitting the environment, or sending `none`, stores a local workspace. `self_hosted` and `openai_hosted` stay as before. The configured `workspaces` root supplies the cwd when the request does not pass an absolute directory. Deleting a session deletes environments whose `session_id` is that session.
 
-SSE events include an `id:` line. `GET .../events` with `Last-Event-ID` replays newer buffered events, then continues live.
+### Event ids and replay
+
+Every event derived from the session's DSH Session log carries `id: <n>`, the 1-based position of the event in the session's wire event sequence. `agent.session.created` is always `id: 1`. The sequence is a pure function of the Session log, so a client's `Last-Event-ID` stays valid across server restarts. Event ids in the payload are deterministic too (`evt_<session_id>_<n>`), as are turn ids (`turn_<log position of turn/start>`) and item ids.
+
+`GET .../events` with `Last-Event-ID: n` writes every event with a greater `id`, derived from the Session log, then continues live without gaps or duplicates. Without the header the stream starts live with one status snapshot event (`agent.session.idle`, `in_progress`, or `requires_action`). A non-numeric `Last-Event-ID` replays the whole history.
+
+Three kinds of event are ephemeral: they have no `id:` line, are never replayed, and do not move later ids. They are the status snapshot written when a stream connects, the `idle` event that closes a streamed create without input, and `error` events for a failed input dispatch. A reconnecting client derives the current status from the snapshot.
+
+A turn that was open when the server stopped is closed after the restart: its `function_call` tool calls get a failed `function_call_output`, and the turn becomes `cancelled` with `error.code: "interrupted"`. A `tool_result` for a call parked before the restart answers 400 `unknown_call_id`. Cancel now reports `agent.session.turn.cancelled` when the Host ends the turn, a few milliseconds after the request, rather than inside the request.
+
+Known gap: the `session` objects inside replayed events show the session's current configuration, not the configuration at the time of the event, because configuration changes are not in the Session log. Subagent turns and items are in memory only and are lost on restart.
+
+A session that is not live after a restart is resumed from its Session log when an input event is posted to it. A session created before migration 0002 has no stored setup and answers 409 `session_not_resumable`; a resume failure answers 500 `session_resume_failed`.
 
 `GET /agents/tools` returns the live Host profile catalog from `ctx.tools.schemas()` (not wire function tools). The DSH extension field `host_tools: { allow?: string[], deny?: string[] }` on create/update agent or session `agent` overlays maps to `agentCtx.tools.restrict()` at session create: omit or `null` keeps every Host tool; `deny` hides named Host tools; `allow` keeps only those names; both may combine under Host intersect rules. Empty `host_tools: {}` is rejected. Unknown names fail when restrict runs. Wire `agent.tools` stay additive and are not removed by `host_tools`.
 

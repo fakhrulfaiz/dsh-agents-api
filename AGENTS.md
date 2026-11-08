@@ -34,8 +34,8 @@ Read this first in every session. It records decisions already made so they are 
 ## Status (update when it changes)
 
 - Design for sub-project 1 (API hardening + admin API) and sub-project 2 (combined profile + VM container) is in progress; the spec will live in `docs/superpowers/specs/`.
-- Postgres store landed: agents, templates, environments, and the session index live in Postgres with owner scoping; the `durable-store.ts` JSON stopgap is replaced by Postgres. Live session status is not yet written to the index.
-- Known gaps: items and turns are memory-only (lost on restart); SSE has no replay; no approval channel for sandbox escalation or user questions over the API; session setting updates do not retarget the live agent; Codebox execution depends on a `dockerSandbox` service that no DSH package provides.
+- Postgres store landed: agents, templates, environments, and the session index live in Postgres with owner scoping; the `durable-store.ts` JSON stopgap is replaced by Postgres. Items, turns, and SSE replay come from the DSH Session log (`src/history/`), sessions that were running at shutdown are resumed or marked `interrupted` at startup (`src/recovery.ts`), and live status is written to the index.
+- Known gaps: subagent turns and items are memory-only (lost on restart); replayed `session` snapshots show the current configuration; no approval channel for sandbox escalation or user questions over the API; session setting updates do not retarget the live agent; Codebox execution depends on a `dockerSandbox` service that no DSH package provides.
 - Wire function tools: rechecked live on DSH master fcc0ad4 (2026-11-08). The `Symbol.for` `TOOL_RUNTIME_SCHEDULER` workaround is no longer needed; a function-tool turn reaches `requires_action`, accepts `tool_result`, and completes. Verdict `resolved` on master and on the pinned tag `dsh-v0.2.2-rc.1`, see `docs/changes/2026-11-08-tool-scheduler-recheck.md`. The smoke script's default model `deepseek/deepseek-v4.1-flash` is rejected by the DeepSeek API; the plugin passes model names through unchanged.
 
 ## Working rules

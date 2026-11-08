@@ -3,6 +3,17 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-08 — History from the Session log, restart recovery, SSE replay
+
+- Items, turns, and `GET .../events` replay are derived from the DSH Session log (`dsh-session-query`) instead of memory, so they survive restarts. Live and replay share one projector (`WireProjector`): turn ids are `turn_<log position>`, event ids are `evt_<session>_<n>`, and each frame's SSE `id:` is its position in the derived sequence. `Last-Event-ID` replays exactly the missed events, then continues live.
+- Status snapshots on connect, the idle event of a streamed create without input, and dispatch `error` events are ephemeral: no `id:`, never replayed.
+- Startup recovery: sessions that were `in_progress` or `requires_action` are resumed through `ctx.agents.resume`, or marked `interrupted` with `last_error`. A POST to a session that is not live resumes it lazily. The session status is written to the index wherever its wire event is produced, so `listResumable` is accurate.
+- Migration `0002` adds `sessions.body jsonb`: the session's resolved agent, environment, metadata, and vault ids, needed to rebuild the agent on resume. Rows created before it cannot be resumed (409 `session_not_resumable`; interrupted at startup).
+- Cancel reports `agent.session.turn.cancelled` when the Host ends the turn. An open turn at a crash becomes `cancelled` with `error.code: "interrupted"`.
+- Fixes: `GET /agents/sessions` is built from index rows only (`has_more` and `last_id` agree with `data`); `workspaces` is required by the gateway (no host-cwd fallback); `POST /agents/sessions/{id}` answers 404 when the session row is gone.
+- Breaking: the profile must provide `sessionQuery` and `sessionPersistence`; peer dependencies `dsh-session-query` and `dsh-session-persistence` added.
+- See [docs/changes/2026-11-08-durable-history.md](docs/changes/2026-11-08-durable-history.md).
+
 ## 2026-11-08 — apiKeys auth mode
 
 - New `auth.mode: apiKeys` for simple self-hosting: named keys (`agk_` + 43 base64url characters) in `auth.apiKeys`, stored as `sha256:` hashes; with `auth.keycloak` also set, either credential works. `pnpm keys:create --name <n> --owner <o> [--admin]` prints a key once and its config entry.

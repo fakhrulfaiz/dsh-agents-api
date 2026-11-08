@@ -214,7 +214,7 @@ export interface OAINoneEnvironment {
 
 /**
  * OpenAI-hosted sandbox. This gateway cannot provision that sandbox; it uses
- * the Host process cwd instead.
+ * the session's default workspace under the configured `workspaces` root instead.
  */
 export interface OAIOpenAIHostedEnvironment {
   type: 'openai_hosted'

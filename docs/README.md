@@ -12,6 +12,7 @@ Package-local reference and change notes for `@agentry/api`.
 
 | Note | Summary |
 | --- | --- |
+| [2026-11-08-durable-history.md](changes/2026-11-08-durable-history.md) | Items, turns, and SSE replay derived from the Session log; restart recovery; `sessions.body` (migration 0002); status written to the index |
 | [2026-11-08-api-keys-mode.md](changes/2026-11-08-api-keys-mode.md) | `apiKeys` auth mode with hashed named keys and `pnpm keys:create`; `workspaces` required; session update writes the store first |
 | [2026-11-08-postgres-store.md](changes/2026-11-08-postgres-store.md) | Agents, templates, environments, and the session index in Postgres with forward-only migrations; owner-scoped routes; local `EnvironmentProvider`; Codebox config rejected |
 | [2026-11-08-keycloak-auth.md](changes/2026-11-08-keycloak-auth.md) | `apiKey` replaced by an `auth` block: Keycloak JWT verification in production, a fixed dev key in development |
