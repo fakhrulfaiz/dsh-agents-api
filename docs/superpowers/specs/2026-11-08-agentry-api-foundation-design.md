@@ -68,6 +68,8 @@ Indexes: `(owner_id, created_at desc)` on every owner-scoped table; `sessions(st
 
 Items, turns, and steps are **not** stored in Postgres; they are read from the DSH Session log.
 
+Migration `0002` (approved by the user 2026-11-08) adds `sessions.body jsonb`: the session's resolved setup (agent configuration, instructions, tools, host tool mask, environment, metadata, vault ids) needed to rebuild the agent on resume. It holds no conversation content and no model requests. Rows without `body` cannot be resumed and are marked `interrupted`.
+
 ### 5.2 Restart recovery
 
 At startup, after migrations, every `sessions` row with status `in_progress` or `requires_action` is either resumed through the DSH agent lifecycle from its Session log or marked `interrupted` with a `last_error` explaining why it could not be resumed. Status changes are written in the same code path that emits the corresponding wire event.
