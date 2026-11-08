@@ -93,17 +93,19 @@ async function tempDir(): Promise<string> {
 }
 
 describe('local config', () => {
-  it('resolves only the configured local paths', () => {
-    const scratch = join(tmpdir(), 'agents-api-environments')
-    expect(resolveRuntimeConfig({}, {})).toEqual({ environmentsRoot: scratch })
-    expect(resolveRuntimeConfig({}, { AGENTS_API_DATA_DIR: './data', AGENTS_API_WORKSPACES: '/tmp/ws' })).toEqual({
+  it('resolves the configured workspaces root and ignores AGENTS_API_WORKSPACES', () => {
+    expect(resolveRuntimeConfig({ workspaces: '/tmp/ws' }, { AGENTS_API_DATA_DIR: './data', AGENTS_API_WORKSPACES: '/elsewhere' })).toEqual({
       workspacesRoot: '/tmp/ws',
-      environmentsRoot: '/tmp/ws',
     })
   })
 
+  it('fails loudly when workspaces is missing or blank', () => {
+    expect(() => resolveRuntimeConfig({} as never, {})).toThrow(/"workspaces" is required/)
+    expect(() => resolveRuntimeConfig({ workspaces: '  ' }, {})).toThrow(/"workspaces" is required/)
+  })
+
   it('rejects Codebox settings from the environment', () => {
-    expect(() => resolveRuntimeConfig({}, { CODEBOX_BASE_URL: 'http://codebox' })).toThrow(expect.objectContaining({ name: 'CodeboxDisabledError' }))
+    expect(() => resolveRuntimeConfig({ workspaces: '/tmp/ws' }, { CODEBOX_BASE_URL: 'http://codebox' })).toThrow(expect.objectContaining({ name: 'CodeboxDisabledError' }))
   })
 })
 

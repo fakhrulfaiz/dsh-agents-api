@@ -60,8 +60,8 @@ const unreachable = { url: 'postgres://agentry@127.0.0.1:1/agentry' }
 describe('apply', () => {
   it('registers the prefix handler and ignores events for unknown sessions', async () => {
     const { ctx, register, listeners, effects } = fakeContext()
-    apply(ctx, { auth, prefix: '/v1', database: unreachable })
-    apply(ctx, { auth, prefix: '/v1', database: unreachable })
+    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable })
+    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable })
     expect(register).toHaveBeenCalledTimes(4)
     expect(listeners).toHaveLength(4)
     listeners[0]!({ id: 'missing', header: {} }, { type: 'turn/start', seq: 1, time: 1, data: {} })
@@ -70,7 +70,7 @@ describe('apply', () => {
 
   it('keeps /v1 at 503 store_unavailable and logs a named error when the database is unreachable', async () => {
     const { ctx, routes, effects, errors } = fakeContext()
-    apply(ctx, { auth, prefix: '/v1', database: unreachable })
+    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable })
     await Promise.all(effects)
     expect(errors).toEqual([expect.objectContaining({ name: 'StoreStartError' })])
     const response = await call(routes.get('/v1')!, '/v1/agents')

@@ -72,7 +72,8 @@ REST and SSE under the configured prefix (`/v1` by default) for saved agents, se
 
 | Field                       | Default | Meaning                                                                                                   |
 | --------------------------- | ------- | --------------------------------------------------------------------------------------------------------- |
-| `auth.mode`                 | none    | Required. `production` verifies Keycloak tokens and forbids `devKey`; `development` allows `devKey`, `keycloak`, or both (the dev key is tried first, then Keycloak) |
+| `auth.mode`                 | none    | Required. `production` verifies Keycloak tokens and forbids `devKey` and `apiKeys`; `apiKeys` accepts named keys from `auth.apiKeys` (plus Keycloak tokens when `keycloak` is set) and forbids `devKey`; `development` allows `devKey`, `keycloak`, or both and forbids `apiKeys` (local key or API keys are tried first, then Keycloak) |
+| `auth.apiKeys[]`            | none    | Mode `apiKeys`: non-empty list of `{ name, owner, roles, hash }`; `name` unique, `roles` a non-empty subset of `agentry-user`/`agentry-admin`, `hash` = `sha256:` + 64 lowercase hex of the full key |
 | `auth.keycloak.issuer`      | none    | Realm issuer URL; JWKS is read from `${issuer}/protocol/openid-connect/certs`                             |
 | `auth.keycloak.audience`    | none    | Required token `aud`                                                                                      |
 | `auth.keycloak.jwksTtlSeconds` | `600` | JWKS cache lifetime                                                                                       |
@@ -84,12 +85,38 @@ REST and SSE under the configured prefix (`/v1` by default) for saved agents, se
 | `auth.devKey.admin`         | `true`  | Grant `agentry-admin` to the key                                                                          |
 | `prefix`                    | `/v1`   | URL prefix for every Agents API route                                                                     |
 | `database.url`              | none    | Required. Postgres connection URL for agents, templates, environments, and the session index. The bundled patch reads it from `AGENTRY_DATABASE_URL` |
-| `workspaces`                | none    | Root of `<owner>/<session>/` session workspaces and `<owner>/<environment>/` local environments (env `AGENTS_API_WORKSPACES`). Unset: sessions run in the host cwd and environments go under the OS temp dir |
+| `workspaces`                | none    | Required. Root of `<owner>/<session>/` session workspaces and `<owner>/<environment>/` local environments. A missing or blank value fails at load. The bundled patch reads it from `AGENTRY_WORKSPACES` |
 | `artifacts.*`               | absent  | Optional S3 artifact backend (`endpoint`, `bucket`, `prefix`, `region`, `accessKeyId`, `secretAccessKey`); off unless endpoint and credentials are set |
 | `codebox`                   | —       | Rejected at load with `CodeboxDisabledError`, as are the `CODEBOX_BASE_URL` and `CODEBOX_API_KEY` env vars: Codebox environments are parked |
 | `dataDir`                   | —       | Removed; rejected at load. Records live in Postgres                                                       |
 
 The caller's owner is the token `sub`; roles come from `realm_access.roles` (`agentry-user`, `agentry-admin`). Missing or invalid credentials return 401 `unauthenticated` with `WWW-Authenticate: Bearer`; a principal holding neither `agentry-user` nor `agentry-admin` gets 403 `forbidden`. Tokens need `exp`, `sub`, and `typ: Bearer`. `/health` is unauthenticated. The bundled `cordis.patch.yml` runs in `development` mode with the key read from `AGENTRY_DEV_KEY`.
+
+### Auth modes
+
+| Mode | Credentials | Use |
+|---|---|---|
+| `production` | Keycloak access tokens | Teams, SSO, the full VM stack |
+| `apiKeys` | Named API keys, optionally plus Keycloak tokens | Simple self-hosting without Keycloak |
+| `development` | One shared `devKey`, optionally plus Keycloak tokens | Local development only; never in production |
+
+Keys look like `agk_` followed by 43 base64url characters. Config stores only `sha256:` hashes; revoke a key by removing its entry. Create one (nothing is written to disk; the key is printed once):
+
+```sh
+pnpm keys:create --name ci --owner ali          # add --admin for agentry-admin
+```
+
+Put the printed entry in the plugin config and switch the mode (the hash below is an example, not a real key):
+
+```yaml
+auth:
+  mode: apiKeys
+  apiKeys:
+    - name: ci
+      owner: ali
+      roles: [agentry-user]
+      hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+```
 
 Every agent, template, environment, and session route reads and writes only the caller's records; another owner's record answers 404, never 403. At startup the plugin applies the numbered migrations in `src/store/migrations/` and opens a connection pool. Until then, and for good after a failed migration or connection (logged as `StoreStartError`), `/v1` answers 503 `store_unavailable`. A database error during a request also answers 503 `store_unavailable`.
 

@@ -3,6 +3,14 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-08 — apiKeys auth mode
+
+- New `auth.mode: apiKeys` for simple self-hosting: named keys (`agk_` + 43 base64url characters) in `auth.apiKeys`, stored as `sha256:` hashes; with `auth.keycloak` also set, either credential works. `pnpm keys:create --name <n> --owner <o> [--admin]` prints a key once and its config entry.
+- `production` rejects `apiKeys` entries and `devKey`; `development` rejects `apiKeys`.
+- Breaking: `workspaces` is required (the OS temp-dir fallback and the `AGENTS_API_WORKSPACES` env var are removed); the bundled patch reads `AGENTRY_WORKSPACES`.
+- Fix: `POST /agents/sessions/{id}` writes the session index before changing the live session, so a store failure answers 503 and leaves the session unchanged.
+- See [docs/changes/2026-11-08-api-keys-mode.md](docs/changes/2026-11-08-api-keys-mode.md).
+
 ## 2026-11-08 — Postgres store
 
 - Agents, environment templates, environments, and a session index live in Postgres (`Store`, `src/store/`); numbered forward-only migrations run at startup under an advisory lock. The JSON-file `durable-store.ts` is removed.

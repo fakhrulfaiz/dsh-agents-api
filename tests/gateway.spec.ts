@@ -296,6 +296,26 @@ describe('AgentsGateway', () => {
     expect((await fetch(`${root}/v1/agents/sessions`)).status).toBe(200)
   })
 
+  it('leaves the session unchanged and answers 503 when the store write fails on update', async () => {
+    const store = new MemoryStore()
+    const update = vi.spyOn(store.sessions, 'update').mockRejectedValueOnce(new Error('connection refused'))
+    const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), { environments })
+    const root = await listen((req, res) => api.handle(req, res))
+    const created = await (await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment: { type: 'none' } }),
+    })).json() as { id: string; agent: { model: string }; metadata: Record<string, string> }
+    const failed = await fetch(`${root}/v1/agents/sessions/${created.id}`, {
+      method: 'POST',
+      body: JSON.stringify({ agent: { model: 'deepseek-reasoner' }, metadata: { k: 'v' } }),
+    })
+    expect(failed.status).toBe(503)
+    expect(update).toHaveBeenCalledOnce()
+    const view = await (await fetch(`${root}/v1/agents/sessions/${created.id}`)).json() as { agent: { model: string }; metadata: Record<string, string> }
+    expect(view.agent.model).toBe('deepseek-chat')
+    expect(view.metadata).toEqual(created.metadata)
+  })
+
   it('rejects a relative self-hosted workspace and a factory failure', async () => {
     const ok = gateway()
     const root = await ok.base

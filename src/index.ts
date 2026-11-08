@@ -25,6 +25,7 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { firstThen, type Authenticator } from './auth/authenticator.ts'
+import { API_KEY_HASH_PATTERN, createApiKeyAuthenticator, type ApiKeyEntry } from './auth/api-keys.ts'
 import { createKeycloakAuthenticator } from './auth/keycloak.ts'
 import { createStaticKeyAuthenticator } from './auth/static-key.ts'
 import { bridgeChildSessionEvent, bridgeSessionEvent } from './bridge.ts'
@@ -64,6 +65,7 @@ export { bearerToken, firstThen, ownerId, requireAnyRole, requireRole, unauthent
 export type { AuthResult, Authenticator, OwnerId, Principal, Role as AuthRole } from './auth/authenticator.ts'
 export { createKeycloakAuthenticator, type KeycloakAuthConfig } from './auth/keycloak.ts'
 export { createStaticKeyAuthenticator } from './auth/static-key.ts'
+export { createApiKeyAuthenticator, generateApiKey, hashApiKey, type ApiKeyEntry } from './auth/api-keys.ts'
 
 /** Cordis plugin name. */
 export const name = 'agents-api'
@@ -83,20 +85,25 @@ export interface ResolvedKeycloakConfig {
 
 /** Resolved `auth` block: `Config` output with defaults applied. */
 export interface ResolvedAuthConfig {
-  mode: 'production' | 'development'
+  mode: 'production' | 'apiKeys' | 'development'
   keycloak?: ResolvedKeycloakConfig
   devKey?: { key: string; owner: string; admin: boolean }
+  apiKeys?: ApiKeyEntry[]
 }
 
 /** JWS algorithms accepted in `auth.keycloak.algorithms`. */
 export const ALLOWED_ALGORITHMS: readonly string[] = ['RS256', 'RS384', 'RS512', 'PS256', 'PS384', 'PS512', 'ES256', 'ES384', 'ES512', 'EdDSA']
 
-/** Plugin configuration as written in cordis.yml. Omitted backends stay off; env fills them in. */
+/** Plugin configuration as written in cordis.yml. `workspaces` is required; omitted artifact backends stay off and env fills them in. */
 export interface Config extends RuntimeConfigInput {
-  /** Authentication. Required: `production` verifies Keycloak tokens, `development` accepts a fixed key. */
+  /** Authentication. Required: `production` verifies Keycloak tokens, `apiKeys` accepts named keys, `development` accepts a fixed key. */
   auth?: {
-    /** `production` requires `keycloak` and forbids `devKey`; `development` needs `devKey` or `keycloak`. */
-    mode: 'production' | 'development'
+    /**
+     * `production` requires `keycloak` and forbids `devKey` and `apiKeys`;
+     * `apiKeys` requires a non-empty `apiKeys` list, accepts `keycloak` as a second credential, and forbids `devKey`;
+     * `development` needs `devKey` or `keycloak` and forbids `apiKeys`.
+     */
+    mode: 'production' | 'apiKeys' | 'development'
     /** Keycloak realm verification. */
     keycloak?: {
       /** Realm issuer URL, matched against the token `iss`; JWKS lives at `${issuer}/protocol/openid-connect/certs`. */
@@ -112,6 +119,8 @@ export interface Config extends RuntimeConfigInput {
       /** Allowed clock skew in seconds (default 5). */
       clockToleranceSeconds?: number
     }
+    /** Named API keys for simple self-hosting (mode `apiKeys`). Config holds hashes only; create entries with `pnpm keys:create`. */
+    apiKeys?: ApiKeyEntry[]
     /** Fixed development bearer key. */
     devKey?: {
       key: string
@@ -134,7 +143,7 @@ export interface Config extends RuntimeConfigInput {
   dataDir?: unknown
 }
 
-/** `Config` after validation: `auth`, `prefix`, and `database` are always present; `codebox` and `dataDir` never are. */
+/** `Config` after validation: `auth`, `prefix`, `database`, and `workspaces` are always present; `codebox` and `dataDir` never are. */
 export type ResolvedConfig = Omit<Config, 'auth' | 'prefix' | 'database' | 'codebox' | 'dataDir'> & {
   auth: ResolvedAuthConfig
   prefix: string
@@ -147,7 +156,7 @@ const ABSENT = null as never
 /** Validate and default plugin configuration. */
 export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
   auth: z.object({
-    mode: z.union([z.const('production'), z.const('development')]).required(),
+    mode: z.union([z.const('production'), z.const('apiKeys'), z.const('development')]).required(),
     keycloak: z.object({
       issuer: z.string().required(),
       audience: z.string().required(),
@@ -156,6 +165,12 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
       algorithms: z.array(z.string()).default(['RS256']),
       clockToleranceSeconds: z.number().default(5),
     }).default(ABSENT),
+    apiKeys: z.array(z.object({
+      name: z.string().required(),
+      owner: z.string().required(),
+      roles: z.array(z.string()).required(),
+      hash: z.string().required(),
+    })).default(ABSENT),
     devKey: z.object({
       key: z.string().required(),
       owner: z.string().required(),
@@ -169,7 +184,7 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
   // Declared only so the transform can reject them by name.
   dataDir: z.any(),
   codebox: z.any(),
-  workspaces: z.string(),
+  workspaces: z.string().required(),
   artifacts: z.object({
     endpoint: z.string(),
     bucket: z.string(),
@@ -180,6 +195,7 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
   }).default(ABSENT),
 }), (config) => {
   validateAuth(config.auth as ResolvedAuthConfig | undefined)
+  if (typeof config.workspaces !== 'string' || config.workspaces.trim() === '') throw new Error('agents-api: "workspaces" must not be empty')
   if (config.codebox !== undefined && config.codebox !== null) throw new CodeboxDisabledError('the "codebox" config block')
   if (config.dataDir !== undefined && config.dataDir !== null) {
     throw new Error('agents-api: "dataDir" was removed; agents, environments, and the session index live in Postgres (database.url)')
@@ -187,19 +203,49 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
   return config
 }, true) as unknown as z<Config, ResolvedConfig>
 
+/** Roles accepted in `auth.apiKeys[].roles`. */
+const API_KEY_ROLES: readonly string[] = ['agentry-user', 'agentry-admin']
+
+/**
+ * Check `auth.apiKeys` entries.
+ * @param apiKeys - entries from the `auth` block.
+ * @throws when the list is empty, a name or owner is empty or a name repeats, a hash is not `sha256:` plus 64 lowercase hex characters, or roles are empty or unknown.
+ */
+function validateApiKeys(apiKeys: readonly ApiKeyEntry[]): void {
+  if (apiKeys.length === 0) throw new Error('agents-api: auth.apiKeys must not be empty when auth.mode is "apiKeys"')
+  const names = new Set<string>()
+  apiKeys.forEach((entry, index) => {
+    const where = `auth.apiKeys[${String(index)}]`
+    if (!entry.name) throw new Error(`agents-api: ${where}.name must not be empty`)
+    if (names.has(entry.name)) throw new Error(`agents-api: ${where} has duplicate name "${entry.name}"`)
+    names.add(entry.name)
+    if (!entry.owner) throw new Error(`agents-api: ${where}.owner must not be empty`)
+    if (!API_KEY_HASH_PATTERN.test(entry.hash)) throw new Error(`agents-api: ${where}.hash must be "sha256:" followed by 64 lowercase hex characters`)
+    if (entry.roles.length === 0) throw new Error(`agents-api: ${where}.roles must not be empty`)
+    const unknown = entry.roles.filter(role => !API_KEY_ROLES.includes(role))
+    if (unknown.length > 0) throw new Error(`agents-api: ${where}.roles has unsupported entries: ${unknown.join(', ')}`)
+  })
+}
+
 /**
  * Check the `auth` block for contradictory or missing settings.
  * @param auth - validated `auth` block.
- * @throws when `auth` is missing, `keycloak.algorithms` is empty or names an unsupported algorithm, `production` lacks `keycloak` or sets `devKey`, `development` has neither, or `devKey.key` is empty.
+ * @throws when `auth` is missing, `keycloak.algorithms` is empty or names an unsupported algorithm, `production` lacks `keycloak` or sets `devKey` or `apiKeys`, `apiKeys` mode lacks valid entries or sets `devKey`, `development` has neither `devKey` nor `keycloak` or sets `apiKeys`, or `devKey.key` is empty.
  */
 export function validateAuth(auth: ResolvedAuthConfig | undefined): void {
-  if (auth === undefined) throw new Error('agents-api: "auth" is required (set auth.mode to production or development)')
-  const { mode, keycloak, devKey } = auth
+  if (auth === undefined) throw new Error('agents-api: "auth" is required (set auth.mode to production, apiKeys, or development)')
+  const { mode, keycloak, devKey, apiKeys } = auth
   if (mode === 'production') {
     if (devKey !== undefined) throw new Error('agents-api: auth.devKey is not allowed when auth.mode is "production"')
+    if (apiKeys !== undefined) throw new Error('agents-api: auth.apiKeys is not allowed when auth.mode is "production"; use mode "apiKeys"')
     if (keycloak === undefined) throw new Error('agents-api: auth.keycloak is required when auth.mode is "production"')
-  } else if (devKey === undefined && keycloak === undefined) {
-    throw new Error('agents-api: auth.mode "development" needs auth.devKey or auth.keycloak')
+  } else if (mode === 'apiKeys') {
+    if (devKey !== undefined) throw new Error('agents-api: auth.devKey is not allowed when auth.mode is "apiKeys"')
+    if (apiKeys === undefined) throw new Error('agents-api: auth.apiKeys is required when auth.mode is "apiKeys"')
+    validateApiKeys(apiKeys)
+  } else {
+    if (apiKeys !== undefined) throw new Error('agents-api: auth.apiKeys is not allowed when auth.mode is "development"; use mode "apiKeys"')
+    if (devKey === undefined && keycloak === undefined) throw new Error('agents-api: auth.mode "development" needs auth.devKey or auth.keycloak')
   }
   if (keycloak !== undefined) {
     const unknown = keycloak.algorithms.filter(name => !ALLOWED_ALGORITHMS.includes(name))
@@ -213,15 +259,17 @@ export function validateAuth(auth: ResolvedAuthConfig | undefined): void {
  * Build the request authenticator from the resolved `auth` block.
  * @param auth - `auth` block from `Config` output.
  * @param warn - receives Keycloak rejection diagnostics.
- * @returns Keycloak, the static dev key, or the dev key first and Keycloak as fallback when development sets both.
+ * @returns the authenticator for `auth.mode`: Keycloak; API keys, then Keycloak when `keycloak` is also set; or the dev key, then Keycloak when `keycloak` is also set.
  */
 export function createAuthenticator(auth: ResolvedAuthConfig, warn: (message: string) => void): Authenticator {
   validateAuth(auth)
-  const { keycloak, devKey } = auth
-  const staticKey = devKey === undefined ? undefined : createStaticKeyAuthenticator(devKey)
+  const { keycloak, devKey, apiKeys } = auth
   const verifier = keycloak === undefined ? undefined : createKeycloakAuthenticator({ ...keycloak, warn })
-  if (staticKey !== undefined && verifier !== undefined) return firstThen(staticKey, verifier)
-  return (staticKey ?? verifier)!
+  const local = apiKeys !== undefined
+    ? createApiKeyAuthenticator(apiKeys)
+    : devKey === undefined ? undefined : createStaticKeyAuthenticator(devKey)
+  if (local !== undefined && verifier !== undefined) return firstThen(local, verifier)
+  return (local ?? verifier)!
 }
 
 /**
@@ -237,8 +285,8 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   const runtime = resolveRuntimeConfig(config)
   const sessionRegistry = new SessionRegistry()
   const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth, message => ctx.logger.warn(message)), prefix, undefined, sessionRegistry, {
-    environments: createLocalProvider(runtime.environmentsRoot),
-    ...(runtime.workspacesRoot === undefined ? {} : { workspacesRoot: runtime.workspacesRoot }),
+    environments: createLocalProvider(runtime.workspacesRoot),
+    workspacesRoot: runtime.workspacesRoot,
     ...(runtime.artifacts === undefined ? {} : { artifacts: runtime.artifacts }),
   })
 

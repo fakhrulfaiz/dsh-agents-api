@@ -584,19 +584,20 @@ export class AgentsGateway {
 
   private async updateSession(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    if (!await this.requireSession(res, owner, sessionId)) return
+    const state = await this.requireSession(res, owner, sessionId)
+    if (!state) return
     const body = await readBody(req) as unknown as UpdateSessionParams
     if (body.agent?.model === null || body.agent?.model === '') {
       badRequest(res, 'Field "agent.model" cannot be null or empty')
       return
     }
+    const current = state.agent
+    const requestedEffort = body.agent?.reasoning?.effort
+    await this.store.sessions.update(sessionId, owner, {
+      model: body.agent?.model ?? current.model,
+      reasoningEffort: requestedEffort !== undefined ? requestedEffort : current.reasoning?.effort ?? null,
+    })
     const session = this.sessionRegistry.updateSession(sessionId, body)
-    if (session !== undefined) {
-      await this.store.sessions.update(sessionId, owner, {
-        model: session.agent.model,
-        reasoningEffort: session.agent.reasoning?.effort ?? null,
-      })
-    }
     json(res, 200, session)
   }
 

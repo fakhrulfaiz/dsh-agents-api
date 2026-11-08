@@ -64,6 +64,7 @@ describe('real Loader composition', () => {
       "- name: '@agentry/api'",
       '  config:',
       "    prefix: '/v1'",
+      `    workspaces: '${join(root, 'workspaces')}'`,
       '    database:',
       `      url: '${postgres!.url}'`,
       '    auth:',

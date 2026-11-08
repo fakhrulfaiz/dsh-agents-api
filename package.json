@@ -66,6 +66,7 @@
   },
   "scripts": {
     "dsh:link": "tsx scripts/link-dsh.ts",
+    "keys:create": "tsx scripts/keys-create.ts",
     "check:dsh-pin": "tsx scripts/check-dsh-pin.ts",
     "typecheck": "pnpm check:dsh-pin && pnpm dsh:link && tsc -p tsconfig.typecheck.json && tsc -p tsconfig.test.json",
     "test": "pnpm check:dsh-pin && pnpm dsh:link && vitest run",

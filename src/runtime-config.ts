@@ -1,18 +1,18 @@
 /**
  * Optional Agents API paths and backends.
  *
- * Workspace paths come from plugin config, then the matching env var. The S3
- * artifact backend stays off until endpoint and credentials are all set.
+ * The workspaces root comes only from plugin config (`workspaces`). The S3
+ * artifact backend takes config, then env vars, and stays off until endpoint
+ * and credentials are all set.
  * Codebox is parked: its settings are rejected, never ignored.
  */
 
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import type { ArtifactS3Config } from './artifacts.ts'
 
-/** Plugin fields this resolver reads. All of them are optional. */
+/** Plugin fields this resolver reads. */
 export interface RuntimeConfigInput {
-  workspaces?: string
+  /** Root of `<owner>/<session>/` session workspaces and `<owner>/<environment>/` local environments. Required. */
+  workspaces: string
   artifacts?: {
     endpoint?: string
     bucket?: string
@@ -25,10 +25,8 @@ export interface RuntimeConfigInput {
 
 /** Resolved optional backends for one plugin apply. */
 export interface RuntimeConfig {
-  /** Directory holding `<owner>/<session>/` default session workspaces; omitted to run sessions in the host cwd. */
-  workspacesRoot?: string
-  /** Directory holding `<owner>/<environment>/` local environments: `workspacesRoot`, or a directory under the OS temp dir. */
-  environmentsRoot: string
+  /** Directory holding `<owner>/<session>/` default session workspaces and `<owner>/<environment>/` local environments. */
+  workspacesRoot: string
   /** Generic S3 artifact endpoint, or omitted so reads use the session cwd. */
   artifacts?: ArtifactS3Config
 }
@@ -66,11 +64,12 @@ function normalizePrefix(prefix: string): string {
 }
 
 /**
- * Resolve plugin config, then process env, then off.
+ * Resolve the workspaces root from config and the optional backends from config, then process env, then off.
  * @param config - validated plugin config.
  * @param env - process environment, injectable in tests.
- * @returns backends that are actually configured.
+ * @returns the workspaces root and the backends that are actually configured.
  * @throws CodeboxDisabledError when a Codebox env var is set.
+ * @throws Error when `workspaces` is missing or blank.
  */
 export function resolveRuntimeConfig(
   config: RuntimeConfigInput,
@@ -78,14 +77,12 @@ export function resolveRuntimeConfig(
 ): RuntimeConfig {
   const codeboxVar = CODEBOX_ENV.find(name => text(env[name]) !== undefined)
   if (codeboxVar !== undefined) throw new CodeboxDisabledError(`env ${codeboxVar}`)
-  const workspacesRoot = text(config.workspaces) ?? text(env['AGENTS_API_WORKSPACES'])
+  const workspacesRoot = text(config.workspaces)
+  if (workspacesRoot === undefined) throw new Error('agents-api: "workspaces" is required (root directory for session workspaces and local environments)')
   const endpoint = text(config.artifacts?.endpoint) ?? text(env['SEAWEEDFS_ENDPOINT'])
   const accessKeyId = text(config.artifacts?.accessKeyId) ?? text(env['AWS_ACCESS_KEY_ID'])
   const secretAccessKey = text(config.artifacts?.secretAccessKey) ?? text(env['AWS_SECRET_ACCESS_KEY'])
-  const runtime: RuntimeConfig = {
-    environmentsRoot: workspacesRoot ?? join(tmpdir(), 'agents-api-environments'),
-  }
-  if (workspacesRoot !== undefined) runtime.workspacesRoot = workspacesRoot
+  const runtime: RuntimeConfig = { workspacesRoot }
   if (endpoint !== undefined && accessKeyId !== undefined && secretAccessKey !== undefined) {
     const bucket = text(config.artifacts?.bucket) ?? text(env['SEAWEEDFS_BUCKET']) ?? 'dsh-session'
     const prefix = text(config.artifacts?.prefix) ?? text(env['DSH_SESSION_S3_PREFIX']) ?? ''

@@ -34,7 +34,7 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 
 ## Authentication errors
 
-Every route under the prefix needs `Authorization: Bearer <token>`. A missing or invalid credential returns 401 with error code `unauthenticated` and `WWW-Authenticate: Bearer`. A principal holding neither `agentry-user` nor `agentry-admin` returns 403 with error code `forbidden`. `/health` is unauthenticated.
+Every route under the prefix needs `Authorization: Bearer <token>`. The token is a Keycloak access token (`production`), an Agentry API key `agk_…` (`apiKeys`; hashes in config, see the README), or the development key (`development`). A missing or invalid credential returns 401 with error code `unauthenticated` and `WWW-Authenticate: Bearer`. A principal holding neither `agentry-user` nor `agentry-admin` returns 403 with error code `forbidden`. `/health` is unauthenticated.
 
 ## Owner scoping and store errors
 
@@ -67,7 +67,7 @@ Non-empty `agent.instructions` is mounted as Host system-prompt section `agents-
 
 `GET /health` is registered on the webserver outside `/v1` and returns `{ ok: true, service: "agents-api" }`.
 
-Session create accepts `environment.type` `local` with an absolute `workspace_directory` (same cwd as `self_hosted`). `environment.type` `sandbox` returns an error; there is no sandbox. Omitting the environment, or sending `none`, stores a local workspace. `self_hosted` and `openai_hosted` stay as before. `AGENTS_API_WORKSPACES` supplies the cwd when the request does not pass an absolute directory. Deleting a session deletes environments whose `session_id` is that session.
+Session create accepts `environment.type` `local` with an absolute `workspace_directory` (same cwd as `self_hosted`). `environment.type` `sandbox` returns an error; there is no sandbox. Omitting the environment, or sending `none`, stores a local workspace. `self_hosted` and `openai_hosted` stay as before. The configured `workspaces` root supplies the cwd when the request does not pass an absolute directory. Deleting a session deletes environments whose `session_id` is that session.
 
 SSE events include an `id:` line. `GET .../events` with `Last-Event-ID` replays newer buffered events, then continues live.
 
