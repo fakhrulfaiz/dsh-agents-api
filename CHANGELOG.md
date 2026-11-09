@@ -3,6 +3,12 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-09 — OpenAPI contract
+
+- Added `openapi/agentry.yaml` (OpenAPI 3.1) covering every `/v1` route and `/health` with request and response schemas derived from `src/types.ts`, the error envelope, bearer security, and the SSE stream (`text/event-stream`, deterministic `id:`, ephemeral frames, `Last-Event-ID`). Clients generate types with `openapi-typescript`.
+- `AgentsGateway.routeTable()` lists the registered routes. `tests/openapi-drift.spec.ts` compares them with the spec; `tests/openapi-contract.spec.ts` validates recorded gateway responses, streamed events, and fixtures against the spec schemas (`ajv`). The admin API (`/admin/v1`) is not in the spec yet.
+- See [docs/changes/2026-11-09-openapi-contract.md](docs/changes/2026-11-09-openapi-contract.md).
+
 ## 2026-11-09 — Approvals over the API, live model and effort
 
 - Sandbox escalations, tool approvals, and `ask_user_question` calls become `approval` entries in `required_actions` (`kind` `sandbox_escalation`, `tool_approval`, or `user_question`; optional `tool_name`, `call_id`, `questions`). The session shows `requires_action` and answers with `agent.session.input.approval_response` (`approve`, `deny`, or `answer` with `payload`). Unknown, answered, or cancelled ids answer 404 `approval_not_found`; mismatched decisions answer 400.

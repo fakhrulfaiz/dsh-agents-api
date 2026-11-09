@@ -136,6 +136,16 @@ The wire details for create, stream, and function tools live in [HTTP API](docs/
 
 Paths other than `/health` sit under the configured `prefix` (default `/v1`). Send `OpenAI-Beta: agents=v1`.
 
+### OpenAPI contract
+
+[`openapi/agentry.yaml`](openapi/agentry.yaml) is the machine-readable contract (OpenAPI 3.1): every route, request and response body, the error envelope, the bearer security scheme, and the SSE event stream with its `id:` and `Last-Event-ID` rules. `pnpm test` fails when a route and the spec disagree (`tests/openapi-drift.spec.ts`) or when a gateway response does not match its schema (`tests/openapi-contract.spec.ts`). Its paths carry the default `/v1` prefix.
+
+Clients generate types from the file, for example:
+
+```sh
+npx openapi-typescript openapi/agentry.yaml -o src/api/agentry.d.ts
+```
+
 | Method | Path | What it does |
 | --- | --- | --- |
 | `GET` | `/health` | Liveness check outside `/v1`. Returns `{ ok: true, service: "agents-api" }`. |

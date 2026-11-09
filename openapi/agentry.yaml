@@ -1,0 +1,2906 @@
+# OpenAPI 3.1 contract for @agentry/api. Edit this file directly; tests/openapi-*.spec.ts keep it in sync with the gateway.
+openapi: 3.1.0
+info:
+  title: Agentry API
+  version: 0.1.0
+  description: |-
+    OpenAI Agents API-compatible gateway for DeepSeek Harness (`@agentry/api`).
+
+    Every `/v1` route needs `Authorization: Bearer <token>` and should send `OpenAI-Beta: agents=v1`. All agents, templates, environments, and sessions are scoped to the authenticated owner; another owner's id answers 404. The `/v1` prefix is the default `prefix` setting. Wire reference: docs/http-api.md.
+
+    The admin API (`/admin/v1`) is not part of this version of the contract.
+servers:
+  - url: http://localhost:3080
+    description: Local development
+security:
+  - bearerAuth: []
+tags:
+  - name: Agents
+  - name: Environments
+  - name: Sessions
+  - name: Subagents
+  - name: Health
+paths:
+  /v1/agents:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    post:
+      summary: Create a saved agent
+      tags:
+        - Agents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAgentRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    get:
+      summary: List saved agents
+      tags:
+        - Agents
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Order"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Agent"
+                  first_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  last_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  has_more:
+                    type: boolean
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/tools:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    get:
+      summary: List Host profile tools
+      tags:
+        - Agents
+      parameters:
+        - name: session_id
+          in: query
+          schema:
+            type: string
+          description: Apply that session's `host_tools` mask. Omit for the full catalog.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/HostToolCatalogEntry"
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/{agent_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/AgentId"
+    get:
+      summary: Retrieve a saved agent
+      tags:
+        - Agents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    post:
+      summary: Update a saved agent
+      tags:
+        - Agents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAgentRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    delete:
+      summary: Delete a saved agent
+      tags:
+        - Agents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  object:
+                    const: agent.deleted
+                  deleted:
+                    const: true
+                required:
+                  - id
+                  - object
+                  - deleted
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/environments/templates:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    post:
+      summary: Create an environment template
+      tags:
+        - Environments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTemplateRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnvironmentTemplate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    get:
+      summary: List environment templates
+      tags:
+        - Environments
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Order"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EnvironmentTemplate"
+                  first_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  last_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  has_more:
+                    type: boolean
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/environments/templates/{template_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/TemplateId"
+    get:
+      summary: Retrieve an environment template
+      tags:
+        - Environments
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnvironmentTemplate"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    post:
+      summary: Update an environment template
+      tags:
+        - Environments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTemplateRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnvironmentTemplate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    delete:
+      summary: Delete an environment template
+      tags:
+        - Environments
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  object:
+                    const: environment.template.deleted
+                  deleted:
+                    const: true
+                required:
+                  - id
+                  - object
+                  - deleted
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/environments:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    post:
+      summary: Create an environment
+      tags:
+        - Environments
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEnvironmentRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Environment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    get:
+      summary: List environments
+      tags:
+        - Environments
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Order"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Environment"
+                  first_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  last_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  has_more:
+                    type: boolean
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/environments/{environment_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/EnvironmentId"
+    get:
+      summary: Retrieve an environment
+      tags:
+        - Environments
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Environment"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+      description: Reports status `failed` when the workspace directory is gone.
+    delete:
+      summary: Delete an environment and its workspace
+      tags:
+        - Environments
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  object:
+                    const: environment.deleted
+                  deleted:
+                    const: true
+                required:
+                  - id
+                  - object
+                  - deleted
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/environments/{environment_id}/files:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/EnvironmentId"
+    post:
+      summary: Write a file into the workspace
+      tags:
+        - Environments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WriteEnvironmentFileRequest"
+      responses:
+        "201":
+          description: Written
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnvironmentFileWritten"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    get:
+      summary: List workspace files
+      tags:
+        - Environments
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FileEntry"
+                required:
+                  - object
+                  - data
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/environments/{environment_id}/files/{path}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/EnvironmentId"
+      - $ref: "#/components/parameters/FilePath"
+    get:
+      summary: Read a workspace file
+      tags:
+        - Environments
+      responses:
+        "200":
+          description: File bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    post:
+      summary: Create a session
+      tags:
+        - Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+      responses:
+        "200":
+          description: "The session with its first items and turns. With `stream: true`, `text/event-stream` instead."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSessionWithHistory"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+      description: "Send `agent` and/or `agent_id`. With `stream: true` the response is a `text/event-stream` of `SessionEvent` frames (see the events operation) instead of JSON."
+    get:
+      summary: List sessions, newest first
+      tags:
+        - Sessions
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Order"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AgentSession"
+                  first_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  last_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  has_more:
+                    type: boolean
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      summary: Retrieve a session
+      tags:
+        - Sessions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSession"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    post:
+      summary: Update a session
+      tags:
+        - Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateSessionRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSession"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+      description: Changes `agent.model` and `agent.reasoning.effort` on the live agent from the next model step; `service_tier` and `metadata` are stored only.
+    delete:
+      summary: Delete a session
+      tags:
+        - Sessions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  object:
+                    const: agent.session.deleted
+                  deleted:
+                    const: true
+                required:
+                  - id
+                  - object
+                  - deleted
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/events:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      summary: Submit input events
+      tags:
+        - Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PostEventsRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSessionWithHistory"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+      description: Posting to a session that is not live resumes it from its Session log first (409 `session_not_resumable` for sessions created before migration 0002, 500 `session_resume_failed`). Approval answers do not resume.
+    get:
+      summary: Stream session events
+      tags:
+        - Sessions
+      parameters:
+        - name: stream
+          in: query
+          schema:
+            type: boolean
+          description: Send `true` to stream.
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Last `id:` the client processed; replay resumes after it.
+      responses:
+        "200":
+          description: Server-sent events.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE text; each `data:` line is a `SessionEvent`.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+      description: |-
+        Server-sent events when `stream=true` (`Content-Type: text/event-stream`). Each frame is
+
+        ```
+        id: <n>            (absent on ephemeral frames)
+        event: <type>
+        data: <SessionEvent JSON>
+        ```
+
+        The `event:` name equals the payload `type` (see the `SessionEvent` schema).
+
+        Ids. Every event derived from the Session log carries `id: <n>`, its 1-based position in the session's event sequence; `agent.session.created` is always 1. The sequence is a pure function of the Session log, so ids and the payload `event_id` (`evt_<session_id>_<n>`) survive server restarts.
+
+        Ephemeral frames have no `id:` line, are never replayed, and do not shift later ids: the status snapshot written when a stream connects, the `idle` event that closes a streamed create without input, `error` events for a failed input dispatch, and the `requires_action`/`in_progress` events raised by approvals.
+
+        Resume. Send `Last-Event-ID: n` to receive every event with a greater id, derived from the Session log, then live events without gaps or duplicates. A non-numeric value replays the whole history. A `Last-Event-ID` connection to a session with pending approvals additionally receives one ephemeral `agent.session.requires_action` snapshot. Without the header the stream starts with one status snapshot (`idle`, `in_progress`, `requires_action`, or `failed`).
+  /v1/agents/sessions/{session_id}/items:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      summary: List session items
+      tags:
+        - Sessions
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Order"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SessionItem"
+                  first_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  last_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  has_more:
+                    type: boolean
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/turns:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      summary: List turns
+      tags:
+        - Sessions
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Order"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Turn"
+                  first_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  last_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  has_more:
+                    type: boolean
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/turns/{turn_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/TurnId"
+    get:
+      summary: Retrieve a turn
+      tags:
+        - Sessions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Turn"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/artifacts:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      summary: List session artifacts
+      tags:
+        - Sessions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ArtifactEntry"
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/artifacts/{path}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/FilePath"
+    get:
+      summary: Download an artifact
+      tags:
+        - Sessions
+      responses:
+        "200":
+          description: Artifact bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/subagents:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      summary: List subagents
+      tags:
+        - Subagents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Subagent"
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/subagents/{subagent_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/SubagentId"
+    get:
+      summary: Retrieve a subagent
+      tags:
+        - Subagents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Subagent"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/subagents/{subagent_id}/turns:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/SubagentId"
+    get:
+      summary: List a subagent's turns
+      tags:
+        - Subagents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Turn"
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/subagents/{subagent_id}/turns/{turn_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/SubagentId"
+      - $ref: "#/components/parameters/TurnId"
+    get:
+      summary: Retrieve a subagent turn
+      tags:
+        - Subagents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Turn"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/subagents/{subagent_id}/items:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/SubagentId"
+    get:
+      summary: List a subagent's items
+      tags:
+        - Subagents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SessionItem"
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/subagents/{subagent_id}/turns/{turn_id}/items:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/SubagentId"
+      - $ref: "#/components/parameters/TurnId"
+    get:
+      summary: List items of a subagent turn
+      tags:
+        - Subagents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SessionItem"
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /health:
+    get:
+      summary: Liveness probe
+      tags:
+        - Health
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    const: true
+                  service:
+                    const: agents-api
+                required:
+                  - ok
+                  - service
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: A Keycloak access token (production), an Agentry API key `agk_...` (apiKeys mode), or the development key (development mode). The principal needs the `agentry-user` or `agentry-admin` role.
+  parameters:
+    OpenAIBeta:
+      name: OpenAI-Beta
+      in: header
+      required: false
+      schema:
+        const: agents=v1
+      description: Clients should send `agents=v1`.
+    AgentId:
+      name: agent_id
+      in: path
+      required: true
+      schema:
+        type: string
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+    TurnId:
+      name: turn_id
+      in: path
+      required: true
+      schema:
+        type: string
+    SubagentId:
+      name: subagent_id
+      in: path
+      required: true
+      schema:
+        type: string
+    TemplateId:
+      name: template_id
+      in: path
+      required: true
+      schema:
+        type: string
+    EnvironmentId:
+      name: environment_id
+      in: path
+      required: true
+      schema:
+        type: string
+    FilePath:
+      name: path
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Slash-separated path; remaining segments are part of the value.
+      allowReserved: true
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    After:
+      name: after
+      in: query
+      schema:
+        type: string
+      description: Id of the last item of the previous page.
+    Order:
+      name: order
+      in: query
+      schema:
+        type: string
+        enum:
+          - asc
+          - desc
+      description: Ignored by the session list (newest first).
+  responses:
+    BadRequest:
+      description: Invalid request. `error.code` is `bad_request`, `invalid_request`, `invalid_approval_response`, `decision_not_applicable`, or `unknown_call_id`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthenticated:
+      description: Missing or invalid credential. `error.code` is `unauthenticated`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+      headers:
+        WWW-Authenticate:
+          schema:
+            const: Bearer
+    Forbidden:
+      description: The principal holds neither `agentry-user` nor `agentry-admin`. `error.code` is `forbidden`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Unknown id or another owner's record (`resource_not_found`), or `approval_not_found` for an approval answer.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: "`session_setting_not_live` (model or effort change not applicable) or `session_not_resumable`."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ServerError:
+      description: "`session_resume_failed`, `event_apply_failed`, or another internal error."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    StoreUnavailable:
+      description: The Postgres store is opening, failed to start, or a database call failed. `error.code` is `store_unavailable`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    Error:
+      type: object
+      properties:
+        type:
+          type: string
+          description: Error class, for example `invalid_request_error`, `authentication_error`, or `server_error`.
+        message:
+          type: string
+        code:
+          type: string
+          description: Stable machine-readable code, for example `resource_not_found`, `bad_request`, `unauthenticated`, `forbidden`, `store_unavailable`.
+      required:
+        - message
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          $ref: "#/components/schemas/Error"
+      required:
+        - error
+    ServiceTier:
+      type: string
+      enum:
+        - auto
+        - default
+        - flex
+        - priority
+        - fast
+    ReasoningEffort:
+      type: string
+      enum:
+        - none
+        - minimal
+        - low
+        - medium
+        - high
+        - xhigh
+        - max
+    SessionStatus:
+      type: string
+      enum:
+        - idle
+        - in_progress
+        - requires_action
+        - failed
+    TurnStatus:
+      type: string
+      enum:
+        - queued
+        - in_progress
+        - waiting
+        - completed
+        - failed
+        - cancelled
+    TokenUsage:
+      type: object
+      properties:
+        input_tokens:
+          type: integer
+        input_tokens_details:
+          type: object
+          properties:
+            cached_tokens:
+              type: integer
+          required:
+            - cached_tokens
+        output_tokens:
+          type: integer
+        output_tokens_details:
+          type: object
+          properties:
+            reasoning_tokens:
+              type: integer
+          required:
+            - reasoning_tokens
+        total_tokens:
+          type: integer
+      required:
+        - input_tokens
+        - output_tokens
+        - total_tokens
+    FunctionTool:
+      type: object
+      properties:
+        type:
+          const: function
+        name:
+          type: string
+        description:
+          type: string
+        parameters:
+          type: object
+          additionalProperties: true
+        defer_loading:
+          type: boolean
+      required:
+        - type
+        - name
+    McpHttpTransport:
+      type: object
+      properties:
+        type:
+          const: http
+        server_url:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+      required:
+        - type
+        - server_url
+    McpStdioTransport:
+      type: object
+      properties:
+        type:
+          const: stdio
+        command:
+          type: string
+        args:
+          type: array
+          items:
+            type: string
+        env:
+          type: object
+          additionalProperties:
+            type: string
+      required:
+        - type
+        - command
+    McpTool:
+      type: object
+      properties:
+        type:
+          const: mcp
+        server_label:
+          type: string
+        transport:
+          oneOf:
+            - $ref: "#/components/schemas/McpHttpTransport"
+            - $ref: "#/components/schemas/McpStdioTransport"
+        allowed_tools:
+          oneOf:
+            - type: array
+              items:
+                type: string
+            - type: "null"
+        required:
+          type: boolean
+        connection_origin:
+          type: string
+          enum:
+            - service
+            - environment
+        credential_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        request_metadata:
+          type: object
+          additionalProperties: true
+      required:
+        - type
+        - server_label
+        - transport
+      description: "Tools of `type` `web_search`, `tool_search`, and `programmatic_tool_calling` are rejected at create time; `credential_id` and `connection_origin: service` are rejected."
+    ToolConfig:
+      description: One tool on an agent. Only `function` and `mcp` are accepted by this gateway.
+      oneOf:
+        - $ref: "#/components/schemas/FunctionTool"
+        - $ref: "#/components/schemas/McpTool"
+    HostToolsConfig:
+      type: object
+      properties:
+        allow:
+          oneOf:
+            - type: array
+              items:
+                type: string
+            - type: "null"
+        deny:
+          oneOf:
+            - type: array
+              items:
+                type: string
+            - type: "null"
+      description: "DSH extension: restricts the Host profile tools for the session. An empty object is rejected."
+    MultiAgentConfig:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        max_concurrent_subagents:
+          oneOf:
+            - type: integer
+            - type: "null"
+      required:
+        - enabled
+    ReasoningConfig:
+      type: object
+      properties:
+        effort:
+          oneOf:
+            - $ref: "#/components/schemas/ReasoningEffort"
+            - type: "null"
+        summary:
+          oneOf:
+            - type: string
+              enum:
+                - auto
+                - none
+            - type: "null"
+    TextConfig:
+      type: object
+      properties:
+        format:
+          oneOf:
+            - type: object
+              properties:
+                type:
+                  const: text
+              required:
+                - type
+            - type: object
+              properties:
+                type:
+                  const: json_schema
+                schema:
+                  type: object
+                  additionalProperties: true
+              required:
+                - type
+                - schema
+        verbosity:
+          type: string
+          enum:
+            - low
+            - medium
+            - high
+    Agent:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          const: agent
+        created_at:
+          type: integer
+        updated_at:
+          type: integer
+        name:
+          oneOf:
+            - type: string
+            - type: "null"
+        instructions:
+          oneOf:
+            - type: string
+            - type: "null"
+        model:
+          type: string
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        tools:
+          type: array
+          items:
+            $ref: "#/components/schemas/ToolConfig"
+        host_tools:
+          oneOf:
+            - $ref: "#/components/schemas/HostToolsConfig"
+            - type: "null"
+        multi_agent:
+          oneOf:
+            - $ref: "#/components/schemas/MultiAgentConfig"
+            - type: "null"
+        reasoning:
+          oneOf:
+            - $ref: "#/components/schemas/ReasoningConfig"
+            - type: "null"
+        service_tier:
+          oneOf:
+            - $ref: "#/components/schemas/ServiceTier"
+            - type: "null"
+        text:
+          oneOf:
+            - $ref: "#/components/schemas/TextConfig"
+            - type: "null"
+      required:
+        - id
+        - object
+        - created_at
+        - updated_at
+        - name
+        - instructions
+        - model
+        - metadata
+        - tools
+    AgentFields:
+      type: object
+      properties:
+        name:
+          oneOf:
+            - type: string
+            - type: "null"
+        instructions:
+          oneOf:
+            - type: string
+            - type: "null"
+        metadata:
+          oneOf:
+            - type: object
+              additionalProperties:
+                type: string
+            - type: "null"
+        tools:
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/ToolConfig"
+            - type: "null"
+        host_tools:
+          oneOf:
+            - $ref: "#/components/schemas/HostToolsConfig"
+            - type: "null"
+        multi_agent:
+          oneOf:
+            - $ref: "#/components/schemas/MultiAgentConfig"
+            - type: "null"
+        reasoning:
+          oneOf:
+            - $ref: "#/components/schemas/ReasoningConfig"
+            - type: "null"
+        service_tier:
+          oneOf:
+            - $ref: "#/components/schemas/ServiceTier"
+            - type: "null"
+        text:
+          oneOf:
+            - $ref: "#/components/schemas/TextConfig"
+            - type: "null"
+    CreateAgentRequest:
+      description: Saved agent configuration. `model` is required.
+      allOf:
+        - $ref: "#/components/schemas/AgentFields"
+        - type: object
+          properties:
+            model:
+              type: string
+          required:
+            - model
+    UpdateAgentRequest:
+      description: Omitted fields keep their saved values.
+      allOf:
+        - $ref: "#/components/schemas/AgentFields"
+        - type: object
+          properties:
+            model:
+              type: string
+    HostToolCatalogEntry:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        parameters:
+          type: object
+          additionalProperties: true
+        source:
+          const: host
+      required:
+        - name
+        - description
+        - parameters
+        - source
+    EnvironmentTemplateConfig:
+      type: object
+      properties:
+        image:
+          type: string
+        setup:
+          type: string
+        packages:
+          type: array
+          items:
+            type: string
+        starter_files:
+          type: array
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+              content:
+                type: string
+            required:
+              - path
+              - content
+        default_env:
+          type: object
+          additionalProperties:
+            type: string
+    EnvironmentTemplate:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          const: environment.template
+        name:
+          type: string
+        provider:
+          const: codebox
+        config:
+          $ref: "#/components/schemas/EnvironmentTemplateConfig"
+        created_at:
+          type: integer
+        updated_at:
+          type: integer
+      required:
+        - id
+        - object
+        - name
+        - provider
+        - config
+        - created_at
+    CreateTemplateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        config:
+          $ref: "#/components/schemas/EnvironmentTemplateConfig"
+      required:
+        - name
+    UpdateTemplateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        config:
+          $ref: "#/components/schemas/EnvironmentTemplateConfig"
+    EnvironmentStatus:
+      type: string
+      enum:
+        - pending
+        - connected
+        - failed
+        - cleanup
+        - deleted
+    Environment:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          const: environment
+        template_id:
+          type: string
+        session_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/EnvironmentStatus"
+        provider:
+          type: string
+          enum:
+            - codebox
+            - local
+        provider_metadata:
+          type: object
+          properties:
+            codebox_id:
+              type: string
+            workspace_directory:
+              type: string
+        error:
+          type: string
+        created_at:
+          type: integer
+        updated_at:
+          type: integer
+      required:
+        - id
+        - object
+        - status
+        - provider
+        - provider_metadata
+        - created_at
+    CreateEnvironmentRequest:
+      type: object
+      properties:
+        template_id:
+          type: string
+        session_id:
+          type: string
+        image:
+          type: string
+      description: "`template_id` and `session_id` must belong to the caller."
+    WriteEnvironmentFileRequest:
+      type: object
+      properties:
+        path:
+          type: string
+        content:
+          type: string
+          description: UTF-8 text.
+        content_base64:
+          type: string
+          description: Base64 bytes, used when `content` is absent.
+      required:
+        - path
+    EnvironmentFileWritten:
+      type: object
+      properties:
+        object:
+          const: environment.file
+        path:
+          type: string
+        written:
+          const: true
+      required:
+        - object
+        - path
+        - written
+    FileEntry:
+      type: object
+      properties:
+        path:
+          type: string
+      required:
+        - path
+    ArtifactEntry:
+      type: object
+      properties:
+        path:
+          type: string
+        size:
+          type: integer
+        last_modified:
+          type: string
+      required:
+        - path
+    SelfHostedEnvironment:
+      type: object
+      properties:
+        type:
+          const: self_hosted
+        id:
+          type: string
+        workspace_directory:
+          type: string
+        capability_directories:
+          type: array
+          items:
+            type: string
+        remote_url:
+          type: string
+      required:
+        - type
+    NoneEnvironment:
+      type: object
+      properties:
+        type:
+          const: none
+      required:
+        - type
+    OpenAIHostedEnvironment:
+      type: object
+      properties:
+        type:
+          const: openai_hosted
+      required:
+        - type
+    LocalEnvironment:
+      type: object
+      properties:
+        type:
+          const: local
+        workspace_directory:
+          type: string
+      required:
+        - type
+        - workspace_directory
+    SandboxEnvironment:
+      type: object
+      properties:
+        type:
+          const: sandbox
+        environment_id:
+          type: string
+        template_id:
+          type: string
+      required:
+        - type
+      description: Sandbox sessions are not provisioned by this gateway.
+    EnvironmentConfig:
+      oneOf:
+        - $ref: "#/components/schemas/NoneEnvironment"
+        - $ref: "#/components/schemas/SelfHostedEnvironment"
+        - $ref: "#/components/schemas/OpenAIHostedEnvironment"
+        - $ref: "#/components/schemas/LocalEnvironment"
+        - $ref: "#/components/schemas/SandboxEnvironment"
+    QuestionOption:
+      type: object
+      properties:
+        label:
+          type: string
+        description:
+          type: string
+      required:
+        - label
+    Question:
+      type: object
+      properties:
+        id:
+          type: string
+        question:
+          type: string
+        detail:
+          type: string
+        header:
+          type: string
+        options:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionOption"
+        multiSelect:
+          type: boolean
+        intent:
+          type: object
+          additionalProperties: true
+          description: Presentation hint (`plan-review` or `approval`).
+      required:
+        - id
+        - question
+    FunctionCallAction:
+      type: object
+      properties:
+        type:
+          const: function_call
+        name:
+          type: string
+        arguments:
+          type: object
+          additionalProperties: true
+        turn_id:
+          type: string
+        call_id:
+          type: string
+      required:
+        - type
+        - name
+        - arguments
+        - turn_id
+        - call_id
+    EnvironmentConnectionAction:
+      type: object
+      properties:
+        type:
+          const: environment_connection
+        environment_id:
+          type: string
+      required:
+        - type
+        - environment_id
+    ApprovalAction:
+      type: object
+      properties:
+        type:
+          const: approval
+        id:
+          type: string
+          description: Answer with `agent.session.input.approval_response` and this id.
+        kind:
+          type: string
+          enum:
+            - sandbox_escalation
+            - user_question
+            - tool_approval
+        prompt:
+          type: string
+        options:
+          type: array
+          items:
+            type: string
+          description: '`["approve","deny"]` for an approval; the option labels of a single question, else empty.'
+        tool_name:
+          type: string
+          description: Approvals only, when known.
+        call_id:
+          type: string
+          description: When known.
+        questions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Question"
+          description: "`user_question` with several questions."
+      required:
+        - type
+        - id
+        - kind
+        - prompt
+        - options
+    RequiredAction:
+      oneOf:
+        - $ref: "#/components/schemas/FunctionCallAction"
+        - $ref: "#/components/schemas/EnvironmentConnectionAction"
+        - $ref: "#/components/schemas/ApprovalAction"
+    AgentSession:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          const: agent.session
+        created_at:
+          type: integer
+        last_active_at:
+          type: integer
+        status:
+          $ref: "#/components/schemas/SessionStatus"
+        error:
+          oneOf:
+            - type: string
+            - type: "null"
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        vault_ids:
+          type: array
+          items:
+            type: string
+        agent:
+          $ref: "#/components/schemas/Agent"
+        environment:
+          $ref: "#/components/schemas/EnvironmentConfig"
+        required_actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RequiredAction"
+        usage:
+          oneOf:
+            - $ref: "#/components/schemas/TokenUsage"
+            - type: "null"
+      required:
+        - id
+        - object
+        - created_at
+        - last_active_at
+        - status
+        - error
+        - metadata
+        - vault_ids
+        - agent
+        - environment
+        - required_actions
+        - usage
+    AgentSessionWithHistory:
+      description: The session, repeated under `session`, with its first 100 items and turns in ascending order. Returned by session create and by posting input events.
+      allOf:
+        - $ref: "#/components/schemas/AgentSession"
+        - type: object
+          properties:
+            session:
+              $ref: "#/components/schemas/AgentSession"
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/SessionItem"
+            turns:
+              type: array
+              items:
+                $ref: "#/components/schemas/Turn"
+          required:
+            - session
+            - items
+            - turns
+    InputMessage:
+      type: object
+      properties:
+        role:
+          type: string
+          enum:
+            - user
+            - assistant
+            - system
+        content:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+              text:
+                type: string
+            required:
+              - type
+      required:
+        - role
+    CreateSessionRequest:
+      type: object
+      properties:
+        agent:
+          description: Inline agent, or overrides of `agent_id`. `model` is required when `agent_id` is omitted.
+          allOf:
+            - $ref: "#/components/schemas/AgentFields"
+            - type: object
+              properties:
+                model:
+                  type: string
+        agent_id:
+          type: string
+        environment:
+          $ref: "#/components/schemas/EnvironmentConfig"
+        metadata:
+          oneOf:
+            - type: object
+              additionalProperties:
+                type: string
+            - type: "null"
+        vault_ids:
+          type: array
+          items:
+            type: string
+        input:
+          description: First user input.
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                $ref: "#/components/schemas/InputMessage"
+        stream:
+          type: boolean
+          description: Answer with `text/event-stream` instead of JSON.
+    UpdateSessionRequest:
+      type: object
+      properties:
+        agent:
+          type: object
+          properties:
+            model:
+              type: string
+              minLength: 1
+              description: Retargets the live agent from the next model step. `null` and the empty string are rejected.
+            reasoning:
+              type: object
+              properties:
+                effort:
+                  oneOf:
+                    - $ref: "#/components/schemas/ReasoningEffort"
+                    - type: "null"
+            service_tier:
+              oneOf:
+                - $ref: "#/components/schemas/ServiceTier"
+                - type: "null"
+        metadata:
+          oneOf:
+            - type: object
+              additionalProperties:
+                type: string
+            - type: "null"
+    Turn:
+      type: object
+      properties:
+        id:
+          type: string
+          description: "Deterministic: `turn_<log position of turn/start>`."
+        object:
+          const: agent.session.turn
+        session_id:
+          type: string
+        agent_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/TurnStatus"
+        created_at:
+          type: integer
+        started_at:
+          oneOf:
+            - type: integer
+            - type: "null"
+        completed_at:
+          oneOf:
+            - type: integer
+            - type: "null"
+        subagent_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        error:
+          oneOf:
+            - type: object
+              properties:
+                code:
+                  type: string
+                message:
+                  type: string
+              required:
+                - code
+                - message
+            - type: "null"
+        usage:
+          oneOf:
+            - $ref: "#/components/schemas/TokenUsage"
+            - type: "null"
+      required:
+        - id
+        - object
+        - session_id
+        - agent_id
+        - status
+        - created_at
+    ToolCallStatus:
+      type: string
+      enum:
+        - in_progress
+        - completed
+        - failed
+        - incomplete
+    ItemStatus:
+      type: string
+      enum:
+        - in_progress
+        - completed
+        - incomplete
+    MessageItem:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          const: message
+        role:
+          type: string
+          enum:
+            - user
+            - assistant
+        content:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum:
+                  - input_text
+                  - output_text
+              text:
+                type: string
+            required:
+              - type
+              - text
+        phase:
+          oneOf:
+            - type: string
+              enum:
+                - commentary
+                - final_answer
+            - type: "null"
+        status:
+          $ref: "#/components/schemas/ItemStatus"
+        turn_id:
+          type: string
+        subagent_id:
+          type: string
+      required:
+        - id
+        - type
+        - role
+        - content
+        - status
+        - turn_id
+    FunctionCallItem:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          const: function_call
+        name:
+          type: string
+        call_id:
+          type: string
+        arguments:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: string
+        status:
+          $ref: "#/components/schemas/ToolCallStatus"
+        turn_id:
+          type: string
+        subagent_id:
+          type: string
+      required:
+        - id
+        - type
+        - name
+        - call_id
+        - arguments
+        - status
+        - turn_id
+    FunctionCallOutputItem:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          const: function_call_output
+        call_id:
+          type: string
+        output:
+          type: string
+        error:
+          oneOf:
+            - type: string
+            - type: "null"
+        status:
+          $ref: "#/components/schemas/ToolCallStatus"
+        turn_id:
+          type: string
+        subagent_id:
+          type: string
+      required:
+        - id
+        - type
+        - call_id
+        - output
+        - status
+        - turn_id
+    McpCallItem:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          const: mcp_call
+        server_label:
+          type: string
+        name:
+          type: string
+        arguments:
+          type: object
+          additionalProperties: true
+        output: {}
+        error:
+          oneOf:
+            - type: string
+            - type: "null"
+        status:
+          $ref: "#/components/schemas/ToolCallStatus"
+        turn_id:
+          type: string
+        subagent_id:
+          type: string
+      required:
+        - id
+        - type
+        - server_label
+        - name
+        - arguments
+        - status
+        - turn_id
+    CommandExecutionItem:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          const: command_execution
+        command:
+          type: string
+        cwd:
+          type: string
+        exit_code:
+          type: integer
+        output:
+          type: string
+        duration_ms:
+          type: number
+        status:
+          $ref: "#/components/schemas/ToolCallStatus"
+        turn_id:
+          type: string
+        subagent_id:
+          type: string
+      required:
+        - id
+        - type
+        - command
+        - status
+        - turn_id
+    ReasoningItem:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          const: reasoning
+        summary:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                const: summary_text
+              text:
+                type: string
+            required:
+              - type
+              - text
+        status:
+          $ref: "#/components/schemas/ItemStatus"
+        turn_id:
+          type: string
+        subagent_id:
+          type: string
+      required:
+        - id
+        - type
+        - status
+        - turn_id
+    SessionItem:
+      description: Discriminated by `type`. Item ids are deterministic functions of the Session log.
+      oneOf:
+        - $ref: "#/components/schemas/MessageItem"
+        - $ref: "#/components/schemas/FunctionCallItem"
+        - $ref: "#/components/schemas/FunctionCallOutputItem"
+        - $ref: "#/components/schemas/McpCallItem"
+        - $ref: "#/components/schemas/CommandExecutionItem"
+        - $ref: "#/components/schemas/ReasoningItem"
+      discriminator:
+        propertyName: type
+    Subagent:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          const: agent.session.subagent
+        session_id:
+          type: string
+        parent_session_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - closed
+        created_at:
+          type: integer
+        closed_at:
+          type: integer
+      required:
+        - id
+        - object
+        - session_id
+        - parent_session_id
+        - status
+        - created_at
+    SendMessageInputEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.input.message
+        input:
+          type: array
+          items:
+            $ref: "#/components/schemas/InputMessage"
+        model:
+          type: string
+          description: Switch the session model from the next model step, before this message is queued.
+        reasoning:
+          type: object
+          properties:
+            effort:
+              oneOf:
+                - $ref: "#/components/schemas/ReasoningEffort"
+                - type: "null"
+      required:
+        - type
+        - input
+    CancelInputEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.input.cancel
+      required:
+        - type
+    FunctionCallOutputInputEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.input.function_call_output
+        turn_id:
+          type: string
+        call_id:
+          type: string
+        output: {}
+      required:
+        - type
+        - call_id
+        - output
+      description: Legacy alias of a successful `tool_result`.
+    ToolResultInputEvent:
+      oneOf:
+        - type: object
+          properties:
+            type:
+              const: agent.session.input.tool_result
+            turn_id:
+              type: string
+            call_id:
+              type: string
+            success:
+              const: true
+            output: {}
+          required:
+            - type
+            - turn_id
+            - call_id
+            - success
+        - type: object
+          properties:
+            type:
+              const: agent.session.input.tool_result
+            turn_id:
+              type: string
+            call_id:
+              type: string
+            success:
+              const: false
+            error:
+              type: string
+          required:
+            - type
+            - turn_id
+            - call_id
+            - success
+            - error
+    ApprovalResponseInputEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.input.approval_response
+        id:
+          type: string
+          description: "`id` of the `approval` required action."
+        decision:
+          type: string
+          enum:
+            - approve
+            - deny
+            - answer
+        payload:
+          description: "For `answer`: `{ selected: string[], custom?: string }` for one question, or `{ answers: [{ id, selected, custom? }] }` covering every question."
+      required:
+        - type
+        - id
+        - decision
+    InputEvent:
+      oneOf:
+        - $ref: "#/components/schemas/SendMessageInputEvent"
+        - $ref: "#/components/schemas/CancelInputEvent"
+        - $ref: "#/components/schemas/FunctionCallOutputInputEvent"
+        - $ref: "#/components/schemas/ToolResultInputEvent"
+        - $ref: "#/components/schemas/ApprovalResponseInputEvent"
+    PostEventsRequest:
+      type: object
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/InputEvent"
+    SessionCreatedEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.created
+        event_id:
+          type: string
+        session:
+          $ref: "#/components/schemas/AgentSession"
+      required:
+        - type
+        - event_id
+        - session
+    SessionIdleEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.idle
+        event_id:
+          type: string
+        session:
+          $ref: "#/components/schemas/AgentSession"
+      required:
+        - type
+        - event_id
+        - session
+    SessionInProgressEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.in_progress
+        event_id:
+          type: string
+        session:
+          $ref: "#/components/schemas/AgentSession"
+      required:
+        - type
+        - event_id
+        - session
+    SessionRequiresActionEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.requires_action
+        event_id:
+          type: string
+        session:
+          $ref: "#/components/schemas/AgentSession"
+      required:
+        - type
+        - event_id
+        - session
+    SessionFailedEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.failed
+        event_id:
+          type: string
+        session:
+          $ref: "#/components/schemas/AgentSession"
+      required:
+        - type
+        - event_id
+        - session
+    TurnCreatedEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.turn.created
+        event_id:
+          type: string
+        session_id:
+          type: string
+        turn:
+          $ref: "#/components/schemas/Turn"
+      required:
+        - type
+        - event_id
+        - session_id
+        - turn
+    TurnInProgressEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.turn.in_progress
+        event_id:
+          type: string
+        session_id:
+          type: string
+        turn:
+          $ref: "#/components/schemas/Turn"
+      required:
+        - type
+        - event_id
+        - session_id
+        - turn
+    TurnCompletedEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.turn.completed
+        event_id:
+          type: string
+        session_id:
+          type: string
+        turn_id:
+          type: string
+        turn:
+          $ref: "#/components/schemas/Turn"
+        usage:
+          oneOf:
+            - $ref: "#/components/schemas/TokenUsage"
+            - type: "null"
+      required:
+        - type
+        - event_id
+        - session_id
+        - turn_id
+        - turn
+    TurnFailedEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.turn.failed
+        event_id:
+          type: string
+        session_id:
+          type: string
+        turn_id:
+          type: string
+        turn:
+          $ref: "#/components/schemas/Turn"
+        usage:
+          oneOf:
+            - $ref: "#/components/schemas/TokenUsage"
+            - type: "null"
+      required:
+        - type
+        - event_id
+        - session_id
+        - turn_id
+        - turn
+    TurnCancelledEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.turn.cancelled
+        event_id:
+          type: string
+        session_id:
+          type: string
+        turn_id:
+          type: string
+        turn:
+          $ref: "#/components/schemas/Turn"
+        usage:
+          oneOf:
+            - $ref: "#/components/schemas/TokenUsage"
+            - type: "null"
+      required:
+        - type
+        - event_id
+        - session_id
+        - turn_id
+        - turn
+    ItemAddedEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.turn.item.added
+        event_id:
+          type: string
+        session_id:
+          type: string
+        turn_id:
+          type: string
+        item:
+          $ref: "#/components/schemas/SessionItem"
+      required:
+        - type
+        - event_id
+        - session_id
+        - turn_id
+        - item
+    ItemDoneEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.turn.item.done
+        event_id:
+          type: string
+        session_id:
+          type: string
+        turn_id:
+          type: string
+        item:
+          $ref: "#/components/schemas/SessionItem"
+      required:
+        - type
+        - event_id
+        - session_id
+        - turn_id
+        - item
+    OutputTextDeltaEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.turn.output_text.delta
+        event_id:
+          type: string
+        item_id:
+          type: string
+        output_index:
+          type: integer
+        content_index:
+          type: integer
+        session_id:
+          type: string
+        turn_id:
+          type: string
+        delta:
+          type: string
+      required:
+        - type
+        - event_id
+        - item_id
+        - output_index
+        - content_index
+        - session_id
+        - turn_id
+        - delta
+    OutputTextDoneEvent:
+      type: object
+      properties:
+        type:
+          const: agent.session.turn.output_text.done
+        event_id:
+          type: string
+        item_id:
+          type: string
+        output_index:
+          type: integer
+        content_index:
+          type: integer
+        session_id:
+          type: string
+        turn_id:
+          type: string
+        text:
+          type: string
+      required:
+        - type
+        - event_id
+        - item_id
+        - output_index
+        - content_index
+        - session_id
+        - turn_id
+        - text
+    ErrorEvent:
+      type: object
+      properties:
+        type:
+          const: error
+        event_id:
+          type: string
+        session_id:
+          type: string
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+            type:
+              type: string
+            code:
+              type: string
+          required:
+            - message
+      required:
+        - type
+        - event_id
+        - error
+    SessionEvent:
+      description: JSON payload of one SSE frame. The frame `event:` name equals `type`.
+      oneOf:
+        - $ref: "#/components/schemas/SessionCreatedEvent"
+        - $ref: "#/components/schemas/SessionIdleEvent"
+        - $ref: "#/components/schemas/SessionInProgressEvent"
+        - $ref: "#/components/schemas/SessionRequiresActionEvent"
+        - $ref: "#/components/schemas/SessionFailedEvent"
+        - $ref: "#/components/schemas/TurnCreatedEvent"
+        - $ref: "#/components/schemas/TurnInProgressEvent"
+        - $ref: "#/components/schemas/TurnCompletedEvent"
+        - $ref: "#/components/schemas/TurnFailedEvent"
+        - $ref: "#/components/schemas/TurnCancelledEvent"
+        - $ref: "#/components/schemas/ItemAddedEvent"
+        - $ref: "#/components/schemas/ItemDoneEvent"
+        - $ref: "#/components/schemas/OutputTextDeltaEvent"
+        - $ref: "#/components/schemas/OutputTextDoneEvent"
+        - $ref: "#/components/schemas/ErrorEvent"
+      discriminator:
+        propertyName: type

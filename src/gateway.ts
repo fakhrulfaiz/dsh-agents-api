@@ -194,6 +194,13 @@ export class AgentsGateway {
   }
 
   /**
+   * @returns the method and prefix-relative pattern of every route, with `:name` and `*name` captures.
+   */
+  routeTable(): ReadonlyArray<{ method: string; pattern: string }> {
+    return this.routes.map(({ method, pattern }) => ({ method, pattern }))
+  }
+
+  /**
    * Serve requests from `store`. Clears an earlier start failure.
    * @param store - opened store; its rejections answer 503 `store_unavailable`.
    */
