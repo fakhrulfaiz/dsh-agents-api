@@ -14,6 +14,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type { ScheduleService } from '@deepseek-ai/dsh-schedule'
 import type { SkillSummary, SkillViewOptions } from '@deepseek-ai/dsh-skill'
+import type { CommandDescriptor } from '@deepseek-ai/dsh-commands/types'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
@@ -44,6 +45,7 @@ import { mountFunctionTools, validateMountableTools } from './mount-function-too
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
+import { CommandsApi, type CommandTarget } from './commands.ts'
 import { SkillsApi, type SkillTarget } from './skills.ts'
 import { SessionRegistry } from './session-registry.ts'
 import { WireProjector, type ProjectionBase } from './history/projector.ts'
@@ -114,6 +116,10 @@ export interface GatewayOptions {
   skills: () => { list: (options?: SkillViewOptions) => Promise<readonly SkillSummary[]> } | undefined
   /** Milliseconds the skill catalog is cached (`skills.cacheTtlSeconds` * 1000). */
   skillsTtlMs: number
+  /** The Host command registry when the profile provides one, read at call time. */
+  commands: () => { list: (agent: never) => readonly CommandDescriptor[] } | undefined
+  /** Milliseconds the command catalog is cached (`commands.cacheTtlSeconds` * 1000). */
+  commandsTtlMs: number
   artifacts?: ArtifactS3Config
 }
 
@@ -151,6 +157,7 @@ export class AgentsGateway {
   private readonly schedule: () => ScheduleService | undefined
   private readonly artifacts: ArtifactS3Config | undefined
   private readonly routes: Route[]
+  private readonly commandsApi: CommandsApi
   #store: Store | undefined
   #storeError: string | undefined
   /** Owners whose `owners` row this store already holds. */
@@ -192,6 +199,12 @@ export class AgentsGateway {
       ttlMs: options.skillsTtlMs,
       warn: message => this.ctx.logger.warn(message),
     })
+    this.commandsApi = new CommandsApi({
+      commands: options.commands,
+      resolveTarget: (owner, sessionId) => this.resolveCommandTarget(owner, sessionId),
+      ttlMs: options.commandsTtlMs,
+      warn: message => this.ctx.logger.warn(message),
+    })
     this.routes = [
       { method: 'POST', pattern: '/agents', handler: (req, res, _url, _params, p) => this.createAgent(req, res, p.owner) },
       { method: 'GET', pattern: '/agents', handler: (_req, res, url, _params, p) => this.listAgents(res, url, p.owner) },
@@ -228,6 +241,7 @@ export class AgentsGateway {
       { method: 'DELETE', pattern: '/agents/sessions/:session_id', handler: (_req, res, _url, params, p) => this.deleteSession(res, params, p.owner) },
       ...scheduleApi.routes(),
       ...skillsApi.routes(),
+      ...this.commandsApi.routes(),
       { method: 'GET', pattern: '/agents/:agent_id', handler: (_req, res, _url, params, p) => this.getAgent(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/:agent_id', handler: (req, res, _url, params, p) => this.updateAgent(req, res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/:agent_id', handler: (_req, res, _url, params, p) => this.deleteAgent(res, params, p.owner) },
@@ -437,6 +451,31 @@ export class AgentsGateway {
     if (typeof presets?.acquireScope !== 'function') return { scope: undefined, cwd }
     const lease = await presets.acquireScope()
     return { scope: lease.key, cwd, release: () => lease[Symbol.asyncDispose]() }
+  }
+
+  /**
+   * Registry view for the command catalog: the session's live agent, else the
+   * default preset scope. A session that is not live is not resumed to list.
+   * @param owner - authenticated caller.
+   * @param sessionId - requested session.
+   * @returns the view, or `undefined` when the session is not owned by `owner`.
+   */
+  private async resolveCommandTarget(owner: OwnerId, sessionId: string): Promise<CommandTarget | undefined> {
+    const row = await this.store.sessions.get(sessionId, owner)
+    if (!row) return undefined
+    const live = this.ctx.agents.get(SessionId(row.id))
+    if (live !== undefined) return { scope: live }
+    const presets = (this.ctx as { get?: (name: string) => unknown }).get?.call(this.ctx, 'agentPresets') as {
+      acquireScope?: (id?: string) => Promise<{ key: object } & AsyncDisposable>
+    } | undefined
+    if (typeof presets?.acquireScope !== 'function') return { scope: undefined }
+    const lease = await presets.acquireScope()
+    return { scope: lease.key, release: () => lease[Symbol.asyncDispose]() }
+  }
+
+  /** Drop cached command catalogs; called when the command registry or a session's preset changes. */
+  invalidateCommands(): void {
+    this.commandsApi.invalidate()
   }
 
   private async getAgent(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -1026,6 +1065,7 @@ export class AgentsGateway {
    * @param event - committed Session event.
    */
   applySessionEvent(sessionId: string, event: SessionEvent): void {
+    if ((event.type as string) === 'agent-preset/selected') this.commandsApi.invalidate()
     const step = this.sessionRegistry.apply(sessionId, event)
     if (step?.status) this.recordStatus(sessionId, step.status.status, step.status.error)
   }

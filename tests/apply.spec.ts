@@ -64,11 +64,11 @@ const unreachable = { url: 'postgres://agentry@127.0.0.1:1/agentry' }
 describe('apply', () => {
   it('registers the prefix handler and ignores events for unknown sessions', async () => {
     const { ctx, register, listeners, byName, effects } = fakeContext()
-    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60 } })
-    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60 } })
+    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60 }, commands: { cacheTtlSeconds: 60 } })
+    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60 }, commands: { cacheTtlSeconds: 60 } })
     expect(register).toHaveBeenCalledTimes(4)
-    // Per apply: four approval-bridge listeners (two answerers, session/event, session/disposed), the two gateway listeners, and the schedule resolver.
-    expect(listeners).toHaveLength(14)
+    // Per apply: four approval-bridge listeners (two answerers, session/event, session/disposed), the three gateway listeners, and the schedule resolver.
+    expect(listeners).toHaveLength(16)
     expect(byName.has('schedule/resolve-agent')).toBe(true)
     byName.get('session/event')!({ id: 'missing', header: {} }, { type: 'turn/start', seq: 1, time: 1, data: {} })
     await Promise.all(effects)
@@ -76,7 +76,7 @@ describe('apply', () => {
 
   it('keeps /v1 at 503 store_unavailable and logs a named error when the database is unreachable', async () => {
     const { ctx, routes, effects, errors } = fakeContext()
-    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60 } })
+    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60 }, commands: { cacheTtlSeconds: 60 } })
     await Promise.all(effects)
     expect(errors).toEqual([expect.objectContaining({ name: 'StoreStartError' })])
     const response = await call(routes.get('/v1')!, '/v1/agents')

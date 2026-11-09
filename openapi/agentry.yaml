@@ -192,6 +192,68 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /v1/agents/commands:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    get:
+      summary: List slash commands
+      description: >-
+        Host command catalog for the `/` menu, sorted by name. With `session_id` the catalog is that session's: its live agent scope, or the default preset scope when the session is not live (the session is not resumed to list). Without `session_id` the list is empty, because preset-scoped commands need an agent. Empty too when the profile has no command service.
+        Cached in memory per scope (`commands.cacheTtlSeconds`) and dropped when the command registry or a session's preset changes. Send the `ETag` back as `If-None-Match` to receive `304`.
+      tags:
+        - Agents
+      parameters:
+        - name: session_id
+          in: query
+          required: false
+          description: A session owned by the caller; another owner's or an unknown session answers `404`.
+          schema:
+            type: string
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Strong entity tag of the body.
+            Cache-Control:
+              schema:
+                type: string
+              description: "`private, max-age=0, must-revalidate`."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AgentCommand"
+                required:
+                  - object
+                  - data
+        "304":
+          description: The `If-None-Match` tag matches the current catalog. No body.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: The command catalog could not be loaded (`error.code` is `commands_unavailable`) or the store is unavailable (`store_unavailable`). Not cached.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /v1/agents/schedules:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -1686,6 +1748,23 @@ components:
           description: Discovery source, for example `project-agents`, `user-dsh`, or `bundled`.
       required:
         - name
+    AgentCommand:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Lowercase command name without the leading slash.
+        description:
+          type: string
+        input_hint:
+          type: string
+          description: Placeholder for the free-form text after the name; absent when the command takes none.
+        accepts_attachments:
+          type: boolean
+      required:
+        - name
+        - description
+        - accepts_attachments
     Error:
       type: object
       properties:

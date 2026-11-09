@@ -159,6 +159,15 @@ export interface AgentSkill {
   source?: string
 }
 
+/** One entry of `GET /agents/commands`. */
+export interface AgentCommand {
+  name: string
+  description: string
+  /** Placeholder for the free-form text after the name; absent when the command takes none. */
+  input_hint?: string
+  accepts_attachments: boolean
+}
+
 /** Saved or session-local agent configuration. */
 export interface OAIAgent {
   id: string

@@ -105,5 +105,7 @@ export function testGatewayOptions(environments: EnvironmentProvider, query: Fak
     schedule: () => undefined,
     skills: () => undefined,
     skillsTtlMs: 60_000,
+    commands: () => undefined,
+    commandsTtlMs: 60_000,
   }
 }
