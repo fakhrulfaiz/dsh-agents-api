@@ -59,13 +59,14 @@ function call(handler: Handler, url: string): Promise<{ status: number; body: st
 }
 
 const auth = { mode: 'development' as const, devKey: { key: 'k', owner: 'dev', admin: true } }
+const uploadsOff = { maxFileBytes: 1, maxFilesPerMessage: 1, maxMessageBytes: 1, maxStagedBytesPerOwner: 1, stagedTtlMinutes: 1, sweepIntervalMinutes: 1, allowedMediaTypes: ['text/plain'] }
 const unreachable = { url: 'postgres://agentry@127.0.0.1:1/agentry' }
 
 describe('apply', () => {
   it('registers the prefix handler and ignores events for unknown sessions', async () => {
     const { ctx, register, listeners, byName, effects } = fakeContext()
-    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60 }, commands: { cacheTtlSeconds: 60 } })
-    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60 }, commands: { cacheTtlSeconds: 60 } })
+    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60 }, commands: { cacheTtlSeconds: 60 }, uploads: uploadsOff })
+    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60 }, commands: { cacheTtlSeconds: 60 }, uploads: uploadsOff })
     expect(register).toHaveBeenCalledTimes(4)
     // Per apply: four approval-bridge listeners (two answerers, session/event, session/disposed), the three gateway listeners, and the schedule resolver.
     expect(listeners).toHaveLength(16)
@@ -76,7 +77,7 @@ describe('apply', () => {
 
   it('keeps /v1 at 503 store_unavailable and logs a named error when the database is unreachable', async () => {
     const { ctx, routes, effects, errors } = fakeContext()
-    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60 }, commands: { cacheTtlSeconds: 60 } })
+    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60 }, commands: { cacheTtlSeconds: 60 }, uploads: uploadsOff })
     await Promise.all(effects)
     expect(errors).toEqual([expect.objectContaining({ name: 'StoreStartError' })])
     const response = await call(routes.get('/v1')!, '/v1/agents')

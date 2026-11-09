@@ -6,6 +6,7 @@
  * - Host tools catalog: `GET /v1/agents/tools`
  * - Skill catalog: `GET /v1/agents/skills`
  * - Command catalog: `GET /v1/agents/commands`
+ * - Files: `POST /v1/agents/files`, `GET /v1/agents/files/{file_id}/content`, `DELETE /v1/agents/files/{file_id}`
  * - Sessions: `POST|GET /v1/agents/sessions`, `GET|POST|DELETE /v1/agents/sessions/{session_id}`
  * - Events: `POST|GET /v1/agents/sessions/{session_id}/events`
  * - Items: `GET /v1/agents/sessions/{session_id}/items`
@@ -38,6 +39,8 @@ import { createStaticKeyAuthenticator } from './auth/static-key.ts'
 import { installApprovalBridge } from './approvals/approval-bridge.ts'
 import { bridgeChildSessionEvent } from './bridge.ts'
 import { createLocalProvider } from './environment/local.ts'
+import { DEFAULT_ALLOWED_MEDIA_TYPES, stagingDirectory, validateUploads, type UploadsConfig } from './files/config.ts'
+import { createFilesystemFileStore, type FileStore } from './files/file-store.ts'
 import { AgentsGateway } from './gateway.ts'
 import { errorMessage } from './http.ts'
 import { createSessionHistory } from './history/session-history.ts'
@@ -73,6 +76,13 @@ export * from './host-tools.ts'
 export * from './environment-types.ts'
 export * from './runtime-config.ts'
 export * from './artifacts.ts'
+export * from './files/config.ts'
+export * from './files/file-store.ts'
+export * from './files/names.ts'
+export * from './files/sniff.ts'
+export * from './files/content.ts'
+export * from './files/attached.ts'
+export * from './files/api.ts'
 export * from './store/store.ts'
 export { migrate, MigrationError } from './store/migrate.ts'
 export { openPostgresStore } from './store/postgres.ts'
@@ -158,6 +168,11 @@ export interface Config extends RuntimeConfigInput {
     /** Seconds a catalog is cached in memory; 0 disables caching (default 60). Finite and non-negative. */
     cacheTtlSeconds?: number
   }
+  /**
+   * File uploads for chat attachments. Without `dir`, `POST /agents/files` answers 501 `uploads_disabled`.
+   * Set `dir` to a directory outside `workspaces`; startup fails when it cannot be created or written.
+   */
+  uploads?: Partial<UploadsConfig>
   /** API path prefix (default `/v1`). */
   prefix?: string
   /** Agentry's Postgres database. Required. */
@@ -172,10 +187,11 @@ export interface Config extends RuntimeConfigInput {
 }
 
 /** `Config` after validation: `auth`, `prefix`, `database`, and `workspaces` are always present; `codebox` and `dataDir` never are. */
-export type ResolvedConfig = Omit<Config, 'auth' | 'prefix' | 'database' | 'codebox' | 'dataDir' | 'skills' | 'commands'> & {
+export type ResolvedConfig = Omit<Config, 'auth' | 'prefix' | 'database' | 'codebox' | 'dataDir' | 'skills' | 'commands' | 'uploads'> & {
   auth: ResolvedAuthConfig
   skills: { cacheTtlSeconds: number }
   commands: { cacheTtlSeconds: number }
+  uploads: UploadsConfig
   prefix: string
   database: { url: string }
 }
@@ -213,6 +229,24 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
   commands: z.object({
     cacheTtlSeconds: z.number().default(60),
   }).default({ cacheTtlSeconds: 60 }),
+  uploads: z.object({
+    dir: z.string(),
+    maxFileBytes: z.number().default(25 * 1024 * 1024),
+    maxFilesPerMessage: z.number().default(10),
+    maxMessageBytes: z.number().default(50 * 1024 * 1024),
+    maxStagedBytesPerOwner: z.number().default(500 * 1024 * 1024),
+    stagedTtlMinutes: z.number().default(1440),
+    sweepIntervalMinutes: z.number().default(15),
+    allowedMediaTypes: z.array(z.string()).default([...DEFAULT_ALLOWED_MEDIA_TYPES]),
+  }).default({
+    maxFileBytes: 25 * 1024 * 1024,
+    maxFilesPerMessage: 10,
+    maxMessageBytes: 50 * 1024 * 1024,
+    maxStagedBytesPerOwner: 500 * 1024 * 1024,
+    stagedTtlMinutes: 1440,
+    sweepIntervalMinutes: 15,
+    allowedMediaTypes: [...DEFAULT_ALLOWED_MEDIA_TYPES],
+  } as UploadsConfig),
   prefix: z.string().default('/v1'),
   database: z.object({
     url: z.string().required(),
@@ -236,6 +270,7 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
   if (!Number.isFinite(ttl) || ttl < 0) throw new Error('agents-api: "skills.cacheTtlSeconds" must be a finite number >= 0')
   const commandsTtl = (config.commands as { cacheTtlSeconds: number }).cacheTtlSeconds
   if (!Number.isFinite(commandsTtl) || commandsTtl < 0) throw new Error('agents-api: "commands.cacheTtlSeconds" must be a finite number >= 0')
+  validateUploads(config.uploads as UploadsConfig)
   if (config.codebox !== undefined && config.codebox !== null) throw new CodeboxDisabledError('the "codebox" config block')
   if (config.dataDir !== undefined && config.dataDir !== null) {
     throw new Error('agents-api: "dataDir" was removed; agents, environments, and the session index live in Postgres (database.url)')
@@ -326,6 +361,8 @@ export function createAuthenticator(auth: ResolvedAuthConfig, warn: (message: st
 export function apply(ctx: Context, config: ResolvedConfig): void {
   const prefix = config.prefix
   const runtime = resolveRuntimeConfig(config)
+  const stagingDir = stagingDirectory(config.uploads, runtime.workspacesRoot)
+  const staging = stagingDir === undefined ? undefined : createFilesystemFileStore(stagingDir)
   const sessionRegistry = new SessionRegistry()
   const approvals = installApprovalBridge(ctx, {
     claims: agent => sessionRegistry.get(agent.session.id)?.id,
@@ -342,7 +379,11 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     commands: () => ctx.get('commands'),
     commandsTtlMs: config.commands.cacheTtlSeconds * 1000,
     ...(runtime.artifacts === undefined ? {} : { artifacts: runtime.artifacts }),
+    ...(staging === undefined ? {} : { files: { staging, limits: config.uploads } }),
+    attachments: () => ctx.get('attachments'),
   })
+
+  if (staging !== undefined) ctx.effect(() => verifyStaging(staging, stagingDir!), 'agents-api: upload staging')
 
   ctx.effect(() => openStore(ctx, config.database.url, gateway), 'agents-api: postgres store')
 
@@ -387,6 +428,22 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     }),
     `agents-api: ${prefix}`,
   )
+}
+
+/**
+ * Prove the staging directory is writable.
+ * @param staging - staging byte store.
+ * @param dir - its directory, for the message.
+ * @returns the effect disposer (nothing to undo).
+ * @throws Error naming the directory when it cannot be created or written.
+ */
+async function verifyStaging(staging: FileStore, dir: string): Promise<() => void> {
+  try {
+    await staging.verify()
+  } catch (error: unknown) {
+    throw new Error(`agents-api: "uploads.dir" (${dir}) is not writable: ${errorMessage(error)}`, { cause: error })
+  }
+  return () => undefined
 }
 
 /**

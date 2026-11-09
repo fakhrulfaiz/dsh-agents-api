@@ -5,6 +5,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import pg from 'pg'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { ownerId, type OwnerId } from '../src/auth/authenticator.ts'
 import type { EnvironmentRecord, EnvironmentTemplate } from '../src/environment-types.ts'
 import type { SessionConfig } from '../src/types.ts'
@@ -220,7 +221,7 @@ describe.each(harnesses)('Store contract (%s)', (_name, harness) => {
     await store.files.insert(fileRow('file_1', A))
     await store.files.claim(A, ['file_1'], 'sess_1')
     expect(await store.files.listForSession(A, 'sess_1')).toEqual([])
-    const attachment = { kind: 'file' as const, ref: { attachmentId: 'sha256:abc', name: 'notes.txt', bytes: 100 } }
+    const attachment = { kind: 'file' as const, ref: { attachmentId: AttachmentId('abc'), name: 'notes.txt', bytes: 100 } }
     await store.files.markAttached('file_1', B, { attachment, workspacePath: 'uploads/other.txt' })
     expect(await store.files.listForSession(A, 'sess_1')).toEqual([])
     await store.files.markAttached('file_1', A, { attachment, workspacePath: 'uploads/notes.txt' })

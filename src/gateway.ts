@@ -1,9 +1,9 @@
 /**
  * HTTP dispatcher for the OpenAI Agents API.
  *
- * Route order is load-bearing: `/agents/sessions` and `/agents/tools` are
- * matched before `/agents/:agent_id` so those literal segments are never
- * captured as an agent id.
+ * Route order is load-bearing: `/agents/sessions`, `/agents/tools`, `/agents/skills`,
+ * `/agents/commands`, `/agents/schedules`, and `/agents/files` are matched before
+ * `/agents/:agent_id` so those literal segments are never captured as an agent id.
  */
 
 import { mkdir, stat } from 'node:fs/promises'
@@ -46,6 +46,8 @@ import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mc
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
 import { CommandsApi, type CommandTarget } from './commands.ts'
+import { openAttached, type AttachmentsPort } from './files/attached.ts'
+import { FilesApi, uploadedFileSource, type FilesRuntime } from './files/api.ts'
 import { SkillsApi, type SkillTarget } from './skills.ts'
 import { SessionRegistry } from './session-registry.ts'
 import { WireProjector, type ProjectionBase } from './history/projector.ts'
@@ -121,6 +123,10 @@ export interface GatewayOptions {
   /** Milliseconds the command catalog is cached (`commands.cacheTtlSeconds` * 1000). */
   commandsTtlMs: number
   artifacts?: ArtifactS3Config
+  /** Staging bytes and limits for `/agents/files`; absent when `uploads.dir` is not configured (uploads answer 501). */
+  files?: FilesRuntime
+  /** The DSH attachment service when the profile provides one, read at call time. */
+  attachments?: () => AttachmentsPort | undefined
 }
 
 /** A session created by `provisionSession`: projector registered, agent live, index row written, no turn started. */
@@ -205,6 +211,17 @@ export class AgentsGateway {
       ttlMs: options.commandsTtlMs,
       warn: message => this.ctx.logger.warn(message),
     })
+    const attachments = options.attachments ?? (() => undefined)
+    const filesApi = new FilesApi({
+      store: () => this.store,
+      runtime: options.files,
+      sources: [uploadedFileSource({
+        store: () => this.store,
+        staging: options.files?.staging,
+        attached: row => openAttached(row, attachments()),
+      })],
+      warn: message => this.ctx.logger.warn(message),
+    })
     this.routes = [
       { method: 'POST', pattern: '/agents', handler: (req, res, _url, _params, p) => this.createAgent(req, res, p.owner) },
       { method: 'GET', pattern: '/agents', handler: (_req, res, url, _params, p) => this.listAgents(res, url, p.owner) },
@@ -242,6 +259,7 @@ export class AgentsGateway {
       ...scheduleApi.routes(),
       ...skillsApi.routes(),
       ...this.commandsApi.routes(),
+      ...filesApi.routes(),
       { method: 'GET', pattern: '/agents/:agent_id', handler: (_req, res, _url, params, p) => this.getAgent(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/:agent_id', handler: (req, res, _url, params, p) => this.updateAgent(req, res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/:agent_id', handler: (_req, res, _url, params, p) => this.deleteAgent(res, params, p.owner) },

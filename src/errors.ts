@@ -9,7 +9,7 @@ export class AgentsApiRequestError extends Error {
    */
   constructor(
     message: string,
-    readonly status: 400 | 404 | 409 = 400,
+    readonly status: 400 | 404 | 409 | 413 | 415 | 429 | 501 | 503 = 400,
     readonly code = 'invalid_request',
   ) {
     super(message)

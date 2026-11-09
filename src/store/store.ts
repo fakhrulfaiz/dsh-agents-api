@@ -7,6 +7,7 @@
  * the DSH Session log is their source of truth.
  */
 
+import type { FileAttachmentRef, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { OwnerId } from '../auth/authenticator.ts'
 import type { EnvironmentRecord, EnvironmentTemplate } from '../environment-types.ts'
 import type { ListQuery } from '../http.ts'
@@ -91,12 +92,11 @@ export interface SessionListQuery {
 }
 
 /** DSH attachment reference stored on an attached file, as JSON. */
-export interface FileAttachmentSnapshot {
-  /** `image` for a normalized raster stored with `saveImage`; `file` for verbatim bytes. */
-  kind: 'image' | 'file'
-  /** `ImageAttachmentRef` or `FileAttachmentRef` of `@deepseek-ai/dsh-attachment`; `attachmentId` is always present. */
-  ref: { attachmentId: string } & Record<string, unknown>
-}
+export type FileAttachmentSnapshot =
+  /** A normalized raster stored with `saveImage`. */
+  | { kind: 'image'; ref: ImageAttachmentRef }
+  /** Verbatim bytes stored with `saveFileStream`. */
+  | { kind: 'file'; ref: FileAttachmentRef }
 
 /** One uploaded file. `staged` bytes live in the staging `FileStore`; `attached` bytes live in the DSH attachment store. */
 export interface FileRow {

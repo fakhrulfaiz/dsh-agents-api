@@ -20,6 +20,7 @@ tags:
   - name: Sessions
   - name: Subagents
   - name: Schedules
+  - name: Files
   - name: Health
 paths:
   /v1/agents:
@@ -254,6 +255,150 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /v1/agents/files:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    post:
+      summary: Upload a file
+      description: >-
+        Stages one file for the caller, to attach to a message later (`input_image` / `input_file` parts with `file_id`).
+        Send `multipart/form-data` with one `file` part and an optional `purpose` field (`user_data`). The server decides the media type from magic bytes (rasters) or the extension allow-list; the part's `Content-Type` is advisory and a contradicting raster type is refused.
+        Limits come from the `uploads` config (defaults: 25 MiB per file, 500 MiB staged per owner). Staged files that are never sent are removed after `uploads.stagedTtlMinutes`.
+      tags:
+        - Files
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  contentEncoding: base64
+                  contentMediaType: application/octet-stream
+                purpose:
+                  const: user_data
+              required:
+                - file
+      responses:
+        "201":
+          description: Staged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileObject"
+        "400":
+          description: "`invalid_file`: not multipart, no or more than one `file` part, unusable name, empty file, or bad `purpose`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          description: "`file_too_large`: over `uploads.maxFileBytes`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: "`unsupported_media_type`: type not allowed, or the content contradicts the name or declared raster type."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: "`staging_quota_exceeded`: the caller's staged bytes are at `uploads.maxStagedBytesPerOwner`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: "`uploads_disabled`: the server has no `uploads.dir`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/files/{file_id}/content:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/FileId"
+    get:
+      summary: Download a file
+      description: >-
+        Bytes of a staged or attached file of the caller. Another owner's id answers `404`. Rasters are served `inline`; everything else as an `attachment`, with SVG, HTML, and unknown types as `application/octet-stream`.
+        Responses carry `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'`, and `Cache-Control: private, max-age=3600` (ids are immutable).
+      tags:
+        - Files
+      responses:
+        "200":
+          description: The file bytes.
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+            Content-Length:
+              schema:
+                type: integer
+          content:
+            "*/*":
+              schema:
+                type: string
+                contentMediaType: application/octet-stream
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: "`attachments_unavailable` (no DSH attachment service) or `store_unavailable`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/agents/files/{file_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/FileId"
+    delete:
+      summary: Remove a staged file
+      description: Removes a file that has not been sent (a removed chip). A file attached to a message answers `409` `file_attached`.
+      tags:
+        - Files
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  object:
+                    const: file.deleted
+                  deleted:
+                    const: true
+                required:
+                  - id
+                  - object
+                  - deleted
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
   /v1/agents/schedules:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -1603,6 +1748,12 @@ components:
       schema:
         const: agents=v1
       description: Clients should send `agents=v1`.
+    FileId:
+      name: file_id
+      in: path
+      required: true
+      schema:
+        type: string
     AgentId:
       name: agent_id
       in: path
@@ -1748,6 +1899,41 @@ components:
           description: Discovery source, for example `project-agents`, `user-dsh`, or `bundled`.
       required:
         - name
+    FileObject:
+      type: object
+      description: An uploaded file. `status` is `staged` until a message carrying it is sent, then `attached`.
+      properties:
+        id:
+          type: string
+          description: "`file_<random>`."
+        object:
+          const: file
+        bytes:
+          type: integer
+        created_at:
+          type: integer
+          description: Epoch seconds.
+        filename:
+          type: string
+          description: Sanitized leaf name.
+        purpose:
+          const: user_data
+        media_type:
+          type: string
+          description: Server-decided media type.
+        status:
+          enum:
+            - staged
+            - attached
+      required:
+        - id
+        - object
+        - bytes
+        - created_at
+        - filename
+        - purpose
+        - media_type
+        - status
     AgentCommand:
       type: object
       properties:
