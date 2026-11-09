@@ -38,6 +38,16 @@ Read this first in every session. It records decisions already made so they are 
 - Known gaps: subagent turns and items are memory-only (lost on restart); replayed `session` snapshots show the current configuration; no approval channel for sandbox escalation or user questions over the API; session setting updates do not retarget the live agent; Codebox execution depends on a `dockerSandbox` service that no DSH package provides.
 - Wire function tools: rechecked live on DSH master fcc0ad4 (2026-11-08). The `Symbol.for` `TOOL_RUNTIME_SCHEDULER` workaround is no longer needed; a function-tool turn reaches `requires_action`, accepts `tool_result`, and completes. Verdict `resolved` on master and on the pinned tag `dsh-v0.2.2-rc.1`, see `docs/changes/2026-11-08-tool-scheduler-recheck.md`. The smoke script's default model `deepseek/deepseek-v4.1-flash` is rejected by the DeepSeek API; the plugin passes model names through unchanged.
 
+## Backlog (cross-repo, agreed 2026-11-09; each needs its own spec)
+
+Mirrored in `~/code/agentry-web/AGENTS.md`.
+
+1. **Skill catalog endpoint** for the frontend's `/` picker. `/name` invocation already works through `dsh-tool-skill` when the profile mounts it; skills load from `<workspace>/.agents/skills`, `$DSH_HOME/skills`, `~/.agents/skills`, a configured directory, and `skill-office`. Per-owner skills could later come from a custom skill provider (the registry accepts any provider).
+2. **Attachment/image endpoint** so clients can display screenshots and other images from tool results (owner-scoped).
+3. **Browser automation in the profile:** mount `browser-use-playwright-mcp` (or Chrome DevTools / Stagehand) in the Agentry profile when Task 8 resumes.
+4. **Vision-capable model route** for sessions that need screenshot review; DSH withholds images from non-vision routes.
+5. **Cowork endpoints** for the frontend's F3 artifacts panel: deliverables, per-turn workspace changes, non-image uploads.
+
 ## Working rules
 
 - Follow DSH conventions wherever code touches DSH APIs: registrations through `ctx.effect()`, branded ids, explicit config fields instead of hardcoded tunables, loud failure on misconfiguration. Read `../deepseek-harness/AGENTS.md` and its `docs/architecture.md` before relying on a DSH seam.
