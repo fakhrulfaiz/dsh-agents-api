@@ -44,6 +44,7 @@ import { mountFunctionTools, validateMountableTools } from './mount-function-too
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
+import { slashCommandItem } from './items.ts'
 import { COMMAND_NAME, CommandsApi, commandNotFound, type CommandService, type CommandTarget } from './commands.ts'
 import { SkillsApi, type SkillTarget } from './skills.ts'
 import { SessionRegistry } from './session-registry.ts'
@@ -956,11 +957,15 @@ export class AgentsGateway {
         commandNotFound(res, name)
         return
       }
+      const item = this.sessionRegistry.get(sessionId)?.projector.items
+        .find(candidate => candidate.type === 'slash_command' && candidate.command_id === execution.commandId)
+        ?? slashCommandItem({ seq: 0, commandId: execution.commandId, name }, execution.result, null)
       json(res, 200, {
         command_id: execution.commandId,
         name,
         status: execution.result.kind,
         ...(execution.result.text === undefined ? {} : { text: execution.result.text }),
+        item,
       })
     } catch (error: unknown) {
       this.ctx.logger.warn(`agents-api: command "${name}" failed in session ${sessionId}: ${errorMessage(error)}`)

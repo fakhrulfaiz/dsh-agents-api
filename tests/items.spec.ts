@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { itemsFromEvent } from '../src/items.ts'
+import { itemsFromEvent, slashCommandItem } from '../src/items.ts'
 
 function event(type: SessionEvent['type'], data: unknown, seq = 1): SessionEvent {
   return { type, seq, time: seq, data } as SessionEvent
@@ -153,5 +153,16 @@ describe('itemsFromEvent for scheduled prompts', () => {
     const notice = ['[SCHEDULE CHANGE]', 'A scheduled task involving this session was changed outside this session.', 'change: updated'].join('\n')
     expect(itemsFromEvent(scheduled(notice), 'turn_2')).toEqual([])
     expect(itemsFromEvent(scheduled('anything else'), 'turn_2')).toEqual([])
+  })
+})
+
+describe('slashCommandItem', () => {
+  it('maps a success to completed and a blank args string to no args', () => {
+    expect(slashCommandItem({ seq: 4, commandId: 'c', name: 'goal', args: '  ' }, { kind: 'success', text: 'ok' }, 'turn_1'))
+      .toEqual({ id: 'item_cmd_4', type: 'slash_command', command_id: 'c', name: 'goal', status: 'completed', text: 'ok', turn_id: 'turn_1' })
+  })
+  it('maps an error to failed', () => {
+    expect(slashCommandItem({ seq: 4, commandId: 'c', name: 'goal', args: 'edit x' }, { kind: 'error', text: 'no' }, null))
+      .toMatchObject({ status: 'failed', args: 'edit x', turn_id: null })
   })
 })

@@ -12,7 +12,7 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import { textFromContent, toOAIUsage, parseToolArguments } from '../input.ts'
-import { itemsFromEvent } from '../items.ts'
+import { itemsFromEvent, slashCommandItem, type CommandRun } from '../items.ts'
 import type {
   OAIAgent,
   OAIAgentSession,
@@ -92,6 +92,8 @@ export class WireProjector {
   #interaction: OAIRequiredAction[] = []
   readonly #frames: ReplayFrame[] | undefined
   #nextId = 1
+  /** `command/run` records whose `command/done` has not arrived, by command id. */
+  readonly #commandRuns = new Map<string, CommandRun>()
 
   /**
    * @param base - session configuration.
@@ -180,6 +182,13 @@ export class WireProjector {
       return { frames, status: { status: 'in_progress', error: null } }
     }
 
+    if (event.type === 'command/run') {
+      const data = event.data
+      this.#commandRuns.set(data.commandId, { seq: event.seq, commandId: data.commandId, name: data.name, ...(data.args === undefined ? {} : { args: data.args }) })
+      return { frames }
+    }
+    if (event.type === 'command/done') return this.#commandDone(event, at, frames)
+
     const turnId = this.currentTurnId ?? NO_TURN_ID
     const projected = itemsFromEvent(event, turnId)
     const known = projected.length > 0 || event.type === 'turn/end' || event.type === 'assistant/message'
@@ -207,6 +216,19 @@ export class WireProjector {
     }
 
     if (event.type === 'turn/end') return this.#turnEnd(event, at, frames)
+    return { frames }
+  }
+
+  /** Settle a command: one `slash_command` item and one `agent.session.item.done` frame. */
+  #commandDone(event: SessionEvent<'command/done'>, at: number, frames: ReplayFrame[]): WireStep {
+    const data = event.data
+    const run = this.#commandRuns.get(data.commandId)
+    if (run === undefined) return { frames }
+    this.#commandRuns.delete(data.commandId)
+    const item = slashCommandItem(run, data, this.currentTurnId ?? null)
+    this.items.push(item)
+    this.lastActiveAt = at
+    this.#emit(frames, { type: 'agent.session.item.done', session_id: this.base.sessionId, turn_id: item.turn_id, item })
     return { frames }
   }
 

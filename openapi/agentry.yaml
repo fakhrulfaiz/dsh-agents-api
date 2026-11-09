@@ -1845,10 +1845,13 @@ components:
         text:
           type: string
           description: The handler's output or error text.
+        item:
+          $ref: "#/components/schemas/SlashCommandItem"
       required:
         - command_id
         - name
         - status
+        - item
     Error:
       type: object
       properties:
@@ -2979,6 +2982,41 @@ components:
         - type
         - status
         - turn_id
+    SlashCommandItem:
+      description: >-
+        Result of a Host slash command (`POST /v1/agents/sessions/{session_id}/commands/{name}`, or one run from another surface). Human-only output that never reaches the model.
+      type: object
+      properties:
+        id:
+          type: string
+          description: "`item_cmd_<seq of the command's run event>`."
+        type:
+          const: slash_command
+        command_id:
+          type: string
+        name:
+          type: string
+          description: Command name without the leading slash.
+        args:
+          type: string
+          description: Text after the name, when the command recorded it.
+        status:
+          type: string
+          enum: [completed, failed]
+        text:
+          type: string
+        turn_id:
+          type:
+            - string
+            - "null"
+          description: Turn the command ran inside, or `null` when it ran between turns.
+      required:
+        - id
+        - type
+        - command_id
+        - name
+        - status
+        - turn_id
     SessionItem:
       description: Discriminated by `type`. Item ids are deterministic functions of the Session log.
       oneOf:
@@ -2988,6 +3026,7 @@ components:
         - $ref: "#/components/schemas/McpCallItem"
         - $ref: "#/components/schemas/CommandExecutionItem"
         - $ref: "#/components/schemas/ReasoningItem"
+        - $ref: "#/components/schemas/SlashCommandItem"
       discriminator:
         propertyName: type
     Subagent:
@@ -3335,6 +3374,28 @@ components:
         - session_id
         - turn_id
         - item
+    CommandItemDoneEvent:
+      description: A slash command settled. Unlike `agent.session.turn.item.done`, `turn_id` is `null` when the command ran between turns.
+      type: object
+      properties:
+        type:
+          const: agent.session.item.done
+        event_id:
+          type: string
+        session_id:
+          type: string
+        turn_id:
+          type:
+            - string
+            - "null"
+        item:
+          $ref: "#/components/schemas/SlashCommandItem"
+      required:
+        - type
+        - event_id
+        - session_id
+        - turn_id
+        - item
     OutputTextDeltaEvent:
       type: object
       properties:
@@ -3430,6 +3491,7 @@ components:
         - $ref: "#/components/schemas/TurnCancelledEvent"
         - $ref: "#/components/schemas/ItemAddedEvent"
         - $ref: "#/components/schemas/ItemDoneEvent"
+        - $ref: "#/components/schemas/CommandItemDoneEvent"
         - $ref: "#/components/schemas/OutputTextDeltaEvent"
         - $ref: "#/components/schemas/OutputTextDoneEvent"
         - $ref: "#/components/schemas/ErrorEvent"

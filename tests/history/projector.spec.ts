@@ -213,4 +213,52 @@ describe('WireProjector', () => {
     expect(projector.snapshot().metadata).toEqual({ n: '1' })
     expect(projector.created.event).toMatchObject({ session: { metadata: {} } })
   })
+
+  describe('slash commands', () => {
+    const run = (seq: number, commandId: string, extra: object = {}) =>
+      logEvent('command/run', { commandId, name: 'compact', source: { kind: 'user' }, ...extra }, seq)
+    const done = (seq: number, commandId: string, extra: object = { kind: 'success', text: 'Compacted' }) =>
+      logEvent('command/done', { commandId, ...extra }, seq)
+
+    it('pairs run and done into one turn-less item and one item.done frame', () => {
+      const projector = foldSession(base(), [run(1, 'c1', { args: ' now ' }), done(2, 'c1')])
+      expect(projector.items).toEqual([{
+        id: 'item_cmd_1', type: 'slash_command', command_id: 'c1', name: 'compact', args: 'now', status: 'completed', text: 'Compacted', turn_id: null,
+      }])
+      expect(types(projector)).toEqual(['agent.session.created', 'agent.session.item.done'])
+      expect(projector.frames[1]?.event).toMatchObject({ session_id: 'sess_p', turn_id: null, item: { id: 'item_cmd_1' } })
+      expect(projector.status).toBe('idle')
+    })
+
+    it('marks an error result failed and omits absent args and text', () => {
+      const projector = foldSession(base(), [run(1, 'c1'), done(2, 'c1', { kind: 'error', text: 'Usage: /compact' })])
+      expect(projector.items).toEqual([{ id: 'item_cmd_1', type: 'slash_command', command_id: 'c1', name: 'compact', status: 'failed', text: 'Usage: /compact', turn_id: null }])
+      const bare = foldSession(base(), [run(1, 'c1'), done(2, 'c1', { kind: 'success' })])
+      expect(bare.items[0]).not.toHaveProperty('text')
+    })
+
+    it('takes the open turn id when the command ran inside a turn', () => {
+      const projector = foldSession(base(), [logEvent('turn/start', { turn: 1 }, 1), run(2, 'c1'), done(3, 'c1')])
+      expect(projector.items[0]).toMatchObject({ turn_id: 'turn_1' })
+    })
+
+    it('shows nothing for a run without a done, or a done without a run', () => {
+      const projector = foldSession(base(), [run(1, 'c1'), done(2, 'other')])
+      expect(projector.items).toEqual([])
+      expect(types(projector)).toEqual(['agent.session.created'])
+    })
+
+    it('keeps interleaved commands apart by command id', () => {
+      const projector = foldSession(base(), [run(1, 'a'), run(2, 'b', { name: 'goal' }), done(3, 'b', { kind: 'success', text: 'B' }), done(4, 'a', { kind: 'success', text: 'A' })])
+      expect(projector.items.map(item => item.type === 'slash_command' && [item.id, item.name, item.text])).toEqual([['item_cmd_2', 'goal', 'B'], ['item_cmd_1', 'compact', 'A']])
+    })
+
+    it('fold equals incremental application', () => {
+      const events = [run(1, 'c1'), done(2, 'c1'), ...turnLog(3)]
+      const shared = base()
+      const folded = foldSession(shared, events)
+      const live = new WireProjector(shared, true)
+      expect(folded.frames.slice(1)).toEqual(events.flatMap(event => live.apply(event).frames))
+    })
+  })
 })

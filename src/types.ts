@@ -420,6 +420,29 @@ export interface OAICommandExecutionItem {
   turn_id: string
 }
 
+/**
+ * Saved result of a Host slash command (`/compact`, `/goal`, ...). Human-only
+ * output: it never reaches the model. A command that ran between turns has
+ * `turn_id: null`.
+ */
+export interface OAISlashCommandItem {
+  /** `item_cmd_<seq of the command's run event>`. */
+  id: string
+  type: 'slash_command'
+  /** Pairs the command's `command/run` and `command/done` log events. */
+  command_id: string
+  /** Command name without the leading slash. */
+  name: string
+  /** Text after the name, when the command recorded it. */
+  args?: string
+  /** `completed` for a success result, `failed` for an error result. */
+  status: 'completed' | 'failed'
+  /** The handler's output or error text. */
+  text?: string
+  /** Turn the command ran inside, or `null` when it ran between turns. */
+  turn_id: string | null
+}
+
 /** Saved reasoning summary. */
 export interface OAIReasoningItem {
   id: string
@@ -437,6 +460,7 @@ export type OAISessionItem =
   | OAIMcpCallItem
   | OAICommandExecutionItem
   | OAIReasoningItem
+  | OAISlashCommandItem
 
 /** User, assistant, or system input message. */
 export interface OAIInputMessage {
@@ -525,6 +549,7 @@ export type OAISessionEvent =
   | { type: 'agent.session.turn.cancelled'; event_id: string; session_id: string; turn_id: string; turn: OAITurn; usage?: OAITokenUsage | null }
   | { type: 'agent.session.turn.item.added'; event_id: string; session_id: string; turn_id: string; item: OAISessionItem }
   | { type: 'agent.session.turn.item.done'; event_id: string; session_id: string; turn_id: string; item: OAISessionItem }
+  | { type: 'agent.session.item.done'; event_id: string; session_id: string; turn_id: string | null; item: OAISlashCommandItem }
   | { type: 'agent.session.turn.output_text.delta'; event_id: string; item_id: string; output_index: number; content_index: number; session_id: string; turn_id: string; delta: string }
   | { type: 'agent.session.turn.output_text.done'; event_id: string; item_id: string; output_index: number; content_index: number; session_id: string; turn_id: string; text: string }
   | { type: 'error'; event_id: string; session_id?: string; error: { message: string; type?: string; code?: string } }

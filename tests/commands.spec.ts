@@ -236,10 +236,20 @@ describe('POST /v1/agents/sessions/{id}/commands/{name}', () => {
     const { run } = await start(() => [], 60_000, execute)
     const res = await run('sess_live', 'goal', { input: 'edit ship it' })
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ command_id: 'cmd_1', name: 'goal', status: 'success', text: 'Compacted' })
+    expect(await res.json()).toMatchObject({ command_id: 'cmd_1', name: 'goal', status: 'success', text: 'Compacted' })
     expect(execute.mock.calls[0]?.[0]).toBe(LIVE_AGENT)
     expect(execute.mock.calls[0]?.[1]).toBe('/goal edit ship it')
     expect(execute.mock.calls[0]?.[2]).toEqual([])
+  })
+
+  it('answers the projected item for the run, turn-less between turns', async () => {
+    const { run, api } = await start(() => [], 60_000, (_agent, line) => {
+      api.applySessionEvent('sess_live', { type: 'command/run', seq: 7, time: 7000, data: { commandId: 'cmd_1', name: 'compact', source: { kind: 'user' } } } as never)
+      api.applySessionEvent('sess_live', { type: 'command/done', seq: 8, time: 8000, data: { commandId: 'cmd_1', kind: 'success', text: line } } as never)
+      return Promise.resolve(execution('success', line))
+    })
+    const body = await (await run('sess_live', 'compact')).json() as { item: unknown }
+    expect(body.item).toEqual({ id: 'item_cmd_7', type: 'slash_command', command_id: 'cmd_1', name: 'compact', status: 'completed', text: '/compact', turn_id: null })
   })
 
   it('sends a bare line without input', async () => {
