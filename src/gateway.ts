@@ -20,7 +20,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { materializeAgent, updatedAgent } from './agent-records.ts'
 import { mintEventId } from './bridge.ts'
 import type { ApprovalBridge } from './approvals/approval-bridge.ts'
-import { AgentsApiRequestError } from './errors.ts'
+import { AgentsApiRequestError, SessionCreateError } from './errors.ts'
 import {
   badRequest,
   errorMessage,
@@ -103,6 +103,18 @@ export interface GatewayOptions {
   /** Pending approvals and questions; the gateway answers, cancels, and deletes through it. */
   approvals: ApprovalBridge
   artifacts?: ArtifactS3Config
+}
+
+/** A session created by `provisionSession`: projector registered, agent live, index row written, no turn started. */
+export interface ProvisionedSession {
+  /** New session id. */
+  sessionId: SessionId
+  /** Live projector registered in the session registry. */
+  projector: WireProjector
+  /** Projection base the projector was built from. */
+  base: ProjectionBase
+  /** Resolved session agent. */
+  resolved: OAIAgent
 }
 
 /**
@@ -413,19 +425,89 @@ export class AgentsGateway {
 
   private async createSession(req: IncomingMessage, res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
     const body = await readBody(req) as unknown as CreateSessionParams
-    const resolved = await this.resolveSessionAgent(body, res, owner)
-    if (!resolved) return
+    let provisioned: ProvisionedSession
+    try {
+      provisioned = await this.provisionSession(owner, body)
+    } catch (error: unknown) {
+      if (error instanceof AgentsApiRequestError) {
+        writeRequestError(res, error)
+        return
+      }
+      if (error instanceof SessionCreateError) {
+        json(res, 500, { error: { type: 'server_error', message: error.message, code: error.code } })
+        return
+      }
+      throw error
+    }
+    const { sessionId, projector, base } = provisioned
 
+    const oaiSession = projector.snapshot()
+    const stream = body.stream === true
+      || url.searchParams.get('stream') === 'true'
+      || (req.headers.accept ?? '').includes('text/event-stream')
+    const userText = userTextFromInput(body.input)
+    const startTurn = (): void => {
+      void this.triggerTurn(sessionId, userText!).catch((error: unknown) => {
+        this.emitError(sessionId, error)
+      })
+    }
+
+    if (stream) {
+      writeSSEHeaders(res)
+      const unsubscribe = this.sessionRegistry.subscribe(sessionId, (evt, sseId) => {
+        writeEvent(res, evt.type, evt, sseId)
+      })
+      req.on('close', () => {
+        unsubscribe()
+      })
+      writeEvent(res, projector.created.event.type, projector.created.event, projector.created.id)
+      if (userText !== undefined && userText !== '') {
+        startTurn()
+      } else {
+        this.sessionRegistry.emitEphemeral(sessionId, {
+          type: 'agent.session.idle',
+          event_id: mintEventId(),
+          session: oaiSession,
+        })
+      }
+      return
+    }
+
+    if (userText !== undefined && userText !== '') startTurn()
+    json(res, 200, await this.sessionPayload(oaiSession, base))
+  }
+
+  /**
+   * Create an idle session for `owner` without an HTTP request: same agent
+   * resolution, workspace, agent creation, and index row as
+   * `POST /agents/sessions`, and no turn.
+   * @param owner - owner recorded on the session.
+   * @param params - session body; `input` and `stream` do not apply.
+   * @returns the new session resource, status `idle`.
+   * @throws AgentsApiRequestError 400 for an invalid agent, tool, workspace, or reasoning effort, or 404 for an unknown `agent_id`.
+   * @throws SessionCreateError when the agent or the index row cannot be created; nothing stays registered.
+   * @throws StoreUnavailableError when the store is unavailable.
+   */
+  async createIdleSession(owner: OwnerId, params: Omit<CreateSessionParams, 'input' | 'stream'>): Promise<OAIAgentSession> {
+    return (await this.provisionSession(owner, params)).projector.snapshot()
+  }
+
+  /**
+   * Resolve the session agent, prepare its workspace, register its projector,
+   * create its agent, and insert its index row. Starts no turn.
+   * @param owner - owner recorded on the session.
+   * @param body - session body; `input` and `stream` are ignored.
+   * @returns the session id, its live projector and projection base, and the resolved agent.
+   * @throws AgentsApiRequestError 400 for an invalid agent, tool, workspace, or reasoning effort, or 404 for an unknown `agent_id`.
+   * @throws SessionCreateError when `agents.create` or the index insert fails; the projector, handle, and agent are removed first.
+   * @throws StoreUnavailableError when the store is unavailable, after the same cleanup.
+   */
+  private async provisionSession(owner: OwnerId, body: CreateSessionParams): Promise<ProvisionedSession> {
+    const resolved = await this.resolveSessionAgent(body, owner)
     const toolError = validateMountableTools(resolved.tools)
-    if (toolError) {
-      badRequest(res, toolError)
-      return
-    }
+    if (toolError) throw new AgentsApiRequestError(toolError, 400, 'bad_request')
     const hostToolsError = validateHostTools(resolved.host_tools)
-    if (hostToolsError) {
-      badRequest(res, hostToolsError)
-      return
-    }
+    if (hostToolsError) throw new AgentsApiRequestError(hostToolsError, 400, 'bad_request')
 
     const sessionId = SessionId(`sess_${randomUUID().replaceAll('-', '')}`)
     let cwd: string
@@ -435,16 +517,14 @@ export class AgentsGateway {
       cwd = workspace.cwd
       environment = workspace.environment
     } catch (error: unknown) {
-      badRequest(res, errorMessage(error))
-      return
+      throw new AgentsApiRequestError(errorMessage(error), 400, 'bad_request')
     }
     const agentOptions = await this.agentOptionsFor(resolved)
     if (resolved.reasoning?.effort != null) {
       try {
         await this.ctx.llm.resolveCallConfig({ ...agentOptions })
       } catch (error: unknown) {
-        badRequest(res, errorMessage(error))
-        return
+        throw new AgentsApiRequestError(errorMessage(error), 400, 'bad_request')
       }
     }
     const pending = new PendingFunctionCalls()
@@ -504,54 +584,10 @@ export class AgentsGateway {
         }
       }
       if (error instanceof StoreUnavailableError) throw error
-      if (error instanceof AgentsApiMcpConfigError) {
-        badRequest(res, error.message)
-        return
-      }
-      json(res, 500, {
-        error: {
-          type: 'server_error',
-          message: errorMessage(error),
-          code: 'agent_create_failed',
-        },
-      })
-      return
+      if (error instanceof AgentsApiMcpConfigError) throw new AgentsApiRequestError(error.message, 400, 'bad_request')
+      throw new SessionCreateError(error)
     }
-
-    const oaiSession = projector.snapshot()
-    const stream = body.stream === true
-      || url.searchParams.get('stream') === 'true'
-      || (req.headers.accept ?? '').includes('text/event-stream')
-    const userText = userTextFromInput(body.input)
-    const startTurn = (): void => {
-      void this.triggerTurn(sessionId, userText!).catch((error: unknown) => {
-        this.emitError(sessionId, error)
-      })
-    }
-
-    if (stream) {
-      writeSSEHeaders(res)
-      const unsubscribe = this.sessionRegistry.subscribe(sessionId, (evt, sseId) => {
-        writeEvent(res, evt.type, evt, sseId)
-      })
-      req.on('close', () => {
-        unsubscribe()
-      })
-      writeEvent(res, projector.created.event.type, projector.created.event, projector.created.id)
-      if (userText !== undefined && userText !== '') {
-        startTurn()
-      } else {
-        this.sessionRegistry.emitEphemeral(sessionId, {
-          type: 'agent.session.idle',
-          event_id: mintEventId(),
-          session: oaiSession,
-        })
-      }
-      return
-    }
-
-    if (userText !== undefined && userText !== '') startTurn()
-    json(res, 200, await this.sessionPayload(oaiSession, base))
+    return { sessionId, projector, base, resolved }
   }
 
   /** Wire `error` event for a dispatch failure. It is not a Session log fact, so it carries no `id`. */
@@ -994,24 +1030,26 @@ export class AgentsGateway {
     json(res, 200, turn)
   }
 
-  private async resolveSessionAgent(body: CreateSessionParams, res: ServerResponse, owner: OwnerId): Promise<OAIAgent | undefined> {
+  /**
+   * The session agent: the owner's saved agent with `agent` fields overlaid, or the inline `agent`.
+   * @param body - session body.
+   * @param owner - owner whose saved agents are searched.
+   * @returns the resolved agent.
+   * @throws AgentsApiRequestError 404 for an unknown `agent_id`, 400 when neither `agent` nor `agent_id` is usable.
+   */
+  private async resolveSessionAgent(body: CreateSessionParams, owner: OwnerId): Promise<OAIAgent> {
     if (typeof body.agent_id === 'string' && body.agent_id !== '') {
       const saved = await this.store.agents.get(owner, body.agent_id)
-      if (!saved) {
-        notFound(res, `Agent "${body.agent_id}" not found`)
-        return undefined
-      }
+      if (!saved) throw new AgentsApiRequestError(`Agent "${body.agent_id}" not found`, 404, 'resource_not_found')
       return body.agent ? overlayAgent(saved, body.agent) : saved
     }
     if (body.agent) {
       if (typeof body.agent.model !== 'string' || body.agent.model === '') {
-        badRequest(res, 'Field "agent.model" is required when agent_id is omitted')
-        return undefined
+        throw new AgentsApiRequestError('Field "agent.model" is required when agent_id is omitted', 400, 'bad_request')
       }
       return materializeAgent({ ...body.agent, model: body.agent.model })
     }
-    badRequest(res, 'Field "agent" or "agent_id" is required')
-    return undefined
+    throw new AgentsApiRequestError('Field "agent" or "agent_id" is required', 400, 'bad_request')
   }
 
   private async resolveSessionWorkspace(

@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Session provisioning without a request
+
+- Internal: `AgentsGateway.createIdleSession(owner, params)` creates an idle session (agent resolution, workspace, agent, index row, no turn) through the same `provisionSession` path as `POST /agents/sessions`; a failed agent create undoes the registration and writes no row (`SessionCreateError`). Groundwork for scheduled tasks. No wire change.
+
 ## 2026-11-10 — Store: owners of many sessions
 
 - Internal: `Store.sessions.ownersOf(ids)` returns the owner of each existing session id in one query (groundwork for scheduled tasks, see `docs/superpowers/specs/2026-11-09-scheduled-tasks-design.md`). No wire change.

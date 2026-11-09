@@ -16,3 +16,21 @@ export class AgentsApiRequestError extends Error {
     this.name = 'AgentsApiRequestError'
   }
 }
+
+/**
+ * The Host could not create a session's agent or record its index row. Every
+ * partial registration is undone before it is thrown; the Agents API answers
+ * 500 `agent_create_failed`.
+ */
+export class SessionCreateError extends Error {
+  /** Wire error code. */
+  readonly code = 'agent_create_failed'
+
+  /**
+   * @param cause - failure from `agents.create` or the index insert.
+   */
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause })
+    this.name = 'SessionCreateError'
+  }
+}

@@ -17,6 +17,7 @@ import { AgentsGateway } from '../src/gateway.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionRegistry } from '../src/session-registry.ts'
 import { badRequest, json, notFound, readBody } from '../src/http.ts'
+import { AgentsApiRequestError, SessionCreateError } from '../src/errors.ts'
 import { fakeLlm, fakeModel, type FakeModel } from './support/fake-model.ts'
 
 vi.mock('@deepseek-ai/dsh-mcp-client', () => ({
@@ -1075,5 +1076,36 @@ describe('AgentsGateway store and owner scoping', () => {
     const second = await (await fetch(`${root}/v1/agents/sessions?limit=2&after=${first.last_id}`)).json() as { data: Array<{ id: string }>; has_more: boolean }
     expect(second.data.map(row => row.id)).toEqual([ids[0]])
     expect(second.has_more).toBe(false)
+  })
+})
+
+describe('AgentsGateway.createIdleSession', () => {
+  it('inserts an index row for the owner and starts no turn', async () => {
+    const { api, store, agents, registry } = gateway()
+    await store.ensureOwner(TEST_OWNER)
+    const session = await api.createIdleSession(TEST_OWNER, { agent: { model: 'deepseek-chat' }, metadata: { title: 'Daily', source: 'schedule' } })
+    expect(session).toMatchObject({ status: 'idle', metadata: { title: 'Daily', source: 'schedule' } })
+    expect(await store.sessions.get(session.id, TEST_OWNER)).toMatchObject({ ownerId: TEST_OWNER, status: 'idle', model: 'deepseek-chat' })
+    expect(registry.get(session.id)).toBeDefined()
+    const agent = agents.get(session.id)!
+    expect(agent.followup).not.toHaveBeenCalled()
+    expect(agent.steer).not.toHaveBeenCalled()
+  })
+
+  it('throws request errors for an unknown agent_id and a missing agent', async () => {
+    const { api, store } = gateway()
+    await store.ensureOwner(TEST_OWNER)
+    await expect(api.createIdleSession(TEST_OWNER, { agent_id: 'missing' })).rejects.toMatchObject({ status: 404, code: 'resource_not_found' })
+    await expect(api.createIdleSession(TEST_OWNER, {})).rejects.toBeInstanceOf(AgentsApiRequestError)
+  })
+
+  it('rolls back the registration and writes no row when agents.create fails', async () => {
+    const { api, store, registry } = gateway('', { failCreate: true })
+    await store.ensureOwner(TEST_OWNER)
+    const register = vi.spyOn(registry, 'register')
+    await expect(api.createIdleSession(TEST_OWNER, { agent: { model: 'deepseek-chat' } })).rejects.toBeInstanceOf(SessionCreateError)
+    const sessionId = register.mock.calls[0]![0].snapshot().id
+    expect(registry.get(sessionId)).toBeUndefined()
+    expect((await store.sessions.list({ owner: TEST_OWNER, limit: 10 })).data).toEqual([])
   })
 })
