@@ -49,6 +49,7 @@ Mirrored in `~/code/agentry-web/AGENTS.md`.
 3. **Browser automation in the profile:** mount `browser-use-playwright-mcp` (or Chrome DevTools / Stagehand) in the Agentry profile when Task 8 resumes.
 4. **Vision-capable model route** for sessions that need screenshot review; DSH withholds images from non-vision routes.
 5. **Cowork endpoints** for the frontend's F3 artifacts panel: deliverables, per-turn workspace changes, non-image uploads.
+6. **Owner-filtered schedule tools:** `schedule_list/view/edit` see every Host task; filter by owner (upstream DSH change or replacement tool) before multi-user containers.
 
 ## Working rules
 
