@@ -19,6 +19,7 @@ tags:
   - name: Environments
   - name: Sessions
   - name: Subagents
+  - name: Schedules
   - name: Health
 paths:
   /v1/agents:
@@ -128,6 +129,274 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/schedules:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    post:
+      summary: Create a scheduled task
+      tags:
+        - Schedules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateScheduleRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSchedule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          $ref: "#/components/responses/SchedulesUnavailable"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+      description: "Creates a dedicated idle session for the task (metadata `source: schedule`), or targets the caller's own `session_id`, then stores the task with a `session` target. A rejected task deletes the session it created. `timing` is DSH's tagged union; input errors answer 400 with the Host code (`invalid_rule`, `invalid_time_zone`, `not_future`, `frequency_too_high`, `invalid_prompt`, ...)."
+    get:
+      summary: List scheduled tasks
+      tags:
+        - Schedules
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/ScheduleStatus"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/After"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScheduleList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "501":
+          $ref: "#/components/responses/SchedulesUnavailable"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+      description: Only the caller's tasks, active first by next run, then paused and ended newest first. `after` names the last task of the previous page. `order` is ignored.
+  /v1/agents/schedules/{schedule_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/ScheduleId"
+    get:
+      summary: Retrieve a scheduled task
+      tags:
+        - Schedules
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSchedule"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          $ref: "#/components/responses/SchedulesUnavailable"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    post:
+      summary: Update a scheduled task
+      tags:
+        - Schedules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateScheduleRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSchedule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/ScheduleConflict"
+        "501":
+          $ref: "#/components/responses/SchedulesUnavailable"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+      description: Send at least one of `title`, `prompt`, `timing`. `revision` (the `revision` last read) guards against a concurrent edit; a mismatch answers 409 `schedule_conflict`.
+    delete:
+      summary: Delete a scheduled task
+      tags:
+        - Schedules
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  object:
+                    const: agent.schedule.deleted
+                  deleted:
+                    const: true
+                required:
+                  - id
+                  - object
+                  - deleted
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          $ref: "#/components/responses/SchedulesUnavailable"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+      description: Deletes the task and its delivery history. The session it delivered to is kept.
+  /v1/agents/schedules/{schedule_id}/pause:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/ScheduleId"
+    post:
+      summary: Pause a scheduled task
+      tags:
+        - Schedules
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSchedule"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          $ref: "#/components/responses/SchedulesUnavailable"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/schedules/{schedule_id}/resume:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/ScheduleId"
+    post:
+      summary: Resume a scheduled task
+      tags:
+        - Schedules
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSchedule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          $ref: "#/components/responses/SchedulesUnavailable"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+      description: Resumes from the first future occurrence. A task with none answers 400 `not_future`.
+  /v1/agents/schedules/{schedule_id}/run:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/ScheduleId"
+    post:
+      summary: Run a scheduled task now
+      tags:
+        - Schedules
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSchedule"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/ScheduleConflict"
+        "501":
+          $ref: "#/components/responses/SchedulesUnavailable"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+      description: Delivers the prompt to the task's session without moving the next occurrence, and answers after delivery. 409 `schedule_execution_pending` while a run is active, `schedule_target_archived` for an archived session, `session_not_resumable` when the session has no stored setup.
+  /v1/agents/schedules/{schedule_id}/runs:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/ScheduleId"
+    get:
+      summary: List deliveries of a scheduled task
+      tags:
+        - Schedules
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - name: before
+          in: query
+          schema:
+            type: string
+          description: "`next_before` of the previous page."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScheduleRunList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          $ref: "#/components/responses/SchedulesUnavailable"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+      description: "Newest first. Each run is a delivery receipt: the message was durably accepted by the session, not that the model finished."
   /v1/agents/{agent_id}:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -1233,6 +1502,12 @@ components:
       required: true
       schema:
         type: string
+    ScheduleId:
+      name: schedule_id
+      in: path
+      required: true
+      schema:
+        type: string
     TemplateId:
       name: template_id
       in: path
@@ -1307,6 +1582,18 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
     Conflict:
       description: "`session_setting_not_live` (model or effort change not applicable) or `session_not_resumable`."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ScheduleConflict:
+      description: "`schedule_conflict` (stale `revision`), `schedule_execution_pending`, `schedule_target_archived`, or `session_not_resumable`."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    SchedulesUnavailable:
+      description: The profile has no schedule service. `error.code` is `schedules_unavailable`.
       content:
         application/json:
           schema:
@@ -2904,3 +3191,293 @@ components:
         - $ref: "#/components/schemas/ErrorEvent"
       discriminator:
         propertyName: type
+    ScheduleStatus:
+      type: string
+      enum:
+        - active
+        - paused
+        - ended
+    ScheduleLocalAt:
+      type: object
+      properties:
+        date:
+          type: string
+          description: Four-digit ISO calendar date.
+        time:
+          type: string
+        time_zone:
+          type: string
+      required:
+        - date
+        - time
+        - time_zone
+    ScheduleTiming:
+      description: "DSH's tagged union, identical on input and output. Reads echo `at` as the UTC instant and `time` as `HH:mm:ss.SSS`. Time zones are explicit IANA names."
+      oneOf:
+        - type: object
+          properties:
+            kind:
+              const: after
+            after_seconds:
+              type: integer
+              minimum: 1
+          required:
+            - kind
+            - after_seconds
+          additionalProperties: false
+        - type: object
+          properties:
+            kind:
+              const: at
+            at:
+              oneOf:
+                - type: string
+                  description: RFC 3339 instant.
+                - $ref: "#/components/schemas/ScheduleLocalAt"
+          required:
+            - kind
+            - at
+          additionalProperties: false
+        - type: object
+          properties:
+            kind:
+              const: every
+            every_seconds:
+              type: integer
+              minimum: 60
+          required:
+            - kind
+            - every_seconds
+          additionalProperties: false
+        - type: object
+          properties:
+            kind:
+              const: daily
+            daily:
+              type: object
+              properties:
+                time:
+                  type: string
+                time_zone:
+                  type: string
+              required:
+                - time
+                - time_zone
+          required:
+            - kind
+            - daily
+          additionalProperties: false
+        - type: object
+          properties:
+            kind:
+              const: weekly
+            weekly:
+              type: object
+              properties:
+                time:
+                  type: string
+                time_zone:
+                  type: string
+                weekdays:
+                  type: array
+                  description: ISO weekdays, Monday 1 through Sunday 7.
+                  items:
+                    type: integer
+                    minimum: 1
+                    maximum: 7
+              required:
+                - time
+                - time_zone
+                - weekdays
+          required:
+            - kind
+            - weekly
+          additionalProperties: false
+        - type: object
+          properties:
+            kind:
+              const: cron
+            cron:
+              type: object
+              properties:
+                expression:
+                  type: string
+                  description: Five fields, minute hour day-of-month month day-of-week.
+                time_zone:
+                  type: string
+              required:
+                - expression
+                - time_zone
+          required:
+            - kind
+            - cron
+          additionalProperties: false
+        - type: object
+          properties:
+            kind:
+              const: rrule
+            rrule:
+              type: string
+              description: "`DTSTART` line and `RRULE` line."
+          required:
+            - kind
+            - rrule
+          additionalProperties: false
+      discriminator:
+        propertyName: kind
+    AgentScheduleRun:
+      type: object
+      properties:
+        scheduled_at:
+          type: string
+        delivered_at:
+          type: string
+        message_id:
+          type: string
+        session_id:
+          type: string
+      required:
+        - scheduled_at
+        - delivered_at
+        - message_id
+        - session_id
+    AgentSchedule:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          const: agent.schedule
+        title:
+          type: string
+        prompt:
+          type: string
+        timing:
+          $ref: "#/components/schemas/ScheduleTiming"
+        status:
+          $ref: "#/components/schemas/ScheduleStatus"
+        next_run_at:
+          description: UTC instant of the next occurrence; null unless `status` is `active`.
+          oneOf:
+            - type: string
+            - type: "null"
+        created_at:
+          type: string
+        updated_at:
+          type: string
+        revision:
+          type: string
+          description: Equals `updated_at`. Send it back as `revision` on update.
+        session_id:
+          type: string
+          description: Session that receives each run.
+        running:
+          type: boolean
+        last_run:
+          oneOf:
+            - $ref: "#/components/schemas/AgentScheduleRun"
+            - type: "null"
+      required:
+        - id
+        - object
+        - title
+        - prompt
+        - timing
+        - status
+        - next_run_at
+        - created_at
+        - updated_at
+        - revision
+        - session_id
+        - running
+        - last_run
+    ScheduleList:
+      type: object
+      properties:
+        object:
+          const: list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentSchedule"
+        first_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        last_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        has_more:
+          type: boolean
+      required:
+        - object
+        - data
+        - first_id
+        - last_id
+        - has_more
+    ScheduleRunList:
+      type: object
+      properties:
+        object:
+          const: list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentScheduleRun"
+        has_more:
+          type: boolean
+        next_before:
+          oneOf:
+            - type: string
+            - type: "null"
+      required:
+        - object
+        - data
+        - has_more
+        - next_before
+    CreateScheduleRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        prompt:
+          type: string
+          minLength: 1
+        timing:
+          $ref: "#/components/schemas/ScheduleTiming"
+        session_id:
+          type: string
+          description: Own session to deliver to. `agent_id`, `agent`, and `environment` are then ignored.
+        agent_id:
+          type: string
+        agent:
+          description: Inline agent, or overrides of `agent_id`. `model` is required when `agent_id` is omitted.
+          allOf:
+            - $ref: "#/components/schemas/AgentFields"
+            - type: object
+              properties:
+                model:
+                  type: string
+        environment:
+          $ref: "#/components/schemas/EnvironmentConfig"
+      required:
+        - title
+        - prompt
+        - timing
+    UpdateScheduleRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        prompt:
+          type: string
+          minLength: 1
+        timing:
+          $ref: "#/components/schemas/ScheduleTiming"
+        revision:
+          type: string

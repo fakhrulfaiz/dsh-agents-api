@@ -3,6 +3,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { AgentsApiRequestError } from './errors.ts'
 
 /** Cursor options shared by list endpoints. */
 export interface ListQuery {
@@ -194,4 +195,13 @@ export function paginate<T extends { id: string }>(
     last_id: paged[paged.length - 1]?.id ?? null,
     has_more: list.length > opts.limit,
   }
+}
+
+/**
+ * Write an Agents API request error as its JSON body.
+ * @param res - outgoing response.
+ * @param error - the error with its status and code.
+ */
+export function writeRequestError(res: ServerResponse, error: AgentsApiRequestError): void {
+  json(res, error.status, { error: { type: 'invalid_request_error', message: error.message, code: error.code } })
 }

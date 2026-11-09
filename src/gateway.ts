@@ -33,6 +33,7 @@ import {
   paginate,
   readBody,
   routeParam,
+  writeRequestError,
 } from './http.ts'
 import { overlayAgent, parseApprovalResponse, userTextFromInput } from './input.ts'
 import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
@@ -40,6 +41,7 @@ import { mountAgentInstructions } from './mount-instructions.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
+import { ScheduleApi } from './schedules.ts'
 import { SessionRegistry } from './session-registry.ts'
 import { WireProjector, type ProjectionBase } from './history/projector.ts'
 import type { SessionHistory } from './history/session-history.ts'
@@ -81,7 +83,7 @@ import type {
 import { requireAnyRole } from './auth/authenticator.ts'
 import type { AuthResult, Authenticator, OwnerId, Principal } from './auth/authenticator.ts'
 
-interface Route {
+export interface Route {
   method: string
   pattern: string
   handler: (
@@ -170,6 +172,12 @@ export class AgentsGateway {
     this.approvals = options.approvals
     this.schedule = options.schedule
     this.artifacts = options.artifacts
+    const scheduleApi = new ScheduleApi({
+      schedule: options.schedule,
+      store: () => this.store,
+      createSession: (owner, params) => this.createIdleSession(owner, params),
+      discardSession: (owner, sessionId) => this.discardSession(owner, sessionId),
+    })
     this.routes = [
       { method: 'POST', pattern: '/agents', handler: (req, res, _url, _params, p) => this.createAgent(req, res, p.owner) },
       { method: 'GET', pattern: '/agents', handler: (_req, res, url, _params, p) => this.listAgents(res, url, p.owner) },
@@ -204,6 +212,7 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents/sessions/:session_id', handler: (req, res, _url, params, p) => this.updateSession(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id', handler: (_req, res, _url, params, p) => this.getSession(res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/sessions/:session_id', handler: (_req, res, _url, params, p) => this.deleteSession(res, params, p.owner) },
+      ...scheduleApi.routes(),
       { method: 'GET', pattern: '/agents/:agent_id', handler: (_req, res, _url, params, p) => this.getAgent(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/:agent_id', handler: (req, res, _url, params, p) => this.updateAgent(req, res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/:agent_id', handler: (_req, res, _url, params, p) => this.deleteAgent(res, params, p.owner) },
@@ -728,6 +737,20 @@ export class AgentsGateway {
       json(res, 500, { error: { type: 'server_error', message: errorMessage(error), code: 'schedule_cleanup_failed' } })
       return
     }
+    await this.discardSession(owner, sessionId)
+    json(res, 200, { id: sessionId, object: 'agent.session.deleted', deleted: true })
+  }
+
+  /**
+   * Remove a session's environments, index row, pending approvals and function
+   * calls, registry entry, and live agent without an HTTP request. Scheduled
+   * tasks that deliver to it are not touched; `DELETE /agents/sessions/{id}`
+   * removes them first.
+   * @param owner - owner of the session.
+   * @param sessionId - session to remove.
+   * @throws StoreUnavailableError when the store is unavailable.
+   */
+  async discardSession(owner: OwnerId, sessionId: string): Promise<void> {
     await this.deleteEnvironmentsForSession(owner, sessionId)
     await this.store.sessions.delete(sessionId, owner)
     this.approvals.cancelAll(sessionId)
@@ -744,7 +767,6 @@ export class AgentsGateway {
         // Host teardown already ran; the Agents API session is unregistered.
       }
     }
-    json(res, 200, { id: sessionId, object: 'agent.session.deleted', deleted: true })
   }
 
   /**
@@ -1596,15 +1618,6 @@ export class AgentsGateway {
       }
     })
   }
-}
-
-/**
- * Write an Agents API request error as its JSON body.
- * @param res - outgoing response.
- * @param error - the error with its status and code.
- */
-function writeRequestError(res: ServerResponse, error: AgentsApiRequestError): void {
-  json(res, error.status, { error: { type: 'invalid_request_error', message: error.message, code: error.code } })
 }
 
 /**

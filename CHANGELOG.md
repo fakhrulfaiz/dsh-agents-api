@@ -3,6 +3,12 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Scheduled task routes
+
+- New `/v1/agents/schedules` routes over the Host schedule service: create, list (`status`, `limit`, `after`), retrieve, update (`revision` guard), delete, pause, resume, run now, and `runs` (delivery history). Every route is owner scoped: a task belongs to the owner of its target session, else of the first involved session in the index, and another owner's task answers 404 `schedule_not_found` before any mutating call. A profile without the schedule service answers 501 `schedules_unavailable`.
+- `POST /agents/schedules` creates a dedicated idle session for the task (or targets the caller's own `session_id`); a task the Host rejects deletes the session it created. New `AgentsGateway.discardSession(owner, id)` is the teardown `DELETE /agents/sessions/{id}` uses, without the HTTP layer.
+- Host input errors answer 400 with the Host code; `schedule_conflict`, `schedule_execution_pending`, and `schedule_target_archived` answer 409. The routes are in `openapi/agentry.yaml`.
+
 ## 2026-11-10 — Scheduled deliveries resume Agentry sessions
 
 - Scheduled-task deliveries (`schedule/resolve-agent`) to a session in the index resume it with its Agentry setup (instructions, function and MCP tools, host-tool mask) and register it for SSE and status writes; other session ids keep the Host resolver. A session without a stored setup fails the delivery with `session_not_resumable`. New `AgentsGateway.agentFor(sessionId)`.

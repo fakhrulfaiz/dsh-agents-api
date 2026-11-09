@@ -508,3 +508,84 @@ export type OAISessionEvent =
   | { type: 'agent.session.turn.output_text.delta'; event_id: string; item_id: string; output_index: number; content_index: number; session_id: string; turn_id: string; delta: string }
   | { type: 'agent.session.turn.output_text.done'; event_id: string; item_id: string; output_index: number; content_index: number; session_id: string; turn_id: string; text: string }
   | { type: 'error'; event_id: string; session_id?: string; error: { message: string; type?: string; code?: string } }
+
+/** Local calendar time of an `at` timing. */
+export interface ScheduleLocalAt {
+  /** Four-digit ISO calendar date. */
+  date: string
+  /** Local wall-clock time `HH:mm[:ss[.SSS]]`. */
+  time: string
+  /** Explicit UTC or IANA zone. */
+  time_zone: string
+}
+
+/**
+ * When a scheduled task runs: DSH's tagged union, one member per `kind`. Input
+ * and output use the same members; reads echo `at` as the UTC instant and
+ * normalize `time` to `HH:mm:ss.SSS`.
+ */
+export type ScheduleTiming =
+  | { kind: 'after'; after_seconds: number }
+  | { kind: 'at'; at: string | ScheduleLocalAt }
+  | { kind: 'every'; every_seconds: number }
+  | { kind: 'daily'; daily: { time: string; time_zone: string } }
+  | { kind: 'weekly'; weekly: { time: string; time_zone: string; weekdays: number[] } }
+  | { kind: 'cron'; cron: { expression: string; time_zone: string } }
+  | { kind: 'rrule'; rrule: string }
+
+/** Lifecycle of a scheduled task. */
+export type ScheduleStatus = 'active' | 'paused' | 'ended'
+
+/** One delivery of a scheduled task into its session: an inbox receipt, not model completion. */
+export interface AgentScheduleRun {
+  /** UTC instant of the occurrence that was delivered. */
+  scheduled_at: string
+  /** UTC instant the session durably accepted the message. */
+  delivered_at: string
+  /** Id of the delivered message. */
+  message_id: string
+  /** Session that accepted the message. */
+  session_id: string
+}
+
+/** A scheduled task (`/v1/agents/schedules`). */
+export interface AgentSchedule {
+  id: string
+  object: 'agent.schedule'
+  title: string
+  prompt: string
+  timing: ScheduleTiming
+  status: ScheduleStatus
+  /** UTC instant of the next occurrence; `null` unless `status` is `active`. */
+  next_run_at: string | null
+  created_at: string
+  updated_at: string
+  /** Equals `updated_at`; send it back as `revision` to detect a concurrent edit. */
+  revision: string
+  /** Session that receives each run. */
+  session_id: string
+  /** A run is queued or executing in the session. */
+  running: boolean
+  last_run: AgentScheduleRun | null
+}
+
+/** Body of `POST /v1/agents/schedules`. */
+export interface CreateScheduleParams {
+  title: string
+  prompt: string
+  timing: ScheduleTiming
+  /** Existing own session to deliver to; `agent_id`, `agent`, and `environment` are then ignored. */
+  session_id?: string
+  agent_id?: string
+  agent?: SessionAgentParams
+  environment?: OAIEnvironmentConfig
+}
+
+/** Body of `POST /v1/agents/schedules/{schedule_id}`. */
+export interface UpdateScheduleParams {
+  title?: string
+  prompt?: string
+  timing?: ScheduleTiming
+  /** `revision` the client read; a different stored value answers 409 `schedule_conflict`. */
+  revision?: string
+}
