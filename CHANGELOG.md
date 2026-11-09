@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — ask_user_question stays untimed
+
+- Checked live: with the shipped presets (`tool-ask-user` in blocking mode) a session that calls `ask_user_question` reaches `requires_action` with a `user_question` approval, so no bridge or profile change was needed. `tests/ask-user-mode.spec.ts` pins the default `mode: legacy`; a `mode: timed` row would bypass the bridge (`wait.timed` requests are delegated), so `timeout: -1` is not a fix for it.
+
 ## 2026-11-10 — Office skills in the profile
 
 - `cordis.patch.yml` mounts `@deepseek-ai/dsh-skill-office` as a host-level row, so the seven Office skills (`office`, `office-docx`, `office-pptx`, `office-xlsx`, `office-render`, `office-recalculate`, `office-export-pdf`) appear in `GET /v1/agents/skills` and load by name through every preset's `tool-skill`.
