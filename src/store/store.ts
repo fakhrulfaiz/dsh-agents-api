@@ -134,6 +134,11 @@ export interface Store {
      * @returns rows of every owner whose status is `in_progress` or `requires_action`, oldest first.
      */
     listResumable(): Promise<SessionIndexRow[]>
+    /**
+     * @param ids - session ids to look up.
+     * @returns owner by id for the ids that exist; unknown ids are absent. An empty input returns an empty map.
+     */
+    ownersOf(ids: readonly string[]): Promise<Map<string, OwnerId>>
   }
   /**
    * Append one admin audit row stamped with the current time.
@@ -245,6 +250,7 @@ export function guardStore(store: Store): Store {
       delete: guard(sessions.delete.bind(sessions)),
       list: guard(sessions.list.bind(sessions)),
       listResumable: guard(sessions.listResumable.bind(sessions)),
+      ownersOf: guard(sessions.ownersOf.bind(sessions)),
     },
     audit: guard(store.audit.bind(store)),
     close: () => store.close(),

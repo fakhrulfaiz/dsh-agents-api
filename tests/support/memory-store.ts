@@ -108,6 +108,15 @@ export class MemoryStore implements Store {
         .sort((a, b) => newestFirst(b, a))
         .map(cloneRow)
     },
+    ownersOf: async ids => {
+      this.#check()
+      const owners = new Map<string, OwnerId>()
+      for (const id of ids) {
+        const row = this.#sessions.get(id)
+        if (row !== undefined) owners.set(id, row.ownerId)
+      }
+      return owners
+    },
   }
 
   /** Audit rows written so far. */

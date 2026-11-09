@@ -258,6 +258,16 @@ export async function openPostgresStore(url: string, onIdleClientError?: (error:
         )
         return result.rows.map(sessionFromDb)
       },
+      async ownersOf(ids) {
+        const owners = new Map<string, OwnerId>()
+        if (ids.length === 0) return owners
+        const result = await pool.query<{ id: string; owner_id: string }>(
+          'select id, owner_id from sessions where id = any($1::text[])',
+          [ids],
+        )
+        for (const row of result.rows) owners.set(row.id, row.owner_id as OwnerId)
+        return owners
+      },
     },
     async audit(entry) {
       await pool.query(

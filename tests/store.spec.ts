@@ -11,7 +11,7 @@ import type { SessionConfig } from '../src/types.ts'
 import { materializeAgent } from '../src/agent-records.ts'
 import { migrate } from '../src/store/migrate.ts'
 import { openPostgresStore } from '../src/store/postgres.ts'
-import { InvalidCursorError, type SessionIndexRow, type Store } from '../src/store/store.ts'
+import { guardStore, InvalidCursorError, StoreUnavailableError, type SessionIndexRow, type Store } from '../src/store/store.ts'
 import { MemoryStore } from './support/memory-store.ts'
 import { startPostgres, type TestPostgres } from './support/postgres.ts'
 
@@ -254,6 +254,16 @@ describe.each(harnesses)('Store contract (%s)', (_name, harness) => {
     expect((await store.sessions.listResumable()).map(row => row.id)).toEqual(['sess_in_progress', 'sess_requires_action'])
   })
 
+  it('ownersOf returns the owner of existing ids only, and an empty map for no ids', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    await store.ensureOwner(B)
+    await store.sessions.insert(sessionRow('sess_o1', A))
+    await store.sessions.insert(sessionRow('sess_o2', B))
+    expect(await store.sessions.ownersOf(['sess_o1', 'sess_missing', 'sess_o2'])).toEqual(new Map([['sess_o1', A], ['sess_o2', B]]))
+    expect(await store.sessions.ownersOf([])).toEqual(new Map())
+  })
+
   it('accepts audit entries', async () => {
     const store = await harness.fresh()
     await store.ensureOwner(A)
@@ -313,5 +323,13 @@ describe('Postgres migrations', () => {
     const store = await openPostgresStore(url)
     await store.close()
     await expect(store.ensureOwner(A)).rejects.toThrow()
+  })
+})
+
+describe('guardStore', () => {
+  it('turns an ownersOf failure into StoreUnavailableError', async () => {
+    const store = new MemoryStore()
+    store.sessions.ownersOf = () => Promise.reject(new Error('connection refused'))
+    await expect(guardStore(store).sessions.ownersOf(['sess_1'])).rejects.toBeInstanceOf(StoreUnavailableError)
   })
 })

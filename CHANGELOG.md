@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Store: owners of many sessions
+
+- Internal: `Store.sessions.ownersOf(ids)` returns the owner of each existing session id in one query (groundwork for scheduled tasks, see `docs/superpowers/specs/2026-11-09-scheduled-tasks-design.md`). No wire change.
+
 ## 2026-11-09 — OpenAPI contract
 
 - Added `openapi/agentry.yaml` (OpenAPI 3.1) covering every `/v1` route and `/health` with request and response schemas derived from `src/types.ts`, the error envelope, bearer security, and the SSE stream (`text/event-stream`, deterministic `id:`, ephemeral frames, `Last-Event-ID`). Clients generate types with `openapi-typescript`.
