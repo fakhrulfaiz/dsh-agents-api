@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   overlayAgent,
+  parseApprovalResponse,
   parseToolArguments,
   textFromContent,
   toOAIUsage,
@@ -92,5 +93,19 @@ describe('toOAIUsage', () => {
       total_tokens: 10,
     })
     expect(toOAIUsage({ inputTokens: 1, outputTokens: 2 })?.total_tokens).toBe(3)
+  })
+})
+
+describe('parseApprovalResponse', () => {
+  it('accepts the three decisions and keeps a payload', () => {
+    expect(parseApprovalResponse({ type: 'agent.session.input.approval_response', id: 'a', decision: 'answer', payload: { selected: ['x'] } }))
+      .toEqual({ type: 'agent.session.input.approval_response', id: 'a', decision: 'answer', payload: { selected: ['x'] } })
+    expect(parseApprovalResponse({ id: 'a', decision: 'deny' })).toEqual({ type: 'agent.session.input.approval_response', id: 'a', decision: 'deny' })
+  })
+
+  it('rejects a missing id and an unknown decision with 400', () => {
+    expect(() => parseApprovalResponse({ decision: 'approve' })).toThrow(expect.objectContaining({ status: 400, code: 'invalid_approval_response' }))
+    expect(() => parseApprovalResponse({ id: '', decision: 'approve' })).toThrow(expect.objectContaining({ code: 'invalid_approval_response' }))
+    expect(() => parseApprovalResponse({ id: 'a', decision: 'allow' })).toThrow(expect.objectContaining({ code: 'invalid_approval_response' }))
   })
 })

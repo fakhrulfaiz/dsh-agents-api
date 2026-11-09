@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { materializeAgent } from '../src/agent-records.ts'
 import { WireProjector, type ProjectionBase } from '../src/history/projector.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
+import type { OAIRequiredAction } from '../src/types.ts'
 import { logEvent } from './support/fake-session-query.ts'
 
 function base(id: string): ProjectionBase {
@@ -91,5 +92,63 @@ describe('SessionRegistry', () => {
     expect(registry.delete('sess_1')).toBe(true)
     expect(registry.get('sess_1')).toBeUndefined()
     expect(registry.listSubagents('sess_1')).toEqual([])
+  })
+
+  describe('pending approvals', () => {
+    const approval: OAIRequiredAction = { type: 'approval', id: 'appr-1', kind: 'tool_approval', prompt: 'Approve bash', options: ['approve', 'deny'] }
+    const withFunctionTool = (): SessionRegistry => {
+      const registry = new SessionRegistry()
+      const seed = base('sess_1')
+      registry.register(new WireProjector({ ...seed, agent: { ...seed.agent, tools: [{ type: 'function', name: 'lookup' }] } }, false), '/w')
+      return registry
+    }
+
+    it('shows them in required_actions, moves the status, and sends ephemeral frames', () => {
+      const registry = registryWith('sess_1')
+      const seen: Array<[string, number | undefined]> = []
+      registry.subscribe('sess_1', (evt, id) => { seen.push([evt.type, id]) })
+      expect(registry.setInteractionActions('missing', [approval])).toBeUndefined()
+      registry.apply('sess_1', logEvent('turn/start', { turn: 1 }, 1))
+      seen.length = 0
+
+      expect(registry.setInteractionActions('sess_1', [approval])).toEqual({ status: 'requires_action', error: null })
+      expect(registry.getOAISession('sess_1')).toMatchObject({ status: 'requires_action', required_actions: [approval] })
+      expect(registry.setInteractionActions('sess_1', [approval, { ...approval, id: 'appr-2' }])).toBeUndefined()
+      expect(registry.setInteractionActions('sess_1', [])).toEqual({ status: 'in_progress', error: null })
+      expect(registry.getOAISession('sess_1')).toMatchObject({ status: 'in_progress', required_actions: [] })
+      expect(seen).toEqual([
+        ['agent.session.requires_action', undefined],
+        ['agent.session.requires_action', undefined],
+        ['agent.session.in_progress', undefined],
+      ])
+    })
+
+    it('does not change the status or move frame ids when no turn is open', () => {
+      const registry = registryWith('sess_1')
+      expect(registry.setInteractionActions('sess_1', [approval])).toBeUndefined()
+      expect(registry.getOAISession('sess_1')?.status).toBe('idle')
+      expect(registry.setInteractionActions('sess_1', [])).toBeUndefined()
+    })
+
+    it('keeps requires_action while a function call and an approval overlap', () => {
+      const registry = withFunctionTool()
+      registry.apply('sess_1', logEvent('turn/start', { turn: 1 }, 1))
+      registry.apply('sess_1', logEvent('tool/call', { callId: 'c', name: 'lookup', arguments: '{}' }, 2))
+      registry.setInteractionActions('sess_1', [approval])
+      const result = logEvent('tool/result', {
+        message: { source: { kind: 'tool', callId: 'c' }, content: [{ type: 'tool-result', toolCallId: 'c', content: [{ type: 'text', text: 'ok' }] }] },
+      }, 3)
+      expect(registry.apply('sess_1', result)?.status).toBeUndefined()
+      expect(registry.getOAISession('sess_1')).toMatchObject({ status: 'requires_action', required_actions: [approval] })
+      expect(registry.setInteractionActions('sess_1', [])).toEqual({ status: 'in_progress', error: null })
+    })
+
+    it('drops them when the turn ends', () => {
+      const registry = registryWith('sess_1')
+      registry.apply('sess_1', logEvent('turn/start', { turn: 1 }, 1))
+      registry.setInteractionActions('sess_1', [approval])
+      registry.apply('sess_1', logEvent('turn/end', {}, 2))
+      expect(registry.getOAISession('sess_1')).toMatchObject({ status: 'idle', required_actions: [] })
+    })
   })
 })

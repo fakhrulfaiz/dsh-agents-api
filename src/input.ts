@@ -3,7 +3,8 @@
  */
 
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
-import type { OAIAgent, OAIInputMessage, OAITokenUsage, SessionAgentParams } from './types.ts'
+import { AgentsApiRequestError } from './errors.ts'
+import type { OAIAgent, OAIApprovalResponseInputEvent, OAIInputMessage, OAITokenUsage, SessionAgentParams } from './types.ts'
 
 /**
  * Flatten create-session or input-event payloads into one user prompt.
@@ -113,4 +114,25 @@ export function toOAIUsage(usage: TokenUsage | undefined): OAITokenUsage | null 
     output_tokens_details: { reasoning_tokens: reasoning },
     total_tokens: usage.totalTokens ?? input + output,
   }
+}
+
+/** Decisions accepted on `agent.session.input.approval_response`. */
+const APPROVAL_DECISIONS: readonly OAIApprovalResponseInputEvent['decision'][] = ['approve', 'deny', 'answer']
+
+/**
+ * Validate an `agent.session.input.approval_response` event.
+ * @param raw - the event as received.
+ * @returns the typed event.
+ * @throws AgentsApiRequestError 400 `invalid_approval_response` when `id` is not a non-empty string or `decision` is not `approve`, `deny`, or `answer`.
+ */
+export function parseApprovalResponse(raw: object): OAIApprovalResponseInputEvent {
+  const { id, decision, payload } = raw as Record<string, unknown>
+  if (typeof id !== 'string' || id === '') {
+    throw new AgentsApiRequestError('approval_response needs a non-empty "id"', 400, 'invalid_approval_response')
+  }
+  const known = APPROVAL_DECISIONS.find(candidate => candidate === decision)
+  if (known === undefined) {
+    throw new AgentsApiRequestError('approval_response "decision" must be "approve", "deny", or "answer"', 400, 'invalid_approval_response')
+  }
+  return { type: 'agent.session.input.approval_response', id, decision: known, ...(payload === undefined ? {} : { payload }) }
 }

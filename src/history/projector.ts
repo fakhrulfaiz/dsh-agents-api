@@ -88,6 +88,8 @@ export class WireProjector {
   lastActiveAt: number
   currentTurnId: string | undefined
   readonly #required: Array<Extract<OAIRequiredAction, { type: 'function_call' }>> = []
+  /** Pending approvals and questions: live-only, never in the Session log, so a fold of the log never holds any. */
+  #interaction: OAIRequiredAction[] = []
   readonly #frames: ReplayFrame[] | undefined
   #nextId = 1
 
@@ -126,9 +128,27 @@ export class WireProjector {
       vault_ids: this.base.vaultIds,
       agent: this.base.agent,
       environment: this.base.environment,
-      required_actions: [...this.#required],
+      required_actions: [...this.#required, ...this.#interaction],
       usage: this.usage,
     }
+  }
+
+  /**
+   * Replace the pending approvals and questions shown next to the parked
+   * function calls, and recompute the status. Nothing is emitted: the caller
+   * decides which ephemeral frame to send.
+   * @param actions - all pending `approval` actions.
+   * @returns the new status when it changed, else `undefined`.
+   */
+  setInteractionActions(actions: readonly OAIRequiredAction[]): StatusChange | undefined {
+    this.#interaction = [...actions]
+    const before = this.status
+    if (this.#required.length + this.#interaction.length > 0) {
+      if (this.currentTurnId !== undefined) this.status = 'requires_action'
+    } else if (this.status === 'requires_action' && this.currentTurnId !== undefined) {
+      this.status = 'in_progress'
+    }
+    return this.status === before ? undefined : { status: this.status, error: this.error }
   }
 
   /** Names of the agent's wire function tools, which park for a client result. */
@@ -179,7 +199,7 @@ export class WireProjector {
       const index = output === undefined ? -1 : this.#required.findIndex(action => action.call_id === output.call_id)
       if (index === -1) return { frames }
       this.#required.splice(index, 1)
-      if (this.#required.length === 0 && this.currentTurnId !== undefined && this.status === 'requires_action') {
+      if (this.#required.length === 0 && this.#interaction.length === 0 && this.currentTurnId !== undefined && this.status === 'requires_action') {
         this.status = 'in_progress'
         return { frames, status: { status: 'in_progress', error: this.error } }
       }
@@ -253,6 +273,7 @@ export class WireProjector {
     const kind = data.reason?.kind
     const turn = this.turns.find(row => row.id === this.currentTurnId)
     this.#required.length = 0
+    this.#interaction = []
     if (turn !== undefined) {
       turn.completed_at = at
       if (usage !== null) {

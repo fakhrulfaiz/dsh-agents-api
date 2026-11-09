@@ -23,6 +23,9 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-user-approval'
+import type {} from '@deepseek-ai/dsh-user-questions'
 import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
@@ -30,6 +33,7 @@ import { firstThen, type Authenticator } from './auth/authenticator.ts'
 import { API_KEY_HASH_PATTERN, createApiKeyAuthenticator, type ApiKeyEntry } from './auth/api-keys.ts'
 import { createKeycloakAuthenticator } from './auth/keycloak.ts'
 import { createStaticKeyAuthenticator } from './auth/static-key.ts'
+import { installApprovalBridge } from './approvals/approval-bridge.ts'
 import { bridgeChildSessionEvent } from './bridge.ts'
 import { createLocalProvider } from './environment/local.ts'
 import { AgentsGateway } from './gateway.ts'
@@ -53,6 +57,7 @@ export * from './bridge.ts'
 export * from './history/projector.ts'
 export * from './history/session-history.ts'
 export * from './recovery.ts'
+export * from './approvals/approval-bridge.ts'
 export * from './session-resource.ts'
 export * from './gateway.ts'
 export * from './errors.ts'
@@ -80,7 +85,7 @@ export { createApiKeyAuthenticator, generateApiKey, hashApiKey, type ApiKeyEntry
 export const name = 'agents-api'
 
 /** Host services required before routes can register. */
-export const inject = ['webServer', 'sessions', 'agents', 'agentDefaultModel', 'tools', 'sessionQuery', 'sessionPersistence']
+export const inject = ['webServer', 'sessions', 'agents', 'agentDefaultModel', 'tools', 'sessionQuery', 'sessionPersistence', 'llm', 'approval', 'userQuestions']
 
 /** Resolved Keycloak settings: every field present after `Config` defaults. */
 export interface ResolvedKeycloakConfig {
@@ -294,10 +299,15 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   const prefix = config.prefix
   const runtime = resolveRuntimeConfig(config)
   const sessionRegistry = new SessionRegistry()
+  const approvals = installApprovalBridge(ctx, {
+    claims: agent => sessionRegistry.get(agent.session.id)?.id,
+    onChange: (sessionId, actions) => gateway.setInteractionActions(sessionId, actions),
+  })
   const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth, message => ctx.logger.warn(message)), prefix, undefined, sessionRegistry, {
     environments: createLocalProvider(runtime.workspacesRoot),
     workspacesRoot: runtime.workspacesRoot,
     history: createSessionHistory(ctx.sessionQuery),
+    approvals,
     ...(runtime.artifacts === undefined ? {} : { artifacts: runtime.artifacts }),
   })
 

@@ -3,6 +3,7 @@
  * lazy resume, status writes, and index-only listing.
  */
 
+import { fakeLlm, fakeModel } from './support/fake-model.ts'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -70,6 +71,7 @@ async function startProcess(store: MemoryStore, query: FakeSessionQuery, failRes
       }),
       steer: vi.fn(),
       cancel: vi.fn(),
+      model: fakeModel(),
     }
     agents.set(sessionId, agent)
     const systemPrompt = { section: () => undefined }
@@ -96,6 +98,7 @@ async function startProcess(store: MemoryStore, query: FakeSessionQuery, failRes
     },
     sessions: { get: (id: string) => agents.has(id) ? { id } : undefined },
     tools: { schemas: () => [] },
+    llm: fakeLlm(),
     agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }) },
     logger,
   } as unknown as Context

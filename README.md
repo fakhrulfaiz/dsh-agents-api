@@ -46,6 +46,13 @@ pnpm dsh plugin --profile web remove @agentry/api
 
 Point the OpenAI client `baseURL` at the web server plus the prefix (for example `http://127.0.0.1:3080/v1`). Session create takes the Host provider from `ctx.agentDefaultModel.currentSelection()` and the model id from the Agents API `agent.model`.
 
+### Profile requirements for approvals and live settings
+
+- `ctx.approval` (`dsh-user-approval`), `ctx.userQuestions` (`dsh-user-questions`), and `ctx.llm` are injected; the plugin fails to load without them. `dsh-base` mounts all three.
+- Mount `tool-ask-user` (mode `legacy`, its default) so the model can ask the user questions; `dsh-base` does not mount it. Timed mode is not supported.
+- Keep the approval policy `ask` (the `dsh-base` default). `DSH_PERMISSION_MODE=danger-full-access` sets `never`, which rejects approvals before they reach the API.
+- Approvals and questions are answered with `agent.session.input.approval_response`; see [docs/http-api.md](docs/http-api.md#approvals-and-user-questions). Subagent approvals fail closed.
+
 ### Develop in this repository
 
 This repository builds and tests on its own against a pinned DSH checkout. `dsh.pin` names the DSH tag. Set up the pinned tree once (the artifact build takes several minutes), then work here:
@@ -153,9 +160,9 @@ Paths other than `/health` sit under the configured `prefix` (default `/v1`). Se
 | `POST` | `/agents/sessions` | Create a session from an inline `agent` and/or a saved `agent_id`. `stream: true` returns SSE. |
 | `GET` | `/agents/sessions` | List the caller's sessions, newest first (`limit`, `after`; `order` is ignored). |
 | `GET` | `/agents/sessions/{session_id}` | Read one session. |
-| `POST` | `/agents/sessions/{session_id}` | Update `model`, `reasoning.effort`, `service_tier`, or `metadata`. |
+| `POST` | `/agents/sessions/{session_id}` | Update `model`, `reasoning.effort`, `service_tier`, or `metadata`. `model` and `reasoning.effort` retarget the running agent from its next model step; 409 `session_setting_not_live` when it cannot. |
 | `DELETE` | `/agents/sessions/{session_id}` | Delete the session and any environments whose `session_id` is that session. |
-| `POST` | `/agents/sessions/{session_id}/events` | Submit follow-up, cancel, or tool-result input. |
+| `POST` | `/agents/sessions/{session_id}/events` | Submit follow-up (optionally with `model` / `reasoning.effort`), cancel, tool-result, or approval-response input. |
 | `GET` | `/agents/sessions/{session_id}/events` | SSE stream. `Last-Event-ID` replays newer events from the Session log, then continues live. |
 | `GET` | `/agents/sessions/{session_id}/items` | List the parent session's saved items. Items that belong to a subagent are omitted. |
 | `GET` | `/agents/sessions/{session_id}/turns` | List the parent session's turns. |

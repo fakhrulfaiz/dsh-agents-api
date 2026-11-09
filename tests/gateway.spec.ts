@@ -17,6 +17,7 @@ import { AgentsGateway } from '../src/gateway.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionRegistry } from '../src/session-registry.ts'
 import { badRequest, json, notFound, readBody } from '../src/http.ts'
+import { fakeLlm, fakeModel, type FakeModel } from './support/fake-model.ts'
 
 vi.mock('@deepseek-ai/dsh-mcp-client', () => ({
   Config: (input: Record<string, unknown>) => ({ ...input }),
@@ -46,6 +47,7 @@ interface FakeAgent {
   followup: ReturnType<typeof vi.fn>
   steer: ReturnType<typeof vi.fn>
   cancel: ReturnType<typeof vi.fn>
+  model: FakeModel
 }
 
 function fakeContext(options?: {
@@ -93,6 +95,7 @@ function fakeContext(options?: {
           }),
           steer: vi.fn(),
           cancel: vi.fn(),
+          model: fakeModel(),
         }
         agents.set(sessionId, agent)
         sessions.set(sessionId, { id: sessionId })
@@ -138,6 +141,7 @@ function fakeContext(options?: {
     sessions: {
       get: (id: string) => sessions.get(id),
     },
+    llm: fakeLlm(),
     logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn() },
     tools: {
       schemas: () => [

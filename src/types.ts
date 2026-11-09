@@ -6,6 +6,7 @@
  * Reference: https://developers.openai.com/api/docs/guides/agents-api
  */
 
+import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import type {
   OAILocalEnvironment,
   OAISandboxEnvironment,
@@ -242,6 +243,21 @@ export type OAIRequiredAction =
     type: 'environment_connection'
     environment_id: string
   }
+  | {
+    type: 'approval'
+    /** Answer with `agent.session.input.approval_response` and this id. */
+    id: string
+    kind: 'sandbox_escalation' | 'user_question' | 'tool_approval'
+    prompt: string
+    /** `["approve","deny"]` for an approval; the option labels of a single question, else `[]`. */
+    options: string[]
+    /** Tool the request is about (approvals only). */
+    tool_name?: string
+    /** Tool call the request is about, when known (approvals only). */
+    call_id?: string
+    /** Full question items for a multi-question request (`user_question` only). */
+    questions?: AskUserQuestionItem[]
+  }
 
 /** Durable session resource. */
 export interface OAIAgentSession {
@@ -412,6 +428,20 @@ export interface OAIInputMessage {
 export interface OAISendMessageInputEvent {
   type: 'agent.session.input.message'
   input: OAIInputMessage[]
+  /** Switch the session model from the next model step, before this message is queued. */
+  model?: string
+  /** Switch the reasoning effort from the next model step; with `model` omitted the current model is kept. */
+  reasoning?: { effort?: ReasoningEffort | null }
+}
+
+/** Answer a pending `approval` required action. */
+export interface OAIApprovalResponseInputEvent {
+  type: 'agent.session.input.approval_response'
+  /** `id` of the `approval` required action. */
+  id: string
+  decision: 'approve' | 'deny' | 'answer'
+  /** For `answer`: `{ selected, custom? }` (one question) or `{ answers: [{ id, selected, custom? }] }`. */
+  payload?: unknown
 }
 
 /** Cancel the active turn. */
@@ -454,6 +484,7 @@ export type OAIInputEvent =
   | OAICancelInputEvent
   | OAIFunctionCallOutputInputEvent
   | OAIToolResultInputEvent
+  | OAIApprovalResponseInputEvent
 
 /** Body for `POST /v1/agents/sessions/{session_id}/events`. */
 export interface PostSessionEventsBody {

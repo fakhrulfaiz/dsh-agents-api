@@ -10,11 +10,14 @@ function fakeContext(): {
   register: ReturnType<typeof vi.fn>
   routes: Map<string, Handler>
   listeners: Array<(session: { id: string; header?: { origin?: string; parentSession?: string } }, event: { type: string; seq: number; time: number; data: unknown }) => void>
+  /** Listeners by event name; the last registration wins. */
+  byName: Map<string, ReturnType<typeof fakeContext>['listeners'][number]>
   effects: Array<Promise<unknown>>
   errors: unknown[]
 } {
   const listeners: ReturnType<typeof fakeContext>['listeners'] = []
   const routes = new Map<string, Handler>()
+  const byName: ReturnType<typeof fakeContext>['byName'] = new Map()
   const effects: Array<Promise<unknown>> = []
   const errors: unknown[] = []
   const register = vi.fn((route: { path: string; handler: Handler }) => {
@@ -22,8 +25,9 @@ function fakeContext(): {
     return () => {}
   })
   const ctx = {
-    on(_name: string, fn: (typeof listeners)[number]) {
+    on(name: string, fn: (typeof listeners)[number]) {
       listeners.push(fn)
+      byName.set(name, fn)
       return () => {}
     },
     effect(fn: () => unknown) {
@@ -34,7 +38,7 @@ function fakeContext(): {
     logger: { error: (error: unknown) => errors.push(error), warn: () => undefined },
     webServer: { register },
   }
-  return { ctx: ctx as unknown as Context, register, routes, listeners, effects, errors }
+  return { ctx: ctx as unknown as Context, register, routes, listeners, byName, effects, errors }
 }
 
 function call(handler: Handler, url: string): Promise<{ status: number; body: string }> {
@@ -59,12 +63,13 @@ const unreachable = { url: 'postgres://agentry@127.0.0.1:1/agentry' }
 
 describe('apply', () => {
   it('registers the prefix handler and ignores events for unknown sessions', async () => {
-    const { ctx, register, listeners, effects } = fakeContext()
+    const { ctx, register, listeners, byName, effects } = fakeContext()
     apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable })
     apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable })
     expect(register).toHaveBeenCalledTimes(4)
-    expect(listeners).toHaveLength(4)
-    listeners[0]!({ id: 'missing', header: {} }, { type: 'turn/start', seq: 1, time: 1, data: {} })
+    // Per apply: four approval-bridge listeners (two answerers, session/event, session/disposed) and the two gateway listeners.
+    expect(listeners).toHaveLength(12)
+    byName.get('session/event')!({ id: 'missing', header: {} }, { type: 'turn/start', seq: 1, time: 1, data: {} })
     await Promise.all(effects)
   })
 

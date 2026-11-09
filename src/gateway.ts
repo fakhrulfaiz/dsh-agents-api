@@ -14,10 +14,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { materializeAgent, updatedAgent } from './agent-records.ts'
 import { mintEventId } from './bridge.ts'
+import type { ApprovalBridge } from './approvals/approval-bridge.ts'
 import { AgentsApiRequestError } from './errors.ts'
 import {
   badRequest,
@@ -31,7 +33,7 @@ import {
   readBody,
   routeParam,
 } from './http.ts'
-import { overlayAgent, userTextFromInput } from './input.ts'
+import { overlayAgent, parseApprovalResponse, userTextFromInput } from './input.ts'
 import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
 import { mountAgentInstructions } from './mount-instructions.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
@@ -66,6 +68,7 @@ import type {
   OAIFunctionTool,
   OAIHostToolsConfig,
   OAIInputEvent,
+  OAIRequiredAction,
   OAISessionEvent,
   OAIToolResultInputEvent,
   SessionConfig,
@@ -97,6 +100,8 @@ export interface GatewayOptions {
   workspacesRoot: string
   /** Reads items, turns, and wire events from the Session log. */
   history: SessionHistory
+  /** Pending approvals and questions; the gateway answers, cancels, and deletes through it. */
+  approvals: ApprovalBridge
   artifacts?: ArtifactS3Config
 }
 
@@ -118,6 +123,7 @@ export class AgentsGateway {
   private readonly environments: EnvironmentProvider
   private readonly workspacesRoot: string
   private readonly history: SessionHistory
+  private readonly approvals: ApprovalBridge
   private readonly artifacts: ArtifactS3Config | undefined
   private readonly routes: Route[]
   #store: Store | undefined
@@ -145,6 +151,7 @@ export class AgentsGateway {
     this.environments = options.environments
     this.workspacesRoot = options.workspacesRoot
     this.history = options.history
+    this.approvals = options.approvals
     this.artifacts = options.artifacts
     this.routes = [
       { method: 'POST', pattern: '/agents', handler: (req, res, _url, _params, p) => this.createAgent(req, res, p.owner) },
@@ -424,6 +431,15 @@ export class AgentsGateway {
       badRequest(res, errorMessage(error))
       return
     }
+    const agentOptions = await this.agentOptionsFor(resolved)
+    if (resolved.reasoning?.effort != null) {
+      try {
+        await this.ctx.llm.resolveCallConfig({ ...agentOptions })
+      } catch (error: unknown) {
+        badRequest(res, errorMessage(error))
+        return
+      }
+    }
     const pending = new PendingFunctionCalls()
     const config: SessionConfig = {
       agent: resolved,
@@ -448,7 +464,7 @@ export class AgentsGateway {
       const handle = await this.ctx.agents.create({
         sessionId,
         meta: { cwd },
-        agentOptions: await this.agentOptionsFor(resolved),
+        agentOptions,
         setup: this.buildAgentSetup(resolved, pending, cwd),
       })
       this.handles.set(sessionId, handle)
@@ -583,21 +599,76 @@ export class AgentsGateway {
     const row = await this.requireSession(res, owner, sessionId)
     if (!row) return
     const body = await readBody(req) as unknown as UpdateSessionParams
-    const next = applySessionUpdate(configOf(row), body)
-    if (next === undefined) {
-      badRequest(res, 'Field "agent.model" cannot be null or empty')
-      return
+    try {
+      const session = await this.changeSettings(row, owner, body)
+      if (session === undefined) {
+        notFound(res, `Session "${sessionId}" not found`)
+        return
+      }
+      json(res, 200, session)
+    } catch (error: unknown) {
+      if (!(error instanceof AgentsApiRequestError)) throw error
+      writeRequestError(res, error)
     }
-    const updated = await this.store.sessions.update(sessionId, owner, {
+  }
+
+  /**
+   * Apply a settings update: validate, retarget the live agent when the model
+   * or reasoning effort changed, then write the index, then the live projection.
+   * @param row - the session's index row.
+   * @param owner - calling principal.
+   * @param body - update body.
+   * @returns the updated resource, or `undefined` when the row disappeared.
+   * @throws AgentsApiRequestError 400 when `agent.model` would be empty, or 409 `session_setting_not_live` when the live agent cannot take the change; nothing is stored then.
+   */
+  private async changeSettings(row: SessionIndexRow, owner: OwnerId, body: UpdateSessionParams): Promise<OAIAgentSession | undefined> {
+    const current = configOf(row)
+    const next = applySessionUpdate(current, body)
+    if (next === undefined) {
+      throw new AgentsApiRequestError('Field "agent.model" cannot be null or empty', 400, 'bad_request')
+    }
+    if (next.agent.model !== current.agent.model || next.agent.reasoning?.effort !== current.agent.reasoning?.effort) {
+      await this.applyLiveModel(row, next.agent)
+    }
+    const updated = await this.store.sessions.update(row.id, owner, {
       model: next.agent.model,
       reasoningEffort: next.agent.reasoning?.effort ?? null,
       body: next,
     })
-    if (!updated) {
-      notFound(res, `Session "${sessionId}" not found`)
-      return
+    if (!updated) return undefined
+    return this.sessionRegistry.applyConfig(row.id, next) ?? sessionFromRow(updated)
+  }
+
+  /**
+   * Point the session's live agent at a model and reasoning effort. The agent
+   * applies the complete selection from its next model step; a step already
+   * running is unchanged.
+   * @param row - the session's index row, used to resume the agent when it is not live.
+   * @param agent - the agent configuration after the update.
+   * @throws AgentsApiRequestError 409 `session_setting_not_live` when no live agent exists, the route or effort is unsupported, or the selection cannot be recorded.
+   */
+  private async applyLiveModel(row: SessionIndexRow, agent: OAIAgent): Promise<void> {
+    const notLive = (message: string): AgentsApiRequestError => new AgentsApiRequestError(message, 409, 'session_setting_not_live')
+    try {
+      await this.ensureLive(row)
+    } catch (error: unknown) {
+      throw notLive(`Session "${row.id}" is not running and could not be resumed: ${errorMessage(error)}`)
     }
-    json(res, 200, this.sessionRegistry.applyConfig(sessionId, next) ?? sessionFromRow(updated))
+    const live = this.ctx.agents.get(SessionId(row.id))
+    if (live === undefined) throw notLive(`Session "${row.id}" has no running agent`)
+    const provider = await providerForModel(
+      this.ctx,
+      agent.model,
+      live.model.current()?.provider ?? this.ctx.agentDefaultModel.currentSelection().provider,
+    )
+    const effort = agent.reasoning?.effort
+    const route = { provider, model: agent.model, ...(effort == null ? {} : { reasoningEffort: ReasoningEffortId(effort) }) }
+    try {
+      await this.ctx.llm.resolveCallConfig(route)
+      live.model.select(route)
+    } catch (error: unknown) {
+      throw notLive(errorMessage(error))
+    }
   }
 
   private async deleteSession(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -605,6 +676,7 @@ export class AgentsGateway {
     if (!await this.requireSession(res, owner, sessionId)) return
     await this.deleteEnvironmentsForSession(owner, sessionId)
     await this.store.sessions.delete(sessionId, owner)
+    this.approvals.cancelAll(sessionId)
     this.pendingBySession.get(sessionId)?.rejectAll(new Error(`Session "${sessionId}" was deleted`))
     this.pendingBySession.delete(sessionId)
     this.sessionRegistry.delete(sessionId)
@@ -645,17 +717,11 @@ export class AgentsGateway {
     const input = await readBody(req)
     try {
       for (const evt of inputEventsFromBody(input)) {
-        await this.applyInputEvent(sessionId, evt)
+        await this.applyInputEvent(owner, row, evt)
       }
     } catch (error: unknown) {
       if (error instanceof AgentsApiRequestError) {
-        json(res, error.status, {
-          error: {
-            type: 'invalid_request_error',
-            message: error.message,
-            code: error.code,
-          },
-        })
+        writeRequestError(res, error)
         return
       }
       json(res, 500, {
@@ -763,6 +829,17 @@ export class AgentsGateway {
   }
 
   /**
+   * Show the session's pending approvals and questions, and write the status
+   * that follows from them.
+   * @param sessionId - session id.
+   * @param actions - all pending `approval` actions.
+   */
+  setInteractionActions(sessionId: string, actions: readonly OAIRequiredAction[]): void {
+    const change = this.sessionRegistry.setInteractionActions(sessionId, actions)
+    if (change !== undefined) this.recordStatus(sessionId, change.status, change.error)
+  }
+
+  /**
    * Resolves when every status write requested so far has finished.
    * @returns a promise that never rejects.
    */
@@ -789,10 +866,12 @@ export class AgentsGateway {
   private async agentOptionsFor(agent: OAIAgent): Promise<{ provider: string; model: string; reasoningEffort?: NonNullable<ReturnType<Context['agentDefaultModel']['currentSelection']>['reasoningEffort']> }> {
     const defaults = this.ctx.agentDefaultModel.currentSelection()
     const provider = await providerForModel(this.ctx, agent.model, defaults.provider)
+    const effort = agent.reasoning?.effort
+    const reasoningEffort = effort == null ? defaults.reasoningEffort : ReasoningEffortId(effort)
     return {
       provider,
       model: agent.model,
-      ...(defaults.reasoningEffort === undefined ? {} : { reasoningEffort: defaults.reasoningEffort }),
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     }
   }
 
@@ -949,14 +1028,33 @@ export class AgentsGateway {
     return dir
   }
 
-  private async applyInputEvent(sessionId: string, evt: OAIInputEvent): Promise<void> {
+  private async applyInputEvent(owner: OwnerId, row: SessionIndexRow, evt: OAIInputEvent): Promise<void> {
+    const sessionId = row.id
     switch (evt.type) {
       case 'agent.session.input.message': {
         const text = userTextFromInput(evt.input)
+        if (evt.model != null || evt.reasoning?.effort != null) {
+          const fresh = await this.store.sessions.get(sessionId, owner)
+          if (fresh === undefined) throw new AgentsApiRequestError(`Session "${sessionId}" not found`, 404, 'resource_not_found')
+          await this.changeSettings(fresh, owner, {
+            agent: {
+              ...(evt.model == null ? {} : { model: evt.model }),
+              ...(evt.reasoning?.effort == null ? {} : { reasoning: { effort: evt.reasoning.effort } }),
+            },
+          })
+        }
         if (text) await this.triggerTurn(SessionId(sessionId), text)
         return
       }
+      case 'agent.session.input.approval_response': {
+        const response = parseApprovalResponse(evt)
+        if (this.approvals.answer(sessionId, response.id, response.decision, response.payload) === 'not_found') {
+          throw new AgentsApiRequestError(`No pending approval "${response.id}"`, 404, 'approval_not_found')
+        }
+        return
+      }
       case 'agent.session.input.cancel': {
+        this.approvals.cancelAll(sessionId)
         this.pendingBySession.get(sessionId)?.rejectAll(new Error('turn cancelled'))
         const agent = this.ctx.agents.get(SessionId(sessionId))
         agent?.cancel({ kind: 'user' }, { keepInbox: true })
@@ -1392,6 +1490,15 @@ export class AgentsGateway {
       }
     })
   }
+}
+
+/**
+ * Write an Agents API request error as its JSON body.
+ * @param res - outgoing response.
+ * @param error - the error with its status and code.
+ */
+function writeRequestError(res: ServerResponse, error: AgentsApiRequestError): void {
+  json(res, error.status, { error: { type: 'invalid_request_error', message: error.message, code: error.code } })
 }
 
 /**

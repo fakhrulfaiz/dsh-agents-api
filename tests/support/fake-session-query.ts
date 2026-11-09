@@ -12,6 +12,7 @@ import { SessionId, interruptedTurnClosers, type SessionEvent, type SessionHeade
 import { SessionQueryError, type SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import type { EnvironmentProvider } from '../../src/environment/provider.ts'
 import type { GatewayOptions } from '../../src/gateway.ts'
+import type { ApprovalBridge } from '../../src/approvals/approval-bridge.ts'
 import { createSessionHistory } from '../../src/history/session-history.ts'
 
 /**
@@ -81,16 +82,25 @@ export class FakeSessionQuery implements Pick<SessionQueryEngine, 'readSession'>
   }
 }
 
+/** Bridge with nothing ever pending, for tests that do not exercise approvals. */
+export const inertApprovals: ApprovalBridge = {
+  pending: () => [],
+  answer: () => 'not_found',
+  cancelAll: () => undefined,
+}
+
 /**
  * Gateway options for tests.
  * @param environments - environment provider.
  * @param query - fake session log; a new one when omitted.
+ * @param approvals - pending approvals; none when omitted.
  * @returns options with a temp workspaces root and history over `query`.
  */
-export function testGatewayOptions(environments: EnvironmentProvider, query: FakeSessionQuery = new FakeSessionQuery()): GatewayOptions {
+export function testGatewayOptions(environments: EnvironmentProvider, query: FakeSessionQuery = new FakeSessionQuery(), approvals: ApprovalBridge = inertApprovals): GatewayOptions {
   return {
     environments,
     workspacesRoot: join(tmpdir(), 'agentry-gateway-spec-workspaces'),
     history: createSessionHistory(query),
+    approvals,
   }
 }

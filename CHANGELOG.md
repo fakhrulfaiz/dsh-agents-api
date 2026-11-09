@@ -3,6 +3,16 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-09 — Approvals over the API, live model and effort
+
+- Sandbox escalations, tool approvals, and `ask_user_question` calls become `approval` entries in `required_actions` (`kind` `sandbox_escalation`, `tool_approval`, or `user_question`; optional `tool_name`, `call_id`, `questions`). The session shows `requires_action` and answers with `agent.session.input.approval_response` (`approve`, `deny`, or `answer` with `payload`). Unknown, answered, or cancelled ids answer 404 `approval_not_found`; mismatched decisions answer 400.
+- `agent.session.requires_action` and `agent.session.in_progress` for approvals are ephemeral events (no `id:`, not replayed). Cancel, session delete, the end of the turn, and a restart drop pending approvals.
+- `POST /agents/sessions/{id}` now retargets the live agent for `agent.model` and `agent.reasoning.effort` (applies from the next model step). `agent.session.input.message` accepts optional `model` and `reasoning.effort`. An unsupported or non-live change answers 409 `session_setting_not_live` and stores nothing.
+- Fix: `reasoning.effort` on session create is passed to the agent (it was stored but ignored); an unsupported effort answers 400.
+- Limits: subagent approvals fail closed; timed questions are unsupported.
+- Breaking: the profile must provide `llm`, `approval`, and `userQuestions`; peer dependencies `dsh-user-approval` and `dsh-user-questions` added. `GatewayOptions.approvals` is required.
+- See [docs/changes/2026-11-09-approvals.md](docs/changes/2026-11-09-approvals.md).
+
 ## 2026-11-08 — History from the Session log, restart recovery, SSE replay
 
 - Items, turns, and `GET .../events` replay are derived from the DSH Session log (`dsh-session-query`) instead of memory, so they survive restarts. Live and replay share one projector (`WireProjector`): turn ids are `turn_<log position>`, event ids are `evt_<session>_<n>`, and each frame's SSE `id:` is its position in the derived sequence. `Last-Event-ID` replays exactly the missed events, then continues live.

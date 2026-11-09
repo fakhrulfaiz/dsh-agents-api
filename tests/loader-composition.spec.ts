@@ -109,6 +109,9 @@ async function boot(databaseUrl: string, query: FakeSessionQuery, factory: 'pres
         currentSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }),
       } as never)
       ctx.provide('tools', { schemas: () => [] } as never)
+      ctx.provide('llm', {} as never)
+      ctx.provide('approval', {} as never)
+      ctx.provide('userQuestions', {} as never)
     },
   }
   context = new Context()

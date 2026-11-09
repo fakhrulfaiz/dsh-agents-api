@@ -8,11 +8,13 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { mintEventId } from './bridge.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { applySessionUpdate } from './session-resource.ts'
-import type { StoredSessionItem, WireProjector, WireStep } from './history/projector.ts'
+import type { StatusChange, StoredSessionItem, WireProjector, WireStep } from './history/projector.ts'
 import type {
   OAIAgentSession,
+  OAIRequiredAction,
   OAISessionEvent,
   OAITurn,
   SessionConfig,
@@ -180,6 +182,27 @@ export class SessionRegistry {
    */
   emitEphemeral(sessionId: string, event: OAISessionEvent): void {
     this.fanOut(sessionId, event, undefined)
+  }
+
+  /**
+   * Show the pending approvals and questions of a live session and tell its
+   * subscribers. The frame is ephemeral (`agent.session.requires_action` while
+   * anything is pending, `agent.session.in_progress` when the last one cleared),
+   * so replay and later frame ids are unaffected.
+   * @param sessionId - session id.
+   * @param actions - all pending `approval` actions.
+   * @returns the status change, or `undefined` when the status stayed or the session is not live here.
+   */
+  setInteractionActions(sessionId: string, actions: readonly OAIRequiredAction[]): StatusChange | undefined {
+    const projector = this.sessions.get(sessionId)?.projector
+    if (!projector) return undefined
+    const change = projector.setInteractionActions(actions)
+    if (projector.status === 'requires_action') {
+      this.emitEphemeral(sessionId, { type: 'agent.session.requires_action', event_id: mintEventId(), session: projector.snapshot() })
+    } else if (change !== undefined) {
+      this.emitEphemeral(sessionId, { type: 'agent.session.in_progress', event_id: mintEventId(), session: projector.snapshot() })
+    }
+    return change
   }
 
   /**

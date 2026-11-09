@@ -49,6 +49,8 @@
     "@deepseek-ai/dsh-session-query": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-system-prompt": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-user-approval": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-user-questions": ">=0.2.2-rc.1",
     "@deepseek-ai/schemastery": ">=0.0.1-0"
   },
   "peerDependenciesMeta": {

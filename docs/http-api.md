@@ -50,6 +50,65 @@ While the Postgres store is opening, after it failed to start, or when a databas
 
 `POST /agents/sessions` accepts `input` as a string or `input_text` messages and `stream: true` for SSE on the create response. Follow-ups use `agent.session.input.message`. Steering vs a new turn follows Host idle vs in-progress. Cancel uses `agent.session.input.cancel`.
 
+### Changing model and reasoning effort
+
+`POST /agents/sessions/{id}` and `agent.session.input.message` change the live agent. The change applies from the next model step; a step already streaming finishes with the old route. These wire fields work live:
+
+| Where | Fields |
+| --- | --- |
+| `POST /agents/sessions/{id}` | `agent.model`, `agent.reasoning.effort` |
+| `agent.session.input.message` | optional `model`, optional `reasoning.effort`, applied before the message is queued |
+
+`agent.session.input.message` accepts the same two fields as top-level keys next to `input`:
+
+```json
+{ "type": "agent.session.input.message", "input": "…", "model": "deepseek-reasoner", "reasoning": { "effort": "high" } }
+```
+
+The agent always receives a complete selection built from the stored session settings plus the change: an effort alone keeps the session's model, a model alone keeps the session's stored effort. `service_tier` and `metadata` are stored without touching the agent. A change is validated against the provider before anything is stored. If the model or effort is unsupported, the session is not running and cannot be resumed, or the agent rejects the selection, the answer is 409 `session_setting_not_live` and nothing changes (for a message, nothing is queued). `reasoning.effort` on session create is passed to the agent as well; an unsupported effort answers 400.
+
+## Approvals and user questions
+
+A sandbox escalation, a tool that needs approval, or an `ask_user_question` call parks the turn. The session status becomes `requires_action` and `required_actions` gains an `approval` entry next to any parked function calls:
+
+```json
+{
+  "type": "approval",
+  "id": "5b1f…",
+  "kind": "tool_approval",
+  "prompt": "Approve bash",
+  "options": ["approve", "deny"],
+  "tool_name": "bash",
+  "call_id": "call_1"
+}
+```
+
+- `kind` is `sandbox_escalation` (the request widens the sandbox mode), `tool_approval` (any other approval), or `user_question`.
+- `tool_name` and `call_id` are present for approvals when the Host knows them. For `user_question`, `options` holds the option labels when exactly one question was asked; `questions` carries the full question items (`id`, `question`, `options`, `multiSelect`, `intent`, …) for several questions.
+- For approvals `id` is the id the Host logs in `approval/asked`, so it is stable across SSE replay. For questions it is the tool `call_id` or a generated `appr_…` id.
+- `agent.session.requires_action` is sent as an ephemeral event (no `id:`, not replayed) when an approval appears; a reconnecting client reads `required_actions` from the status snapshot. When the last pending action clears, an ephemeral `agent.session.in_progress` follows.
+
+Answer with `POST /agents/sessions/{id}/events`:
+
+```json
+{ "type": "agent.session.input.approval_response", "id": "5b1f…", "decision": "approve" }
+```
+
+| Request | `decision` | Result |
+| --- | --- | --- |
+| approval | `approve` | allowed once |
+| approval | `deny` | rejected |
+| question | `answer` with `payload` | the answer; `{ "selected": ["A"], "custom": "…" }` for one question, `{ "answers": [{ "id", "selected", "custom"? }] }` covering every question |
+| question | `deny` | skipped (empty `selected` for every question) |
+
+Errors: 400 `invalid_approval_response` (bad `id` or `decision`, or an incomplete or malformed `answer` payload); 400 `decision_not_applicable` (`answer` on an approval, `approve` on a question); 404 `approval_not_found` (unknown id, already answered, or cancelled by `agent.session.input.cancel`, a session delete, the end of the turn, or a server restart). Another owner's session answers 404 `resource_not_found`.
+
+Limits:
+
+- Approvals requested by a subagent (child agent) are not exposed; they fail closed (the tool call is denied).
+- Timed questions (`tool-ask-user` in `mode: "timed"`) are not supported; the Host continues without an answer.
+- The profile must mount `tool-ask-user` for questions and keep the approval policy `ask`: under `never` (`DSH_PERMISSION_MODE=danger-full-access`) the Host rejects every approval before this API sees it.
+
 ## Function tools
 
 1. Create a session with `agent.tools: [{ type: "function", name, description?, parameters? }]`.
