@@ -24,6 +24,28 @@ export function userTextFromInput(input: string | OAIInputMessage[] | undefined)
 }
 
 /**
+ * Collect the file ids of `input_image` and `input_file` parts, in order.
+ * @param input - string or input-message array from the wire.
+ * @returns the ids; empty for a string or a message without file parts.
+ * @throws AgentsApiRequestError 400 `unsupported_content_part` for a file part with `image_url`, `file_data`, or `file_url`, or without a non-empty string `file_id`.
+ */
+export function fileIdsFromInput(input: string | OAIInputMessage[] | undefined): string[] {
+  if (!Array.isArray(input)) return []
+  const ids: string[] = []
+  for (const part of input.flatMap(message => message.content ?? [])) {
+    if (part.type !== 'input_image' && part.type !== 'input_file') continue
+    if (part.image_url !== undefined || part.file_data !== undefined || part.file_url !== undefined) {
+      throw new AgentsApiRequestError(`"${part.type}" accepts only "file_id"; image_url, file_data, and file_url are not supported`, 400, 'unsupported_content_part')
+    }
+    if (typeof part.file_id !== 'string' || part.file_id === '') {
+      throw new AgentsApiRequestError(`"${part.type}" needs a "file_id" from POST /agents/files`, 400, 'unsupported_content_part')
+    }
+    ids.push(part.file_id)
+  }
+  return ids
+}
+
+/**
  * Parse a `tool/call` arguments payload. The Session log stores the model's
  * raw JSON string; recovered objects are kept as records.
  * @param raw - Session `arguments` value.

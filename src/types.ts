@@ -441,7 +441,28 @@ export type OAISessionItem =
 /** User, assistant, or system input message. */
 export interface OAIInputMessage {
   role: 'user' | 'assistant' | 'system'
-  content?: Array<{ type: string; text?: string }>
+  content?: OAIInputPart[]
+}
+
+/**
+ * One input part. `input_text` carries `text`. `input_image` and `input_file` carry `file_id` of a file uploaded with
+ * `POST /agents/files`; `image_url`, `file_data`, and `file_url` are rejected with 400 `unsupported_content_part`.
+ */
+export interface OAIInputPart {
+  type: string
+  text?: string
+  /** Id of a staged file (`input_image`, `input_file`). */
+  file_id?: string
+  /** Accepted by OpenAI, rejected here. */
+  image_url?: unknown
+  /** Accepted by OpenAI, rejected here. */
+  file_data?: unknown
+  /** Accepted by OpenAI, rejected here. */
+  file_url?: unknown
+  /** Ignored; the stored name is used. */
+  filename?: string
+  /** Ignored. */
+  detail?: string
 }
 
 /** Submit a follow-up or steering message. */

@@ -37,7 +37,7 @@ import {
   routeParam,
   writeRequestError,
 } from './http.ts'
-import { overlayAgent, parseApprovalResponse, userTextFromInput } from './input.ts'
+import { fileIdsFromInput, overlayAgent, parseApprovalResponse, userTextFromInput } from './input.ts'
 import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
 import { mountAgentInstructions } from './mount-instructions.ts'
 import { mountScheduleGuidance } from './mount-schedule-guidance.ts'
@@ -47,6 +47,7 @@ import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
 import { CommandsApi, type CommandTarget } from './commands.ts'
 import { openAttached, type AttachmentsPort } from './files/attached.ts'
+import { AttachmentIngest, type AttachedFiles } from './files/ingest.ts'
 import { FilesApi, uploadedFileSource, type FilesRuntime } from './files/api.ts'
 import { SkillsApi, type SkillTarget } from './skills.ts'
 import { SessionRegistry } from './session-registry.ts'
@@ -164,6 +165,7 @@ export class AgentsGateway {
   private readonly artifacts: ArtifactS3Config | undefined
   private readonly routes: Route[]
   private readonly commandsApi: CommandsApi
+  private readonly ingest: AttachmentIngest
   #store: Store | undefined
   #storeError: string | undefined
   /** Owners whose `owners` row this store already holds. */
@@ -212,6 +214,13 @@ export class AgentsGateway {
       warn: message => this.ctx.logger.warn(message),
     })
     const attachments = options.attachments ?? (() => undefined)
+    this.ingest = new AttachmentIngest({
+      store: () => this.store,
+      staging: options.files?.staging,
+      limits: options.files?.limits ?? { maxFileBytes: 0, maxFilesPerMessage: 0, maxMessageBytes: 0, maxStagedBytesPerOwner: 0, allowedMediaTypes: [] },
+      attachments,
+      warn: message => this.ctx.logger.warn(message),
+    })
     const filesApi = new FilesApi({
       store: () => this.store,
       runtime: options.files,
@@ -544,7 +553,10 @@ export class AgentsGateway {
   private async createSession(req: IncomingMessage, res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
     const body = await readBody(req) as unknown as CreateSessionParams
     let provisioned: ProvisionedSession
+    let fileIds: string[]
     try {
+      fileIds = fileIdsFromInput(body.input)
+      await this.ingest.validate(owner, fileIds)
       provisioned = await this.provisionSession(owner, body)
     } catch (error: unknown) {
       if (error instanceof AgentsApiRequestError) {
@@ -559,14 +571,30 @@ export class AgentsGateway {
       throw error
     }
     const { sessionId, projector, base } = provisioned
+    let attached: AttachedFiles | undefined
+    if (fileIds.length > 0) {
+      try {
+        attached = await this.attachFiles(owner, sessionId, fileIds, provisioned.resolved)
+      } catch (error: unknown) {
+        await this.discardSession(owner, sessionId)
+        if (error instanceof AgentsApiRequestError) {
+          writeRequestError(res, error)
+          return
+        }
+        this.ctx.logger.warn(`agents-api: attaching files failed: ${errorMessage(error)}`)
+        json(res, 500, { error: { type: 'server_error', message: 'The files could not be attached', code: 'attach_failed' } })
+        return
+      }
+    }
 
     const oaiSession = projector.snapshot()
     const stream = body.stream === true
       || url.searchParams.get('stream') === 'true'
       || (req.headers.accept ?? '').includes('text/event-stream')
     const userText = userTextFromInput(body.input)
+    const hasInput = (userText !== undefined && userText !== '') || attached !== undefined
     const startTurn = (): void => {
-      void this.triggerTurn(sessionId, userText!).catch((error: unknown) => {
+      void this.triggerTurn(sessionId, userText ?? '', attached).catch((error: unknown) => {
         this.emitError(sessionId, error)
       })
     }
@@ -580,7 +608,7 @@ export class AgentsGateway {
         unsubscribe()
       })
       writeEvent(res, projector.created.event.type, projector.created.event, projector.created.id)
-      if (userText !== undefined && userText !== '') {
+      if (hasInput) {
         startTurn()
       } else {
         this.sessionRegistry.emitEphemeral(sessionId, {
@@ -592,7 +620,7 @@ export class AgentsGateway {
       return
     }
 
-    if (userText !== undefined && userText !== '') startTurn()
+    if (hasInput) startTurn()
     json(res, 200, await this.sessionPayload(oaiSession, base))
   }
 
@@ -863,6 +891,7 @@ export class AgentsGateway {
    */
   async discardSession(owner: OwnerId, sessionId: string): Promise<void> {
     await this.deleteEnvironmentsForSession(owner, sessionId)
+    await this.store.files.deleteForSession(owner, sessionId)
     await this.store.sessions.delete(sessionId, owner)
     this.sessionRegistry.delete(sessionId)
     this.statusWrites.delete(sessionId)
@@ -919,6 +948,15 @@ export class AgentsGateway {
     }
     const input = await readBody(req)
     const batch = inputEventsFromBody(input)
+    try {
+      await this.validateBatchFiles(owner, batch)
+    } catch (error: unknown) {
+      if (error instanceof AgentsApiRequestError) {
+        writeRequestError(res, error)
+        return
+      }
+      throw error
+    }
     if (batch.length > 0 && batch.every(evt => evt.type === 'agent.session.input.approval_response')
       && this.sessionRegistry.get(sessionId) === undefined) {
       // Approvals never survive a restart, so there is nothing to resume for.
@@ -1287,6 +1325,8 @@ export class AgentsGateway {
     switch (evt.type) {
       case 'agent.session.input.message': {
         const text = userTextFromInput(evt.input)
+        const fileIds = fileIdsFromInput(evt.input)
+        await this.ingest.validate(owner, fileIds)
         if (evt.model != null || evt.reasoning?.effort != null) {
           const fresh = await this.store.sessions.get(sessionId, owner)
           if (fresh === undefined) throw new AgentsApiRequestError(`Session "${sessionId}" not found`, 404, 'resource_not_found')
@@ -1297,7 +1337,10 @@ export class AgentsGateway {
             },
           })
         }
-        if (text) await this.triggerTurn(SessionId(sessionId), text)
+        const attached = fileIds.length === 0
+          ? undefined
+          : await this.attachFiles(owner, sessionId, fileIds, configOf((await this.store.sessions.get(sessionId, owner)) ?? row).agent)
+        if (text || attached !== undefined) await this.triggerTurn(SessionId(sessionId), text ?? '', attached)
         return
       }
       case 'agent.session.input.approval_response': {
@@ -1723,13 +1766,66 @@ export class AgentsGateway {
     return { sessionId, subagentId, child }
   }
 
-  private triggerTurn(sessionId: string, userText: string): Promise<void> {
+  /**
+   * Check the file ids of every message event in a batch before any event is applied.
+   * @param owner - authenticated caller.
+   * @param batch - input events of one request.
+   * @throws AgentsApiRequestError as `AttachmentIngest.validate`, 400 `duplicate_file_id` when two events use one id, or 400 `unsupported_content_part`.
+   */
+  private async validateBatchFiles(owner: OwnerId, batch: readonly OAIInputEvent[]): Promise<void> {
+    const seen = new Set<string>()
+    for (const evt of batch) {
+      if (evt.type !== 'agent.session.input.message') continue
+      const ids = fileIdsFromInput(evt.input)
+      for (const id of ids) {
+        if (seen.has(id)) throw new AgentsApiRequestError('The same file id is used more than once', 400, 'duplicate_file_id')
+        seen.add(id)
+      }
+      await this.ingest.validate(owner, ids)
+    }
+  }
+
+  /**
+   * Attach staged files to a session's next message.
+   * @param owner - authenticated caller.
+   * @param sessionId - session the message goes to.
+   * @param fileIds - staged file ids.
+   * @param agent - the session agent, to decide whether images go to the model as images.
+   * @returns the blocks, note, and commit and rollback callbacks.
+   * @throws AgentsApiRequestError as `AttachmentIngest.attach`.
+   */
+  private async attachFiles(owner: OwnerId, sessionId: string, fileIds: readonly string[], agent: OAIAgent): Promise<AttachedFiles> {
+    const cwd = this.sessionRegistry.get(sessionId)?.workspace ?? await this.history.workspace(sessionId)
+    if (cwd === undefined) throw new AgentsApiRequestError(`Session "${sessionId}" has no workspace`, 409, 'uploads_unsafe')
+    return this.ingest.attach({ owner, sessionId, cwd, ids: fileIds, supportsImages: () => this.routeAcceptsImages(agent) })
+  }
+
+  /**
+   * Whether the session's model route takes images: its `inputModalities` lists `image`, or lists nothing (the
+   * permissive rule DSH's own prompt path applies). A failed lookup counts as no.
+   * @param agent - session agent.
+   */
+  private async routeAcceptsImages(agent: OAIAgent): Promise<boolean> {
+    try {
+      const { provider, model } = await this.agentOptionsFor(agent)
+      const info = await this.ctx.llm.resolveModelInfo(provider, model)
+      return info.inputModalities === undefined || info.inputModalities.includes('image')
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`agents-api: could not resolve model modalities: ${errorMessage(error)}`)
+      return false
+    }
+  }
+
+  private triggerTurn(sessionId: string, userText: string, attached?: AttachedFiles): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
         const agent = this.ctx.agents.get(SessionId(sessionId))
         if (!agent) throw new Error(`Agent "${sessionId}" is not running`)
         const message = createUserMessage({
-          content: [{ type: 'text', text: userText }],
+          content: [
+            ...(userText === '' ? [] : [{ type: 'text' as const, text: userText }]),
+            ...(attached === undefined ? [] : [...attached.blocks, { type: 'text' as const, text: attached.note }]),
+          ],
           source: { kind: 'user' },
         })
         const status = this.sessionRegistry.get(sessionId)?.projector.status
@@ -1738,10 +1834,15 @@ export class AgentsGateway {
         } else {
           agent.followup(message)
         }
-        resolve()
       } catch (error) {
-        reject(error instanceof Error ? error : new Error(errorMessage(error)))
+        void (attached?.rollback() ?? Promise.resolve()).then(() => {
+          reject(error instanceof Error ? error : new Error(errorMessage(error)))
+        })
+        return
       }
+      void (attached?.commit() ?? Promise.resolve()).then(() => {
+        resolve()
+      })
     })
   }
 }

@@ -109,3 +109,27 @@ describe('parseApprovalResponse', () => {
     expect(() => parseApprovalResponse({ id: 'a', decision: 'allow' })).toThrow(expect.objectContaining({ code: 'invalid_approval_response' }))
   })
 })
+
+describe('fileIdsFromInput', () => {
+  it('collects file ids in order and ignores text and strings', async () => {
+    const { fileIdsFromInput } = await import('../src/input.ts')
+    expect(fileIdsFromInput('hi')).toEqual([])
+    expect(fileIdsFromInput(undefined)).toEqual([])
+    expect(fileIdsFromInput([
+      { role: 'user', content: [{ type: 'input_text', text: 'x' }, { type: 'input_image', file_id: 'file_a' }] },
+      { role: 'user', content: [{ type: 'input_file', file_id: 'file_b', filename: 'ignored' }] },
+    ])).toEqual(['file_a', 'file_b'])
+  })
+
+  it.each([
+    { type: 'input_image', image_url: 'https://x/y.png' },
+    { type: 'input_image', file_id: 'file_a', image_url: 'data:image/png;base64,AAAA' },
+    { type: 'input_file', file_data: 'AAAA' },
+    { type: 'input_file', file_url: 'https://x/y.pdf' },
+    { type: 'input_file' },
+    { type: 'input_image', file_id: '' },
+  ])('rejects %j', async (part) => {
+    const { fileIdsFromInput } = await import('../src/input.ts')
+    expect(() => fileIdsFromInput([{ role: 'user', content: [part] }])).toThrow(expect.objectContaining({ status: 400, code: 'unsupported_content_part' }))
+  })
+})

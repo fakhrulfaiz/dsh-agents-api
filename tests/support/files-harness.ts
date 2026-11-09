@@ -67,6 +67,7 @@ export class FakeAttachments implements AttachmentsPort {
 export interface RecordedAgent {
   followup: ReturnType<typeof vi.fn>
   steer: ReturnType<typeof vi.fn>
+  cancel: ReturnType<typeof vi.fn>
 }
 
 export interface FilesHarnessOptions {
@@ -119,11 +120,12 @@ export async function filesHarness(options: FilesHarnessOptions = {}) {
         const agent: RecordedAgent & { model: { current: () => { provider: string; model: string }; select: () => void } } = {
           followup: vi.fn(),
           steer: vi.fn(),
+          cancel: vi.fn(),
           model: { current: () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }), select: vi.fn() },
         }
         agents.set(sessionId, agent)
         sessions.set(sessionId, { id: sessionId })
-        return Promise.resolve({ agent: { ...agent, cancel: vi.fn() }, dispose: vi.fn(() => Promise.resolve()) })
+        return Promise.resolve({ agent, dispose: vi.fn(() => Promise.resolve()) })
       },
       get: (id: string) => agents.get(id),
     },
