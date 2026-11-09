@@ -74,7 +74,7 @@ async function startProcess(store: MemoryStore, query: FakeSessionQuery, failRes
       model: fakeModel(),
     }
     agents.set(sessionId, agent)
-    const systemPrompt = { section: () => undefined }
+    const systemPrompt = { section: () => undefined, getSectionOrder: () => 2500 }
     await setup?.({
       get: (name: string) => name === 'systemPrompt' ? systemPrompt : undefined,
       systemPrompt,

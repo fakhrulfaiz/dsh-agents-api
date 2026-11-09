@@ -75,7 +75,7 @@ async function startProcess(store: MemoryStore, query: FakeSessionQuery, schedul
   const make = async (sessionId: string, setup?: (agentCtx: unknown) => Promise<void>) => {
     const agent = { followup: vi.fn(), steer: vi.fn(), cancel: vi.fn(), model: fakeModel() }
     agents.set(sessionId, agent)
-    const systemPrompt = { section: () => undefined }
+    const systemPrompt = { section: () => undefined, getSectionOrder: () => 2500 }
     await setup?.({
       get: (name: string) => name === 'systemPrompt' ? systemPrompt : undefined,
       systemPrompt,

@@ -79,7 +79,7 @@ function fakeContext(options?: {
         sessionId: string
         setup?: (agentCtx: {
           get: (name: string) => unknown
-          systemPrompt?: { section: (section: { name: string; order: number; text: string }) => void }
+          systemPrompt?: { section: (section: { name: string; order: number; text: string }) => void; getSectionOrder: (name: string) => number }
           plugin: (plugin: unknown, config: Record<string, unknown>) => Promise<void>
           tools: {
             register: (definition: { name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }) => () => void
@@ -107,6 +107,7 @@ function fakeContext(options?: {
                 section: (section: { name: string; order: number; text: string }) => {
                   promptSections.push(section)
                 },
+                getSectionOrder: () => 2500,
               }
           await setup({
             get: (name: string) => name === 'systemPrompt' ? systemPrompt : undefined,
@@ -880,7 +881,7 @@ describe('AgentsGateway', () => {
         agent: { model: 'deepseek-chat', instructions: '  be brief  ' },
       }),
     })).status).toBe(200)
-    expect(promptSections).toEqual([{
+    expect(promptSections.filter(section => section.name === 'agents-api:instructions')).toEqual([{
       name: 'agents-api:instructions',
       order: 10,
       text: 'be brief',
@@ -893,7 +894,7 @@ describe('AgentsGateway', () => {
         agent: { model: 'deepseek-chat', instructions: '   ' },
       }),
     })).status).toBe(200)
-    expect(promptSections).toEqual([])
+    expect(promptSections.filter(section => section.name === 'agents-api:instructions')).toEqual([])
   })
 
   it('fails session create when instructions need a missing system prompt', async () => {

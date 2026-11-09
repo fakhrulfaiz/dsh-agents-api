@@ -52,7 +52,7 @@ function fakeContext(sandbox?: { create: ReturnType<typeof vi.fn> }): Context {
         if (setup) {
           await setup({
             get: () => ({ section: () => undefined }),
-            systemPrompt: { section: () => undefined },
+            systemPrompt: { section: () => undefined, getSectionOrder: () => 2500 },
             plugin: async () => undefined,
             tools: {
               register: () => () => undefined,

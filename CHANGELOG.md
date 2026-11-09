@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Prompt guidance for chat-created scheduled tasks
+
+- Sessions get an agent-scoped system-prompt section `agentry:schedule` (just after `tool:schedule`) that tells the model to create scheduled tasks with target `this_session` only and to use the time zone the user stated, asking when it is unknown. The text is empty at each assembly where `schedule_create` is not visible, including after `host_tools.deny: ["schedule_create"]`. `new` and `new_once` targets would create sessions the API cannot list or resume.
+
 ## 2026-11-10 — Scheduled prompts in the chat history
 
 - A prompt a scheduled task delivers to a session now appears as a user message item with `source: "schedule"` (and `schedule_id` when one task delivered it) and `content` set to the task prompt instead of the Host framing. A reminder batch joins its prompts with a blank line; framing that cannot be parsed shows the full text. `[SCHEDULE CHANGE]` notices still produce no item. Live and replayed projections agree. `MessageItem` in `openapi/agentry.yaml` declares both fields.

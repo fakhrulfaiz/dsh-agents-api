@@ -38,6 +38,7 @@ import {
 import { overlayAgent, parseApprovalResponse, userTextFromInput } from './input.ts'
 import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
 import { mountAgentInstructions } from './mount-instructions.ts'
+import { mountScheduleGuidance } from './mount-schedule-guidance.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
@@ -995,6 +996,7 @@ export class AgentsGateway {
       await mountDefaultPreset(agentCtx)
       mountAgentInstructions(agentCtx, resolved.instructions)
       applyHostToolsRestrict(agentCtx, resolved.host_tools)
+      mountScheduleGuidance(agentCtx)
       mountFunctionTools(agentCtx, functionTools, pending)
       await mountMcpTools(agentCtx, mcpToolsFrom(resolved.tools), cwd)
     }
