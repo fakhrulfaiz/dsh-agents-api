@@ -14,7 +14,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type { ScheduleService } from '@deepseek-ai/dsh-schedule'
 import type { SkillSummary, SkillViewOptions } from '@deepseek-ai/dsh-skill'
-import type { CommandDescriptor } from '@deepseek-ai/dsh-commands/types'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
@@ -45,7 +44,7 @@ import { mountFunctionTools, validateMountableTools } from './mount-function-too
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
-import { CommandsApi, type CommandTarget } from './commands.ts'
+import { COMMAND_NAME, CommandsApi, commandNotFound, type CommandService, type CommandTarget } from './commands.ts'
 import { SkillsApi, type SkillTarget } from './skills.ts'
 import { SessionRegistry } from './session-registry.ts'
 import { WireProjector, type ProjectionBase } from './history/projector.ts'
@@ -117,7 +116,7 @@ export interface GatewayOptions {
   /** Milliseconds the skill catalog is cached (`skills.cacheTtlSeconds` * 1000). */
   skillsTtlMs: number
   /** The Host command registry when the profile provides one, read at call time. */
-  commands: () => { list: (agent: never) => readonly CommandDescriptor[] } | undefined
+  commands: () => CommandService | undefined
   /** Milliseconds the command catalog is cached (`commands.cacheTtlSeconds` * 1000). */
   commandsTtlMs: number
   artifacts?: ArtifactS3Config
@@ -158,6 +157,9 @@ export class AgentsGateway {
   private readonly artifacts: ArtifactS3Config | undefined
   private readonly routes: Route[]
   private readonly commandsApi: CommandsApi
+  private readonly commands: () => CommandService | undefined
+  /** Sessions with a command executing, so a second one is refused instead of interleaving. */
+  private readonly commandsRunning = new Set<string>()
   #store: Store | undefined
   #storeError: string | undefined
   /** Owners whose `owners` row this store already holds. */
@@ -199,6 +201,7 @@ export class AgentsGateway {
       ttlMs: options.skillsTtlMs,
       warn: message => this.ctx.logger.warn(message),
     })
+    this.commands = options.commands
     this.commandsApi = new CommandsApi({
       commands: options.commands,
       resolveTarget: (owner, sessionId) => this.resolveCommandTarget(owner, sessionId),
@@ -231,6 +234,7 @@ export class AgentsGateway {
       { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/items', handler: (_req, res, _url, params, p) => this.listSubagentItems(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id', handler: (_req, res, _url, params, p) => this.getSubagent(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/subagents', handler: (_req, res, _url, params, p) => this.listSubagents(res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/sessions/:session_id/commands/:name', handler: (req, res, _url, params, p) => this.runCommand(req, res, params, p.owner) },
       { method: 'POST', pattern: '/agents/sessions/:session_id/events', handler: (req, res, _url, params, p) => this.postEvents(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/events', handler: (req, res, _url, params, p) => this.streamEvents(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/items', handler: (_req, res, url, params, p) => this.listItems(res, url, params, p.owner) },
@@ -889,6 +893,81 @@ export class AgentsGateway {
       const targeted = 'sessionId' in entry.target && entry.target.sessionId === sessionId
       if (!targeted && !entry.involvedSessionIds.includes(SessionId(sessionId))) continue
       await schedule.edit({ id: entry.id, action: 'delete' })
+    }
+  }
+
+  /**
+   * `POST /agents/sessions/:session_id/commands/:name`: run one Host slash
+   * command outside a turn and answer its outcome. Refused with 409
+   * `session_busy` while a turn is running or another command is executing.
+   * @param req - request carrying `{ input?: string }`.
+   * @param res - outgoing response.
+   * @param params - route captures `session_id` and `name`.
+   * @param owner - authenticated caller.
+   */
+  private async runCommand(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const sessionId = routeParam(params, 'session_id')
+    const name = routeParam(params, 'name')
+    const row = await this.store.sessions.get(sessionId, owner)
+    if (!row) {
+      notFound(res, `Session "${sessionId}" not found`)
+      return
+    }
+    const body = await readBody(req)
+    if (body.input !== undefined && typeof body.input !== 'string') {
+      badRequest(res, '"input" must be a string')
+      return
+    }
+    const commands = this.commands()
+    if (commands === undefined || !COMMAND_NAME.test(name)) {
+      commandNotFound(res, name)
+      return
+    }
+    try {
+      await this.ensureLive(row)
+    } catch (error: unknown) {
+      if (error instanceof AgentsApiRequestError) {
+        writeRequestError(res, error)
+        return
+      }
+      json(res, 500, { error: { type: 'server_error', message: errorMessage(error), code: 'session_resume_failed' } })
+      return
+    }
+    const agent = this.ctx.agents.get(SessionId(sessionId))
+    if (agent === undefined) {
+      notFound(res, `Session "${sessionId}" not found`)
+      return
+    }
+    const status = this.sessionRegistry.get(sessionId)?.projector.status
+    if (status === 'in_progress' || status === 'requires_action' || this.commandsRunning.has(sessionId)) {
+      writeRequestError(res, new AgentsApiRequestError('The session is busy: wait for the current turn or command to finish', 409, 'session_busy'))
+      return
+    }
+    const input = typeof body.input === 'string' && body.input !== '' ? ` ${body.input}` : ''
+    const aborted = new AbortController()
+    const onClose = (): void => {
+      if (!res.writableEnded) aborted.abort()
+    }
+    res.on('close', onClose)
+    this.commandsRunning.add(sessionId)
+    try {
+      const execution = await commands.execute(agent, `/${name}${input}`, [], aborted.signal)
+      if (execution === undefined) {
+        commandNotFound(res, name)
+        return
+      }
+      json(res, 200, {
+        command_id: execution.commandId,
+        name,
+        status: execution.result.kind,
+        ...(execution.result.text === undefined ? {} : { text: execution.result.text }),
+      })
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`agents-api: command "${name}" failed in session ${sessionId}: ${errorMessage(error)}`)
+      json(res, 500, { error: { type: 'server_error', message: `Command "${name}" failed`, code: 'command_failed' } })
+    } finally {
+      this.commandsRunning.delete(sessionId)
+      res.off('close', onClose)
     }
   }
 

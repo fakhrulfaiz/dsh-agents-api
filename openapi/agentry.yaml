@@ -254,6 +254,66 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /v1/agents/sessions/{session_id}/commands/{name}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: name
+        in: path
+        required: true
+        description: Command name without the leading slash, from `GET /v1/agents/commands`.
+        schema:
+          type: string
+    post:
+      summary: Run a slash command
+      description: >-
+        Runs one Host command in the session, outside any turn. The command never reaches the model. The server builds the line `/{name} {input}`, resumes a stopped session, and answers when the handler settles.
+        An expected failure (bad usage, nothing to do) is `200` with `status: error`. A command is refused with `409 session_busy` while a turn is running or another command is executing in the session.
+      tags:
+        - Sessions
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommandRunRequest"
+      responses:
+        "200":
+          description: The command ran.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandRunResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown session (`resource_not_found`) or command (`command_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: A turn or command is running (`session_busy`), or the session cannot be resumed (`session_not_resumable`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: The handler threw (`command_failed`) or the resume failed (`session_resume_failed`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
   /v1/agents/schedules:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -1765,6 +1825,30 @@ components:
         - name
         - description
         - accepts_attachments
+    CommandRunRequest:
+      type: object
+      properties:
+        input:
+          type: string
+          description: Text after the command name, passed verbatim to the handler.
+    CommandRunResponse:
+      type: object
+      properties:
+        command_id:
+          type: string
+          description: Pairs the command's `command/run` and `command/done` log events.
+        name:
+          type: string
+        status:
+          type: string
+          enum: [success, error]
+        text:
+          type: string
+          description: The handler's output or error text.
+      required:
+        - command_id
+        - name
+        - status
     Error:
       type: object
       properties:

@@ -17,6 +17,7 @@ import { openAuthenticator } from './open-auth.ts'
 import { fakeLlm, fakeModel } from './support/fake-model.ts'
 import { FakeSchedule } from './support/fake-schedule.ts'
 import { FakeSessionQuery, logEvent, testGatewayOptions } from './support/fake-session-query.ts'
+import type { CommandService } from '../src/commands.ts'
 import { MemoryStore } from './support/memory-store.ts'
 import { SpecValidator } from './support/openapi.ts'
 import type { Authenticator } from '../src/auth/authenticator.ts'
@@ -53,9 +54,9 @@ function fakeContext(): Context {
   } as unknown as Context
 }
 
-async function start(authenticator: Authenticator = openAuthenticator, store = new MemoryStore(), schedule?: FakeSchedule) {
+async function start(authenticator: Authenticator = openAuthenticator, store = new MemoryStore(), schedule?: FakeSchedule, commands?: CommandService) {
   const query = new FakeSessionQuery()
-  const api = new AgentsGateway(fakeContext(), authenticator, '/v1', store, new SessionRegistry(), { ...testGatewayOptions(environments, query), schedule: () => schedule?.asService() })
+  const api = new AgentsGateway(fakeContext(), authenticator, '/v1', store, new SessionRegistry(), { ...testGatewayOptions(environments, query), schedule: () => schedule?.asService(), commands: () => commands })
   const server = createServer((req, res) => {
     void api.handle(req, res)
   })
@@ -156,6 +157,22 @@ describe('OpenAPI responses', () => {
     await call('GET', '/v1/agents/sessions/{session_id}/subagents', { session_id: id }, undefined, 200)
     await call('GET', '/v1/agents/sessions/{session_id}/subagents/{subagent_id}', { session_id: id, subagent_id: 'x' }, undefined, 404)
     await call('DELETE', '/v1/agents/sessions/{session_id}', { session_id: id }, undefined, 200)
+  })
+
+  it('validates running a slash command', async () => {
+    const execute = vi.fn((_agent: unknown, line: string) => Promise.resolve(line.startsWith('/compact')
+      ? { commandId: 'cmd_1', result: { kind: 'success' as const, text: 'Compacted' } }
+      : undefined))
+    const { call, api } = await start(openAuthenticator, new MemoryStore(), undefined, { list: () => [], execute: execute as never })
+    const created = await call('POST', '/v1/agents/sessions', {}, { agent: { model: 'deepseek-chat' } }, 200)
+    const id = created.id as string
+    const ok = await call('POST', '/v1/agents/sessions/{session_id}/commands/{name}', { session_id: id, name: 'compact' }, {}, 200)
+    expect(ok).toMatchObject({ command_id: 'cmd_1', name: 'compact', status: 'success', text: 'Compacted' })
+    await call('POST', '/v1/agents/sessions/{session_id}/commands/{name}', { session_id: id, name: 'nope' }, { input: 'x' }, 404)
+    await call('POST', '/v1/agents/sessions/{session_id}/commands/{name}', { session_id: 'sess_missing', name: 'compact' }, {}, 404)
+    await call('POST', '/v1/agents/sessions/{session_id}/commands/{name}', { session_id: id, name: 'compact' }, { input: 5 }, 400)
+    api.applySessionEvent(id, logEvent('turn/start', { turn: 1 }, 1))
+    await call('POST', '/v1/agents/sessions/{session_id}/commands/{name}', { session_id: id, name: 'compact' }, {}, 409)
   })
 
   it('validates a scheduled prompt item', async () => {
