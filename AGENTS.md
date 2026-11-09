@@ -45,7 +45,7 @@ Read this first in every session. It records decisions already made so they are 
 
 Mirrored in `~/code/agentry-web/AGENTS.md`.
 
-1. **Skill catalog endpoint** for the frontend's `/` picker. `/name` invocation already works through `dsh-tool-skill` when the profile mounts it; skills load from `<workspace>/.agents/skills`, `$DSH_HOME/skills`, `~/.agents/skills`, a configured directory, and `skill-office`. Per-owner skills could later come from a custom skill provider (the registry accepts any provider).
+1. **Skill catalog endpoint (done 2026-11-10: `GET /v1/agents/skills`)** for the frontend's `/` picker. `/name` invocation already works through `dsh-tool-skill` when the profile mounts it; skills load from `<workspace>/.agents/skills`, `$DSH_HOME/skills`, `~/.agents/skills`, a configured directory, and `skill-office`. Per-owner skills could later come from a custom skill provider (the registry accepts any provider).
 2. **Attachment/image endpoint** so clients can display screenshots and other images from tool results (owner-scoped).
 3. **Browser automation in the profile:** mount `browser-use-playwright-mcp` (or Chrome DevTools / Stagehand) in the Agentry profile when Task 8 resumes.
 4. **Vision-capable model route** for sessions that need screenshot review; DSH withholds images from non-vision routes.

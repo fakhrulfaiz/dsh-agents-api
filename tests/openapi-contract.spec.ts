@@ -106,6 +106,7 @@ describe('OpenAPI responses', () => {
     await call('GET', '/v1/agents/{agent_id}', { agent_id: agent.id }, undefined, 200)
     await call('POST', '/v1/agents/{agent_id}', { agent_id: agent.id }, { name: 'Renamed', service_tier: 'flex' }, 200)
     await call('GET', '/v1/agents/tools', {}, undefined, 200)
+    await call('GET', '/v1/agents/skills', {}, undefined, 200)
     await call('POST', '/v1/agents', {}, {}, 400)
     await call('GET', '/v1/agents/{agent_id}', { agent_id: 'agent_missing' }, undefined, 404)
     await call('DELETE', '/v1/agents/{agent_id}', { agent_id: agent.id }, undefined, 200)

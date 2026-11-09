@@ -13,6 +13,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type { ScheduleService } from '@deepseek-ai/dsh-schedule'
+import type { SkillSummary } from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
@@ -43,6 +44,7 @@ import { mountFunctionTools, validateMountableTools } from './mount-function-too
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
+import { SkillsApi } from './skills.ts'
 import { SessionRegistry } from './session-registry.ts'
 import { WireProjector, type ProjectionBase } from './history/projector.ts'
 import type { SessionHistory } from './history/session-history.ts'
@@ -108,6 +110,10 @@ export interface GatewayOptions {
   approvals: ApprovalBridge
   /** The Host schedule service when the profile provides one, read at call time. */
   schedule: () => ScheduleService | undefined
+  /** The Host skill registry when the profile provides one, read at call time. */
+  skills: () => { list: () => Promise<readonly SkillSummary[]> } | undefined
+  /** Milliseconds the skill catalog is cached (`skills.cacheTtlSeconds` * 1000). */
+  skillsTtlMs: number
   artifacts?: ArtifactS3Config
 }
 
@@ -179,6 +185,11 @@ export class AgentsGateway {
       createSession: (owner, params) => this.createIdleSession(owner, params),
       discardSession: (owner, sessionId) => this.discardSession(owner, sessionId),
     })
+    const skillsApi = new SkillsApi({
+      skills: options.skills,
+      ttlMs: options.skillsTtlMs,
+      warn: message => this.ctx.logger.warn(message),
+    })
     this.routes = [
       { method: 'POST', pattern: '/agents', handler: (req, res, _url, _params, p) => this.createAgent(req, res, p.owner) },
       { method: 'GET', pattern: '/agents', handler: (_req, res, url, _params, p) => this.listAgents(res, url, p.owner) },
@@ -214,6 +225,7 @@ export class AgentsGateway {
       { method: 'GET', pattern: '/agents/sessions/:session_id', handler: (_req, res, _url, params, p) => this.getSession(res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/sessions/:session_id', handler: (_req, res, _url, params, p) => this.deleteSession(res, params, p.owner) },
       ...scheduleApi.routes(),
+      ...skillsApi.routes(),
       { method: 'GET', pattern: '/agents/:agent_id', handler: (_req, res, _url, params, p) => this.getAgent(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/:agent_id', handler: (req, res, _url, params, p) => this.updateAgent(req, res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/:agent_id', handler: (_req, res, _url, params, p) => this.deleteAgent(res, params, p.owner) },

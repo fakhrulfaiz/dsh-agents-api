@@ -129,6 +129,60 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/skills:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    get:
+      summary: List Host skills
+      description: >-
+        Host-wide skill catalog for a `/` picker, sorted by name; empty when the profile has no skill service.
+        Cached in memory (`skills.cacheTtlSeconds`). Send the `ETag` back as `If-None-Match` to receive `304`.
+      tags:
+        - Agents
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Strong entity tag of the body.
+            Cache-Control:
+              schema:
+                type: string
+              description: "`private, max-age=0, must-revalidate`."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AgentSkill"
+                required:
+                  - object
+                  - data
+        "304":
+          description: The `If-None-Match` tag matches the current catalog. No body.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: The skill catalog could not be loaded (`error.code` is `skills_unavailable`) or the store is unavailable (`store_unavailable`). Not cached.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /v1/agents/schedules:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -1611,6 +1665,18 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
   schemas:
+    AgentSkill:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        source:
+          type: string
+          description: Discovery source, for example `project-agents`, `user-dsh`, or `bundled`.
+      required:
+        - name
     Error:
       type: object
       properties:

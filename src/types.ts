@@ -152,6 +152,13 @@ export interface OAIHostToolCatalogEntry {
   source: 'host'
 }
 
+/** One entry of `GET /agents/skills`. */
+export interface AgentSkill {
+  name: string
+  description?: string
+  source?: string
+}
+
 /** Saved or session-local agent configuration. */
 export interface OAIAgent {
   id: string

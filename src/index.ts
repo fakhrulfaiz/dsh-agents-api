@@ -4,6 +4,7 @@
  * Official `OpenAI-Beta: agents=v1` routes implemented:
  * - Agents: `POST|GET /v1/agents`, `GET|POST|DELETE /v1/agents/{agent_id}`
  * - Host tools catalog: `GET /v1/agents/tools`
+ * - Skill catalog: `GET /v1/agents/skills`
  * - Sessions: `POST|GET /v1/agents/sessions`, `GET|POST|DELETE /v1/agents/sessions/{session_id}`
  * - Events: `POST|GET /v1/agents/sessions/{session_id}/events`
  * - Items: `GET /v1/agents/sessions/{session_id}/items`
@@ -146,6 +147,11 @@ export interface Config extends RuntimeConfigInput {
       admin?: boolean
     }
   }
+  /** Skill catalog served by `GET /agents/skills`. */
+  skills?: {
+    /** Seconds the catalog is cached in memory; 0 disables caching (default 60). Finite and non-negative. */
+    cacheTtlSeconds?: number
+  }
   /** API path prefix (default `/v1`). */
   prefix?: string
   /** Agentry's Postgres database. Required. */
@@ -160,8 +166,9 @@ export interface Config extends RuntimeConfigInput {
 }
 
 /** `Config` after validation: `auth`, `prefix`, `database`, and `workspaces` are always present; `codebox` and `dataDir` never are. */
-export type ResolvedConfig = Omit<Config, 'auth' | 'prefix' | 'database' | 'codebox' | 'dataDir'> & {
+export type ResolvedConfig = Omit<Config, 'auth' | 'prefix' | 'database' | 'codebox' | 'dataDir' | 'skills'> & {
   auth: ResolvedAuthConfig
+  skills: { cacheTtlSeconds: number }
   prefix: string
   database: { url: string }
 }
@@ -193,6 +200,9 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
       admin: z.boolean().default(true),
     }).default(ABSENT),
   }).default(ABSENT),
+  skills: z.object({
+    cacheTtlSeconds: z.number().default(60),
+  }).default({ cacheTtlSeconds: 60 }),
   prefix: z.string().default('/v1'),
   database: z.object({
     url: z.string().required(),
@@ -212,6 +222,8 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
 }), (config) => {
   validateAuth(config.auth as ResolvedAuthConfig | undefined)
   if (typeof config.workspaces !== 'string' || config.workspaces.trim() === '') throw new Error('agents-api: "workspaces" must not be empty')
+  const ttl = (config.skills as { cacheTtlSeconds: number }).cacheTtlSeconds
+  if (!Number.isFinite(ttl) || ttl < 0) throw new Error('agents-api: "skills.cacheTtlSeconds" must be a finite number >= 0')
   if (config.codebox !== undefined && config.codebox !== null) throw new CodeboxDisabledError('the "codebox" config block')
   if (config.dataDir !== undefined && config.dataDir !== null) {
     throw new Error('agents-api: "dataDir" was removed; agents, environments, and the session index live in Postgres (database.url)')
@@ -313,6 +325,8 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     history: createSessionHistory(ctx.sessionQuery),
     approvals,
     schedule: () => ctx.get('schedule'),
+    skills: () => ctx.get('skills'),
+    skillsTtlMs: config.skills.cacheTtlSeconds * 1000,
     ...(runtime.artifacts === undefined ? {} : { artifacts: runtime.artifacts }),
   })
 

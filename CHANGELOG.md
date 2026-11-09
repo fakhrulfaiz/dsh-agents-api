@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Skill catalog endpoint
+
+- `GET /v1/agents/skills` lists Host skills (`name`, `description`, `source`) sorted by name from `ctx.skills.list()`, read at request time. Without the skill service it answers `200` with an empty list. Cached in memory for `skills.cacheTtlSeconds` (default 60, `0` disables), concurrent misses share one call, strong `ETag` with `304` on `If-None-Match`, `503 skills_unavailable` on a failed load (not cached). Wire detail: [docs/http-api.md](docs/http-api.md#skill-catalog); `openapi/agentry.yaml` declares the operation. `@deepseek-ai/dsh-skill` is a new optional peer.
+
 ## 2026-11-10 — Scheduled tasks
 
 Summary of the scheduled-task work below (routes, session resolution, history items, prompt guidance, `ownersOf`, `createIdleSession`). Write-up: [docs/changes/2026-11-09-scheduled-tasks.md](docs/changes/2026-11-09-scheduled-tasks.md). Wire detail: [docs/http-api.md](docs/http-api.md#scheduled-tasks).

@@ -103,5 +103,7 @@ export function testGatewayOptions(environments: EnvironmentProvider, query: Fak
     history: createSessionHistory(query),
     approvals,
     schedule: () => undefined,
+    skills: () => undefined,
+    skillsTtlMs: 60_000,
   }
 }

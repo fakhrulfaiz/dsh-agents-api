@@ -10,6 +10,7 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 |---|---|---|
 | `POST` `GET` | `/agents` | Create or list saved agents |
 | `GET` | `/agents/tools` | List Host profile tools. `?session_id=` keeps only that session's `host_tools` mask; omit it for the full catalog |
+| `GET` | `/agents/skills` | List Host skills (`name`, `description`, `source`), sorted by name. See [Skill catalog](#skill-catalog) |
 | `POST` `GET` | `/agents/environments/templates` | Create or list environment templates |
 | `GET` `POST` `DELETE` | `/agents/environments/templates/{id}` | Retrieve, update, or delete one template |
 | `POST` `GET` | `/agents/environments` | Create or list environments. Each is a local directory `<workspaces>/<owner>/<environment_id>/` with `provider: "local"` |
@@ -137,6 +138,15 @@ curl -X POST "$AGENTRY/v1/agents/schedules" \
   -d '{"title":"Morning brief","prompt":"Summarize overnight news","agent":{"model":"deepseek-chat"},
        "timing":{"kind":"weekly","weekly":{"time":"08:00","time_zone":"Asia/Kuala_Lumpur","weekdays":[1,2,3,4,5]}}}'
 ```
+
+## Skill catalog
+
+`GET /agents/skills` returns `{ "object": "list", "data": [{ "name", "description", "source" }] }` sorted by `name`. It needs the same bearer authentication as the other `/agents/*` routes; the catalog is host-wide, not owner-scoped.
+
+- The list comes from the Host `skills` service (`ctx.skills.list()`) at request time. A profile without that service answers `200` with an empty list, not `501`.
+- The result is cached in memory for `skills.cacheTtlSeconds` (default 60; `0` disables the cache). Concurrent requests after expiry share one `list()` call.
+- Responses carry a strong `ETag` (SHA-256 of the body) and `Cache-Control: private, max-age=0, must-revalidate`. A matching `If-None-Match` answers `304` with no body.
+- A failed `list()` answers `503` with `error.code: "skills_unavailable"`; the failure is not cached, so the next request retries.
 
 ## Function tools
 
