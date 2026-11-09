@@ -355,6 +355,17 @@ describe('AgentsGateway', () => {
     })).status).toBe(500)
   })
 
+  it('answers a generic message when session creation fails', async () => {
+    const failing = gateway('', { failCreate: true })
+    const response = await fetch(`${await failing.base}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({ agent: { model: 'deepseek-chat' } }),
+    })
+    const body = await response.json() as { error: { message: string; code: string } }
+    expect(body.error.code).toBe('agent_create_failed')
+    expect(body.error.message).not.toContain('factory failed')
+  })
+
   it('streams create-session events and later input, cancel, and tool output', async () => {
     const { base, agents, registry, feed } = gateway()
     const root = await base
@@ -868,7 +879,7 @@ describe('AgentsGateway', () => {
     })
     expect(unknown.status).toBe(500)
     expect(await unknown.json()).toMatchObject({
-      error: { message: expect.stringContaining('missing_host_tool') },
+      error: { code: 'agent_create_failed', message: 'The session could not be created' },
     })
   })
 
@@ -908,7 +919,7 @@ describe('AgentsGateway', () => {
     })
     expect(response.status).toBe(500)
     expect(await response.json()).toMatchObject({
-      error: { message: expect.stringContaining('systemPrompt') },
+      error: { code: 'agent_create_failed', message: 'The session could not be created' },
     })
   })
 

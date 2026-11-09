@@ -45,11 +45,12 @@ afterEach(async () => {
 })
 
 /** A gateway over a fake context, a memory store, and a fake schedule service. */
-async function start(options: { schedule?: boolean } = {}) {
+async function start(options: { schedule?: boolean; failCreate?: boolean } = {}) {
   const live = new Map<string, { dispose: ReturnType<typeof vi.fn> }>()
   const ctx = {
     agents: {
       create: ({ sessionId }: { sessionId: string }) => {
+        if (options.failCreate === true) return Promise.reject(new Error('postgres://internal-host failed'))
         const dispose = vi.fn(() => Promise.resolve())
         live.set(sessionId, { dispose })
         return Promise.resolve({ agent: { followup: vi.fn(), steer: vi.fn(), cancel: vi.fn(), model: fakeModel() }, dispose })
@@ -92,13 +93,22 @@ async function start(options: { schedule?: boolean } = {}) {
     return (await api.createIdleSession(owner, { agent: { model: 'deepseek-chat' } })).id
   }
 
-  return { api, store, fake, registry, live, call, chat }
+  return { api, store, fake, registry, live, call, chat, ctx }
 }
 
 const DAILY = { kind: 'daily', daily: { time: '08:00', time_zone: 'Asia/Kuala_Lumpur' } } as const
 const CREATE = { title: 'Morning brief', prompt: 'Summarize the news', timing: DAILY, agent: { model: 'deepseek-chat' } }
 
 describe('POST /agents/schedules', () => {
+  it('answers a generic 500 and logs the detail when the session cannot be created', async () => {
+    const { call, ctx } = await start({ failCreate: true })
+    const { status, body } = await call('alice', 'POST', '/agents/schedules', CREATE)
+    expect(status).toBe(500)
+    expect(body.error.code).toBe('agent_create_failed')
+    expect(JSON.stringify(body)).not.toContain('internal-host')
+    expect((ctx.logger.warn as ReturnType<typeof vi.fn>).mock.calls.join('\n')).toContain('internal-host')
+  })
+
   it('provisions a session and creates the task against it with the session as actor', async () => {
     const { call, fake, store } = await start()
     const { status, body } = await call('alice', 'POST', '/agents/schedules', CREATE)
@@ -317,6 +327,38 @@ describe('owned task routes', () => {
     expect(body).toEqual({ id: 'sch_1', object: 'agent.schedule.deleted', deleted: true })
     expect(fake.entries).toEqual([])
     expect(await store.sessions.get(sessionId, ALICE)).toBeDefined()
+  })
+
+  it('passes the read revision as expectedUpdatedAt on delete, pause, and resume', async () => {
+    const { call, fake } = await owned()
+    await call('alice', 'POST', '/agents/schedules/sch_1/pause')
+    const revision = fake.entries[0]!.updatedAt
+    await call('alice', 'POST', '/agents/schedules/sch_1/resume')
+    const revision2 = fake.entries[0]!.updatedAt
+    await call('alice', 'DELETE', '/agents/schedules/sch_1')
+    const edits = fake.calls.filter(entry => entry.method === 'edit').map(entry => entry.args[0])
+    expect(edits[0]).toMatchObject({ expectedUpdatedAt: '2026-11-09T00:00:00.000Z' })
+    expect(edits[1]).toMatchObject({ expectedUpdatedAt: revision })
+    expect(edits[2]).toMatchObject({ expectedUpdatedAt: revision2 })
+  })
+
+  it.each([
+    ['delete', 'DELETE', ''],
+    ['pause', 'POST', '/pause'],
+    ['resume', 'POST', '/resume'],
+  ])('answers 409 schedule_conflict when the task changes between the ownership read and %s', async (_name, method, suffix) => {
+    const { call, fake } = await owned()
+    const view = fake.service.view
+    fake.service.view = async (request: { id: string }) => {
+      const seen = await view(request)
+      fake.entries[0] = { ...fake.entries[0]!, title: 'Changed elsewhere', updatedAt: '2026-11-09T01:00:00.000Z' }
+      return seen
+    }
+    const { status, body } = await call('alice', method, `/agents/schedules/sch_1${suffix}`)
+    expect(status).toBe(409)
+    expect(body.error.code).toBe('schedule_conflict')
+    expect(fake.entries).toHaveLength(1)
+    expect(fake.entries[0]!.title).toBe('Changed elsewhere')
   })
 
   it('pauses and resumes', async () => {

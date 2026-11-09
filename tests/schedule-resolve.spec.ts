@@ -38,6 +38,7 @@ afterEach(async () => {
 interface CatalogRow {
   id: string
   target: { kind: 'session' | 'new_once'; sessionId: string } | { kind: 'new' }
+  involvedSessionIds?: string[]
 }
 
 /** In-memory `catalog` and `edit` delete, recording the deleted ids. */
@@ -46,7 +47,7 @@ function fakeSchedule(rows: CatalogRow[]): { service: ScheduleService; rows: Cat
   const service = {
     catalog: async () => {
       if (state.failCatalog) throw new Error('schedule store offline')
-      return [...state.rows]
+      return state.rows.map(row => ({ ...row, involvedSessionIds: row.involvedSessionIds ?? [] }))
     },
     edit: async (request: { id: string; action: 'delete' }) => {
       state.deleted.push(request.id)
@@ -62,6 +63,8 @@ interface Process {
   registry: SessionRegistry
   origin: string
   resume: ReturnType<typeof vi.fn<(options: ResumeAgentOptions) => Promise<unknown>>>
+  /** Dispose spy of each live agent by session id. */
+  disposers: Map<string, ReturnType<typeof vi.fn>>
 }
 
 /**
@@ -72,6 +75,7 @@ interface Process {
  */
 async function startProcess(store: MemoryStore, query: FakeSessionQuery, schedule?: ScheduleService): Promise<Process> {
   const agents = new Map<string, { followup: ReturnType<typeof vi.fn> }>()
+  const disposers = new Map<string, ReturnType<typeof vi.fn>>()
   const make = async (sessionId: string, setup?: (agentCtx: unknown) => Promise<void>) => {
     const agent = { followup: vi.fn(), steer: vi.fn(), cancel: vi.fn(), model: fakeModel() }
     agents.set(sessionId, agent)
@@ -82,7 +86,9 @@ async function startProcess(store: MemoryStore, query: FakeSessionQuery, schedul
       plugin: () => Promise.resolve(),
       tools: { register: () => () => undefined, restrict: () => () => undefined, guard: () => () => undefined },
     })
-    return { agent, dispose: vi.fn(() => Promise.resolve()) }
+    const dispose = vi.fn(() => Promise.resolve())
+    disposers.set(sessionId, dispose)
+    return { agent, dispose }
   }
   const resume = vi.fn<(options: ResumeAgentOptions) => Promise<unknown>>(options => make(options.resumeSessionId, options.setup as never))
   const ctx = {
@@ -107,7 +113,7 @@ async function startProcess(store: MemoryStore, query: FakeSessionQuery, schedul
   await new Promise<void>((done) => {
     server.listen(0, '127.0.0.1', done)
   })
-  return { api, registry, origin: `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`, resume }
+  return { api, registry, origin: `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`, resume, disposers }
 }
 
 /** Create a session in one process, log a turn, and restart, so the session is not live in the returned process. */
@@ -207,8 +213,47 @@ describe('session delete and scheduled tasks', () => {
     schedule.failCatalog = true
     const response = await fetch(`${process.origin}/v1/agents/sessions/${id}`, { method: 'DELETE' })
     expect(response.status).toBe(500)
-    expect(await response.json()).toMatchObject({ error: { code: 'schedule_cleanup_failed' } })
+    const body = await response.json() as { error: { code: string; message: string } }
+    expect(body.error.code).toBe('schedule_cleanup_failed')
+    expect(body.error.message).not.toContain('schedule store offline')
     expect(await store.sessions.get(id, 'any')).toBeDefined()
     expect(process.registry.get(id)).toBeDefined()
+  })
+
+  it('deletes tasks that only list the session as involved', async () => {
+    const store = new MemoryStore()
+    await store.ensureOwner(OWNER)
+    const schedule = fakeSchedule([])
+    const process = await startProcess(store, new FakeSessionQuery(), schedule.service)
+    const { id } = await process.api.createIdleSession(OWNER, { agent: { model: 'deepseek-chat' } })
+    const { id: other } = await process.api.createIdleSession(OWNER, { agent: { model: 'deepseek-chat' } })
+    schedule.rows = [
+      { id: 'sch_chat_new', target: { kind: 'new' }, involvedSessionIds: [id] },
+      { id: 'sch_retargeted', target: { kind: 'new_once', sessionId: 'sess_delivered' }, involvedSessionIds: [id] },
+      { id: 'sch_other', target: { kind: 'new' }, involvedSessionIds: [other] },
+    ]
+    expect((await fetch(`${process.origin}/v1/agents/sessions/${id}`, { method: 'DELETE' })).status).toBe(200)
+    expect(schedule.deleted).toEqual(['sch_chat_new', 'sch_retargeted'])
+    expect(schedule.rows.map(row => row.id)).toEqual(['sch_other'])
+  })
+
+  it('stops the live agent before it deletes the tasks', async () => {
+    const store = new MemoryStore()
+    await store.ensureOwner(OWNER)
+    const schedule = fakeSchedule([])
+    const process = await startProcess(store, new FakeSessionQuery(), schedule.service)
+    const { id } = await process.api.createIdleSession(OWNER, { agent: { model: 'deepseek-chat' } })
+    const order: string[] = []
+    process.disposers.get(id)!.mockImplementation(() => {
+      order.push('dispose')
+      return Promise.resolve()
+    })
+    const catalog = schedule.service.catalog.bind(schedule.service)
+    vi.spyOn(schedule.service, 'catalog').mockImplementation(() => {
+      order.push('catalog')
+      return catalog()
+    })
+    expect((await fetch(`${process.origin}/v1/agents/sessions/${id}`, { method: 'DELETE' })).status).toBe(200)
+    expect(order).toEqual(['dispose', 'catalog'])
   })
 })

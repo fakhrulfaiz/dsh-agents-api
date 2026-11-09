@@ -44,6 +44,8 @@ export interface ScheduleApiDeps {
   createSession: (owner: OwnerId, params: CreateScheduleSessionParams) => Promise<OAIAgentSession>
   /** Remove a session without an HTTP request (`AgentsGateway.discardSession`). */
   discardSession: (owner: OwnerId, sessionId: string) => Promise<void>
+  /** Log a warning with the internal detail that a 500 body withholds. */
+  warn: (message: string) => void
 }
 
 /** Session body the schedule routes pass to `createSession`. */
@@ -185,6 +187,14 @@ function writeMapped(res: ServerResponse, mapped: MappedScheduleError): void {
  */
 function scheduleNotFound(res: ServerResponse, id: string): void {
   json(res, 404, { error: { type: 'invalid_request_error', message: `Schedule "${id}" not found`, code: 'schedule_not_found' } })
+}
+
+/**
+ * @param entry - task as read for the ownership check.
+ * @returns the `expectedUpdatedAt` guard for a mutation, empty for a legacy task without `updatedAt`.
+ */
+function revisionOf(entry: { readonly updatedAt?: string }): { expectedUpdatedAt?: string } {
+  return entry.updatedAt === undefined ? {} : { expectedUpdatedAt: entry.updatedAt }
 }
 
 /**
@@ -350,7 +360,8 @@ export class ScheduleApi {
       } catch (error: unknown) {
         if (error instanceof AgentsApiRequestError) return writeRequestError(res, error)
         if (error instanceof SessionCreateError) {
-          return json(res, 500, { error: { type: 'server_error', message: error.message, code: error.code } })
+          this.deps.warn(`agents-api: schedule session create failed: ${error.message}`)
+          return json(res, 500, { error: { type: 'server_error', message: 'The session could not be created', code: error.code } })
         }
         throw error
       }
@@ -474,7 +485,7 @@ export class ScheduleApi {
     const id = routeParam(params, 'schedule_id')
     const owned = await this.loadOwned(res, service, principal.owner, id)
     if (owned === undefined) return
-    const result = await this.guarded(res, () => service.edit({ id: owned.entry.id, action: 'delete' }))
+    const result = await this.guarded(res, () => service.edit({ id: owned.entry.id, action: 'delete', ...revisionOf(owned.entry) }))
     if (result !== undefined) this.respondEdit(res, id, owned.sessionId, result)
   }
 
@@ -491,7 +502,7 @@ export class ScheduleApi {
     const id = routeParam(params, 'schedule_id')
     const owned = await this.loadOwned(res, service, principal.owner, id)
     if (owned === undefined) return
-    const result = await this.guarded(res, () => service.edit({ id: owned.entry.id, action: 'update', patch: { active } }))
+    const result = await this.guarded(res, () => service.edit({ id: owned.entry.id, action: 'update', patch: { active }, ...revisionOf(owned.entry) }))
     if (result !== undefined) this.respondEdit(res, id, owned.sessionId, result)
   }
 
@@ -501,6 +512,7 @@ export class ScheduleApi {
     const id = routeParam(params, 'schedule_id')
     const owned = await this.loadOwned(res, service, principal.owner, id)
     if (owned === undefined) return
+    // `ScheduleRunRequest` has no `expectedUpdatedAt`; the Host offers no stale-read guard for run.
     const result = await this.guarded(res, () => service.run({ id: owned.entry.id }))
     if (result === undefined) return
     if ('code' in result) {

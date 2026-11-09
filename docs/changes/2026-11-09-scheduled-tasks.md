@@ -24,3 +24,7 @@ The API exposes the Host schedule service (`ctx.schedule`) as owner-scoped `/v1/
 ## Verification
 
 Unit tests use `tests/support/fake-schedule.ts`; the contract test validates every route's request and response against the spec. Live verification against a running profile (an `at` task across a restart, a chat-created task visible to its owner only, `run`) is still open.
+
+## Hardening
+
+A security review found four issues, now fixed. Deleting a session removes every task that targets it or lists it in `involvedSessionIds` (chat-created `new` tasks and retargeted `new_once` tasks were left ownerless). The delete order is: stop the live agent (cancel its turn, dispose it), delete the tasks, then remove the index row; a turn in flight can no longer call `schedule_create this_session` after the sweep, and a failed sweep answers 500 `schedule_cleanup_failed` with the session kept. Pause, resume, and delete pass the `updatedAt` read for the ownership check as `expectedUpdatedAt`, so a change in between answers 409 `schedule_conflict`; `run` stays unguarded because the Host `ScheduleRunRequest` has no such field. The `schedule_cleanup_failed` and `agent_create_failed` 500 bodies carry generic messages and the underlying error goes to the log.

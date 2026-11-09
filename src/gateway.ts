@@ -184,6 +184,7 @@ export class AgentsGateway {
       store: () => this.store,
       createSession: (owner, params) => this.createIdleSession(owner, params),
       discardSession: (owner, sessionId) => this.discardSession(owner, sessionId),
+      warn: message => this.ctx.logger.warn(message),
     })
     const skillsApi = new SkillsApi({
       skills: options.skills,
@@ -461,7 +462,8 @@ export class AgentsGateway {
         return
       }
       if (error instanceof SessionCreateError) {
-        json(res, 500, { error: { type: 'server_error', message: error.message, code: error.code } })
+        this.ctx.logger.warn(`agents-api: session create failed: ${errorMessage(error)}`)
+        json(res, 500, { error: { type: 'server_error', message: 'The session could not be created', code: error.code } })
         return
       }
       throw error
@@ -744,10 +746,16 @@ export class AgentsGateway {
   private async deleteSession(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
     if (!await this.requireSession(res, owner, sessionId)) return
+    // Order matters: the live agent is stopped first so a turn in flight cannot
+    // call `schedule_create this_session` after the sweep; then the tasks go; the
+    // index row goes last. When the sweep fails the session stays indexed and
+    // resumes on its next use.
+    await this.stopLiveAgent(sessionId)
     try {
       await this.deleteSchedulesForSession(sessionId)
     } catch (error: unknown) {
-      json(res, 500, { error: { type: 'server_error', message: errorMessage(error), code: 'schedule_cleanup_failed' } })
+      this.ctx.logger.warn(`agents-api: schedule cleanup for ${sessionId} failed: ${errorMessage(error)}`)
+      json(res, 500, { error: { type: 'server_error', message: 'Scheduled tasks for this session could not be removed', code: 'schedule_cleanup_failed' } })
       return
     }
     await this.discardSession(owner, sessionId)
@@ -766,11 +774,22 @@ export class AgentsGateway {
   async discardSession(owner: OwnerId, sessionId: string): Promise<void> {
     await this.deleteEnvironmentsForSession(owner, sessionId)
     await this.store.sessions.delete(sessionId, owner)
+    this.sessionRegistry.delete(sessionId)
+    this.statusWrites.delete(sessionId)
+    await this.stopLiveAgent(sessionId)
+  }
+
+  /**
+   * Cancel the session's turn, reject its pending approvals and function calls,
+   * and dispose the live agent. Safe to call twice and for a session with no
+   * live agent.
+   * @param sessionId - session whose agent stops.
+   */
+  private async stopLiveAgent(sessionId: string): Promise<void> {
     this.approvals.cancelAll(sessionId)
     this.pendingBySession.get(sessionId)?.rejectAll(new Error(`Session "${sessionId}" was deleted`))
     this.pendingBySession.delete(sessionId)
-    this.sessionRegistry.delete(sessionId)
-    this.statusWrites.delete(sessionId)
+    this.ctx.agents.get(SessionId(sessionId))?.cancel({ kind: 'user' }, { keepInbox: true })
     const handle = this.handles.get(sessionId)
     this.handles.delete(sessionId)
     if (handle) {
@@ -783,10 +802,11 @@ export class AgentsGateway {
   }
 
   /**
-   * Delete every scheduled task that delivers to `sessionId`. Runs before the
-   * index row is removed, so `agentFor` never hands a deleted session's
-   * deliveries to the Host's default resolver. A task already deleted elsewhere
-   * is skipped.
+   * Delete every scheduled task that delivers to or involves `sessionId`
+   * (chat-created `new` tasks list the chat only in `involvedSessionIds`, and a
+   * delivered `new_once` task is retargeted). Runs before the index row is
+   * removed, so `agentFor` never hands a deleted session's deliveries to the
+   * Host's default resolver. A task already deleted elsewhere is skipped.
    * @param sessionId - session being deleted.
    * @throws when the schedule service rejects `catalog` or a delete; the session is then left in place.
    */
@@ -794,7 +814,8 @@ export class AgentsGateway {
     const schedule = this.schedule()
     if (schedule === undefined) return
     for (const entry of await schedule.catalog()) {
-      if (!('sessionId' in entry.target) || entry.target.sessionId !== sessionId) continue
+      const targeted = 'sessionId' in entry.target && entry.target.sessionId === sessionId
+      if (!targeted && !entry.involvedSessionIds.includes(SessionId(sessionId))) continue
       await schedule.edit({ id: entry.id, action: 'delete' })
     }
   }
