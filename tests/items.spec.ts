@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { itemsFromEvent } from '../src/items.ts'
+import { ATTACHMENT_NOTE_PREFIX } from '../src/files/note.ts'
 
 function event(type: SessionEvent['type'], data: unknown, seq = 1): SessionEvent {
   return { type, seq, time: seq, data } as SessionEvent
@@ -153,5 +154,50 @@ describe('itemsFromEvent for scheduled prompts', () => {
     const notice = ['[SCHEDULE CHANGE]', 'A scheduled task involving this session was changed outside this session.', 'change: updated'].join('\n')
     expect(itemsFromEvent(scheduled(notice), 'turn_2')).toEqual([])
     expect(itemsFromEvent(scheduled('anything else'), 'turn_2')).toEqual([])
+  })
+})
+
+describe('user message attachments', () => {
+  const image = { attachmentId: 'img-1', mediaType: 'image/png', bytes: 72, width: 16, height: 9, name: 'shot.png' }
+  const file = { attachmentId: 'file-1', name: 'notes.txt', bytes: 5 }
+  const note = `${ATTACHMENT_NOTE_PREFIX} uploads/shot.png (image/png, 72 B); uploads/notes.txt (text/plain, 5 B)`
+
+  it('projects text, image, and file blocks to ordered parts and hides the agent-facing note', () => {
+    const [item] = itemsFromEvent(event('user/message', {
+      content: [{ type: 'text', text: 'look' }, { type: 'image', attachment: image }, { type: 'file', attachment: file }, { type: 'text', text: note }],
+      source: { kind: 'user' },
+    }), 'turn_1')
+    expect(item).toMatchObject({ type: 'message', role: 'user' })
+    expect((item as { content: unknown }).content).toEqual([
+      { type: 'input_text', text: 'look' },
+      { type: 'input_image', filename: 'shot.png', bytes: 72, media_type: 'image/png', width: 16, height: 9, attachment_id: 'img-1' },
+      { type: 'input_file', filename: 'notes.txt', bytes: 5, media_type: 'text/plain', attachment_id: 'file-1' },
+    ])
+  })
+
+  it('omits the empty text part of a file-only message and keeps one for a plain message', () => {
+    const [fileOnly] = itemsFromEvent(event('user/message', { content: [{ type: 'file', attachment: file }, { type: 'text', text: note }], source: { kind: 'user' } }), 'turn_1')
+    expect((fileOnly as { content: Array<{ type: string }> }).content.map(part => part.type)).toEqual(['input_file'])
+    const [plain] = itemsFromEvent(event('user/message', { content: 'hello', source: { kind: 'user' } }), 'turn_1')
+    expect((plain as { content: unknown }).content).toEqual([{ type: 'input_text', text: 'hello' }])
+  })
+
+  it('keeps unnamed blocks showable and skips blocks without an attachment id', () => {
+    const [item] = itemsFromEvent(event('user/message', {
+      content: [{ type: 'image', attachment: { attachmentId: 'x', mediaType: 'image/webp', bytes: 1, width: 1, height: 1 } }, { type: 'file', attachment: {} }],
+      source: { kind: 'user' },
+    }), 'turn_1')
+    expect((item as { content: Array<{ filename: string }> }).content.map(part => part.filename)).toEqual(['image'])
+  })
+
+  it('pins the note prefix that the send path writes', () => {
+    expect(note.startsWith(ATTACHMENT_NOTE_PREFIX)).toBe(true)
+    expect(ATTACHMENT_NOTE_PREFIX).toBe('Attached files copied to the workspace:')
+  })
+
+  it('leaves subagent and schedule messages unchanged', () => {
+    expect(itemsFromEvent(event('user/message', { content: [{ type: 'text', text: 'delegate' }], source: { kind: 'subagent' } }), 'turn_1')).toEqual([])
+    const [scheduled] = itemsFromEvent(event('user/message', { content: [{ type: 'text', text: '[SCHEDULE REMINDER]\nreminder_prompt_json: "ping"\nschedule_id_json: "sch_1"' }], source: { kind: 'schedule' } }), 'turn_1')
+    expect(scheduled).toMatchObject({ source: 'schedule', content: [{ type: 'input_text', text: 'ping' }] })
   })
 })

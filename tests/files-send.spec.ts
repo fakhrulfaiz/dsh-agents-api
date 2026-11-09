@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { ATTACHMENT_NOTE_PREFIX } from '../src/files/ingest.ts'
+import { ATTACHMENT_NOTE_PREFIX } from '../src/files/note.ts'
 import { filesHarness, PNG } from './support/files-harness.ts'
 import { logEvent } from './support/fake-session-query.ts'
 
@@ -320,5 +320,56 @@ describe('attach on send (open chat)', () => {
     expect(await h.store.files.get(txt.body['id'], 'alice' as never)).toBeUndefined()
     const gone = await fetch(`${h.origin}/v1/agents/files/${txt.body['id']}/content`, { headers: { authorization: 'Bearer alice' } })
     expect(gone.status).toBe(404)
+  })
+})
+
+describe('item parts', () => {
+  /** Log the user message the fake agent received, as the Host would. */
+  function logSent(h: Harness, sessionId: string, seq = 1): void {
+    const user = sent(h, sessionId)
+    h.query.append(sessionId, logEvent('user/message', { content: user.content, source: user.source }, seq))
+  }
+
+  it('lists file parts with file_id and the stored media type, in the item list and the send response', async () => {
+    const h = await start()
+    const png = await h.upload('alice', 'shot.png', PNG, 'image/png')
+    const txt = await h.upload('alice', 'notes.txt', 'hello', 'text/plain')
+    const created = await newChat(h, 'alice', message('see', ['input_image', png.body['id']], ['input_file', txt.body['id']]))
+    const sessionId = created.body!['id'] as string
+    logSent(h, sessionId)
+    const items = await h.request('alice', 'GET', `/agents/sessions/${sessionId}/items`)
+    expect(items.body!['data']).toHaveLength(1)
+    expect(items.body!['data'][0].content).toEqual([
+      { type: 'input_text', text: 'see' },
+      { type: 'input_image', file_id: png.body['id'], filename: 'shot.png', bytes: PNG.length, media_type: 'image/png', width: 16, height: 9 },
+      { type: 'input_file', file_id: txt.body['id'], filename: 'notes.txt', bytes: 5, media_type: 'text/plain' },
+    ])
+    const followUp = await sendEvent(h, 'alice', sessionId, message('again'))
+    expect(followUp.body!['items'][0].content[1]).toMatchObject({ type: 'input_image', file_id: png.body['id'] })
+    expect(JSON.stringify(items.body)).not.toContain('attachment_id')
+    expect(JSON.stringify(items.body)).not.toContain(ATTACHMENT_NOTE_PREFIX)
+  })
+
+  it('shows a part without file_id when the attachment has no row, and never leaks the internal id', async () => {
+    const h = await start()
+    const sessionId = (await newChat(h, 'alice')).body!['id'] as string
+    h.query.append(sessionId, logEvent('user/message', {
+      content: [{ type: 'file', attachment: { attachmentId: 'foreign', name: 'old.txt', bytes: 3 } }],
+      source: { kind: 'user' },
+    }, 1))
+    const items = await h.request('alice', 'GET', `/agents/sessions/${sessionId}/items`)
+    expect(items.body!['data'][0].content).toEqual([{ type: 'input_file', filename: 'old.txt', bytes: 3, media_type: 'text/plain' }])
+  })
+
+  it('does not resolve file ids from rows of another owner or another session', async () => {
+    const h = await start()
+    const sessionA = (await newChat(h, 'alice')).body!['id'] as string
+    const txt = await h.upload('alice', 'notes.txt', 'hello', 'text/plain')
+    await sendEvent(h, 'alice', sessionA, message('x', ['input_file', txt.body['id']]))
+    const ref = (await h.store.files.get(txt.body['id'], 'alice' as never))!.attachment!.ref
+    const sessionB = (await newChat(h, 'alice')).body!['id'] as string
+    h.query.append(sessionB, logEvent('user/message', { content: [{ type: 'file', attachment: ref }], source: { kind: 'user' } }, 1))
+    const items = await h.request('alice', 'GET', `/agents/sessions/${sessionB}/items`)
+    expect(items.body!['data'][0].content[0]).not.toHaveProperty('file_id')
   })
 })

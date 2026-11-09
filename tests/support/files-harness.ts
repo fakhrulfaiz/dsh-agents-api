@@ -182,6 +182,7 @@ export async function filesHarness(options: FilesHarnessOptions = {}) {
     workspaces,
     staging,
     store,
+    query,
     api,
     ctx,
     agents,

@@ -3,9 +3,12 @@
  */
 
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { ATTACHMENT_NOTE_PREFIX } from './files/note.ts'
+import { typeFromExtension } from './files/sniff.ts'
 import { parseToolArguments, textFromContent } from './input.ts'
 import type {
   OAICommandExecutionItem,
+  OAIInputFilePart,
   OAIFunctionCallItem,
   OAIFunctionCallOutputItem,
   OAIMessageItem,
@@ -83,6 +86,41 @@ function scheduledPromptItems(seq: number, text: string, turnId: string): OAIMes
 }
 
 /**
+ * Content parts of a user message the client sent: the typed text, then one part per image or file block.
+ * The agent-facing attachment note is not part of what the user typed and is left out.
+ * @param content - logged message content.
+ * @returns parts; a plain message keeps exactly one `input_text` part, an attachment-only message has none.
+ */
+function userContentParts(content: unknown): Array<OAIMessageItem['content'][number]> {
+  if (!Array.isArray(content)) return [{ type: 'input_text', text: textFromContent(content) }]
+  const typed = content.filter((block: unknown) => {
+    const rec = block as { type?: unknown; text?: unknown }
+    return !(rec?.type === 'text' && typeof rec.text === 'string' && rec.text.startsWith(ATTACHMENT_NOTE_PREFIX))
+  })
+  const files: OAIInputFilePart[] = []
+  for (const block of typed as Array<Record<string, any>>) {
+    const attachment = block?.['attachment'] as { attachmentId?: string; name?: string; bytes?: number; mediaType?: string; width?: number; height?: number } | undefined
+    if (attachment === undefined || typeof attachment.attachmentId !== 'string') continue
+    const name = attachment.name ?? (block['type'] === 'image' ? 'image' : 'file')
+    if (block['type'] === 'image') {
+      files.push({
+        type: 'input_image',
+        filename: name,
+        bytes: attachment.bytes ?? 0,
+        media_type: attachment.mediaType ?? 'application/octet-stream',
+        ...(attachment.width === undefined ? {} : { width: attachment.width }),
+        ...(attachment.height === undefined ? {} : { height: attachment.height }),
+        attachment_id: attachment.attachmentId,
+      })
+    } else if (block['type'] === 'file') {
+      files.push({ type: 'input_file', filename: name, bytes: attachment.bytes ?? 0, media_type: typeFromExtension(name) ?? 'application/octet-stream', attachment_id: attachment.attachmentId })
+    }
+  }
+  const text = textFromContent(typed.filter((block: unknown) => (block as { type?: unknown })?.type !== 'image' && (block as { type?: unknown })?.type !== 'file'))
+  return files.length > 0 && text === '' ? files : [{ type: 'input_text', text }, ...files]
+}
+
+/**
  * Convert one committed Session event into zero or more saved items.
  *
  * Live listing accumulates these items as `session/event` fires. This function
@@ -98,12 +136,11 @@ export function itemsFromEvent(event: SessionEvent, turnId: string): OAISessionI
     if (data.source?.kind === 'schedule') return scheduledPromptItems(event.seq, textFromContent(data.content), turnId)
     // Workspace instructions and runtime snapshots are plugin input, not the client's message.
     if (data.source?.kind !== 'user') return []
-    const text = textFromContent(data.content)
     const item: OAIMessageItem = {
       id: `item_msg_${String(event.seq)}`,
       type: 'message',
       role: 'user',
-      content: [{ type: 'input_text', text }],
+      content: userContentParts(data.content),
       status: 'completed',
       turn_id: turnId,
     }

@@ -357,12 +357,31 @@ export interface OAITextContentPart {
   text: string
 }
 
+/**
+ * File part on a user message item, in the order the user sent it (after the `input_text` part).
+ * `file_id` is absent when the file was not uploaded through `POST /agents/files` (or its row is gone); the
+ * part then shows name and size only and has no content link.
+ */
+export interface OAIInputFilePart {
+  type: 'input_image' | 'input_file'
+  /** Id for `GET /agents/files/{file_id}/content`. */
+  file_id?: string
+  filename: string
+  bytes: number
+  media_type: string
+  /** Pixel size of the stored image (`input_image` only). */
+  width?: number
+  height?: number
+  /** Internal: DSH attachment id used to resolve `file_id`; removed before items leave the API. */
+  attachment_id?: string
+}
+
 /** Saved user or assistant message. */
 export interface OAIMessageItem {
   id: string
   type: 'message'
   role: 'user' | 'assistant'
-  content: OAITextContentPart[]
+  content: Array<OAITextContentPart | OAIInputFilePart>
   phase?: 'commentary' | 'final_answer' | null
   /** `schedule` for a prompt a scheduled task delivered; absent for messages the client sent. */
   source?: 'schedule'

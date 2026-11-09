@@ -46,6 +46,7 @@ import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mc
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
 import { CommandsApi, type CommandTarget } from './commands.ts'
+import { withFileIds } from './files/item-parts.ts'
 import { openAttached, type AttachmentsPort } from './files/attached.ts'
 import { AttachmentIngest, type AttachedFiles } from './files/ingest.ts'
 import { FilesApi, uploadedFileSource, type FilesRuntime } from './files/api.ts'
@@ -621,7 +622,7 @@ export class AgentsGateway {
     }
 
     if (hasInput) startTurn()
-    json(res, 200, await this.sessionPayload(oaiSession, base))
+    json(res, 200, await this.sessionPayload(oaiSession, base, owner))
   }
 
   /**
@@ -995,17 +996,19 @@ export class AgentsGateway {
       })
       return
     }
-    json(res, 200, await this.sessionPayload(this.sessionRegistry.getOAISession(sessionId) ?? sessionFromRow(row), baseOf(row)))
+    json(res, 200, await this.sessionPayload(this.sessionRegistry.getOAISession(sessionId) ?? sessionFromRow(row), baseOf(row), owner))
   }
 
   /** Session plus the items and turns CoreWork reads after create and follow-up. */
   private async sessionPayload(
     session: OAIAgentSession,
     base: ProjectionBase,
+    owner: OwnerId,
   ): Promise<OAIAgentSession & { session: OAIAgentSession; items: unknown[]; turns: unknown[] }> {
     const page = { limit: 100, order: 'asc' as const }
     const folded = await this.history.fold(base)
-    return { ...session, session, items: paginate(folded.items, page).data, turns: paginate(folded.turns, page).data }
+    const items = await withFileIds(this.store, owner, base.sessionId, paginate(folded.items, page).data)
+    return { ...session, session, items, turns: paginate(folded.turns, page).data }
   }
 
   private async streamEvents(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -1244,7 +1247,8 @@ export class AgentsGateway {
   private async listItems(res: ServerResponse, url: URL, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const row = await this.requireSession(res, owner, routeParam(params, 'session_id'))
     if (!row) return
-    json(res, 200, await this.history.items(baseOf(row), listQuery(url)))
+    const page = await this.history.items(baseOf(row), listQuery(url))
+    json(res, 200, { ...page, data: await withFileIds(this.store, owner, row.id, page.data) })
   }
 
   private async listTurns(res: ServerResponse, url: URL, params: Record<string, string>, owner: OwnerId): Promise<void> {

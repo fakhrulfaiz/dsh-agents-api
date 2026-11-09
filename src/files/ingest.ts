@@ -16,14 +16,9 @@ import type { FileRow, Store } from '../store/store.ts'
 import type { AttachmentsPort } from './attached.ts'
 import type { UploadLimits } from './config.ts'
 import { FileNotFoundError, stagingKey, type FileStore } from './file-store.ts'
+import { ATTACHMENT_NOTE_PREFIX } from './note.ts'
 import { isRaster } from './sniff.ts'
 import { copyIntoUploads, type WorkspaceCopy } from './workspace-copy.ts'
-
-/**
- * First words of the note block. The wire fold hides a text block that starts with this from the user's bubble,
- * and the writer below produces it; a test pins both.
- */
-export const ATTACHMENT_NOTE_PREFIX = 'Attached files copied to the workspace:'
 
 /** The result of `AttachmentIngest.attach`. */
 export interface AttachedFiles {
