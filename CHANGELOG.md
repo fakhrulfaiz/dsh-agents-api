@@ -3,6 +3,13 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Scheduled deliveries resume Agentry sessions
+
+- Scheduled-task deliveries (`schedule/resolve-agent`) to a session in the index resume it with its Agentry setup (instructions, function and MCP tools, host-tool mask) and register it for SSE and status writes; other session ids keep the Host resolver. A session without a stored setup fails the delivery with `session_not_resumable`. New `AgentsGateway.agentFor(sessionId)`.
+- `DELETE /agents/sessions/{id}` first deletes the scheduled tasks that deliver to the session; when the schedule service cannot be read, it answers 500 `schedule_cleanup_failed` and keeps the session.
+- Fix: concurrent lazy resumes of one session (events, settings, scheduled deliveries) share one `agents.resume`; before, a second caller during the log read started another.
+- `@deepseek-ai/dsh-schedule` is an optional peer dependency; profiles without the schedule service still load. `GatewayOptions.schedule` is required (return `undefined` when absent).
+
 ## 2026-11-10 — Session provisioning without a request
 
 - Internal: `AgentsGateway.createIdleSession(owner, params)` creates an idle session (agent resolution, workspace, agent, index row, no turn) through the same `provisionSession` path as `POST /agents/sessions`; a failed agent create undoes the registration and writes no row (`SessionCreateError`). Groundwork for scheduled tasks. No wire change.

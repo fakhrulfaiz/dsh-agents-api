@@ -67,8 +67,9 @@ describe('apply', () => {
     apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable })
     apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable })
     expect(register).toHaveBeenCalledTimes(4)
-    // Per apply: four approval-bridge listeners (two answerers, session/event, session/disposed) and the two gateway listeners.
-    expect(listeners).toHaveLength(12)
+    // Per apply: four approval-bridge listeners (two answerers, session/event, session/disposed), the two gateway listeners, and the schedule resolver.
+    expect(listeners).toHaveLength(14)
+    expect(byName.has('schedule/resolve-agent')).toBe(true)
     byName.get('session/event')!({ id: 'missing', header: {} }, { type: 'turn/start', seq: 1, time: 1, data: {} })
     await Promise.all(effects)
   })

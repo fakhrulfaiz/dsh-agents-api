@@ -102,5 +102,6 @@ export function testGatewayOptions(environments: EnvironmentProvider, query: Fak
     workspacesRoot: join(tmpdir(), 'agentry-gateway-spec-workspaces'),
     history: createSessionHistory(query),
     approvals,
+    schedule: () => undefined,
   }
 }

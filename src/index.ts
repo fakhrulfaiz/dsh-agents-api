@@ -40,6 +40,7 @@ import { AgentsGateway } from './gateway.ts'
 import { errorMessage } from './http.ts'
 import { createSessionHistory } from './history/session-history.ts'
 import { recoverSessions, recoveryUnavailable } from './recovery.ts'
+import { installScheduleResolver } from './schedule-resolver.ts'
 import { CodeboxDisabledError, resolveRuntimeConfig, type RuntimeConfigInput } from './runtime-config.ts'
 import { SessionRegistry } from './session-registry.ts'
 import { migrate } from './store/migrate.ts'
@@ -57,6 +58,7 @@ export * from './bridge.ts'
 export * from './history/projector.ts'
 export * from './history/session-history.ts'
 export * from './recovery.ts'
+export * from './schedule-resolver.ts'
 export * from './approvals/approval-bridge.ts'
 export * from './session-resource.ts'
 export * from './gateway.ts'
@@ -289,7 +291,9 @@ export function createAuthenticator(auth: ResolvedAuthConfig, warn: (message: st
 /**
  * Register the Agents API prefix route and Session-event bridge, then migrate,
  * open the Postgres store, and recover sessions that were running at shutdown
- * in the background. Until the store is open `/v1` answers 503
+ * in the background. Scheduled deliveries (`schedule/resolve-agent`) to a
+ * session in the index resume it through the gateway; the schedule service is
+ * optional and read at call time. Until the store is open `/v1` answers 503
  * `store_unavailable`; when migration, connection, or recovery fails, a
  * `StoreStartError` is logged and `/v1` keeps answering 503 with its message.
  * @param ctx - plugin context with `webServer`, `sessions`, `agents`, `agentDefaultModel`, `tools`, `sessionQuery`, and `sessionPersistence`.
@@ -308,10 +312,13 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     workspacesRoot: runtime.workspacesRoot,
     history: createSessionHistory(ctx.sessionQuery),
     approvals,
+    schedule: () => ctx.get('schedule'),
     ...(runtime.artifacts === undefined ? {} : { artifacts: runtime.artifacts }),
   })
 
   ctx.effect(() => openStore(ctx, config.database.url, gateway), 'agents-api: postgres store')
+
+  installScheduleResolver(ctx, sessionId => gateway.agentFor(sessionId))
 
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     const parent = session.header?.parentSession

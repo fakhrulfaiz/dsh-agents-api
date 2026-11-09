@@ -11,7 +11,8 @@ import { isAbsolute, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-import type { AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
+import type { ScheduleService } from '@deepseek-ai/dsh-schedule'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
@@ -102,6 +103,8 @@ export interface GatewayOptions {
   history: SessionHistory
   /** Pending approvals and questions; the gateway answers, cancels, and deletes through it. */
   approvals: ApprovalBridge
+  /** The Host schedule service when the profile provides one, read at call time. */
+  schedule: () => ScheduleService | undefined
   artifacts?: ArtifactS3Config
 }
 
@@ -136,6 +139,7 @@ export class AgentsGateway {
   private readonly workspacesRoot: string
   private readonly history: SessionHistory
   private readonly approvals: ApprovalBridge
+  private readonly schedule: () => ScheduleService | undefined
   private readonly artifacts: ArtifactS3Config | undefined
   private readonly routes: Route[]
   #store: Store | undefined
@@ -164,6 +168,7 @@ export class AgentsGateway {
     this.workspacesRoot = options.workspacesRoot
     this.history = options.history
     this.approvals = options.approvals
+    this.schedule = options.schedule
     this.artifacts = options.artifacts
     this.routes = [
       { method: 'POST', pattern: '/agents', handler: (req, res, _url, _params, p) => this.createAgent(req, res, p.owner) },
@@ -717,6 +722,12 @@ export class AgentsGateway {
   private async deleteSession(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
     if (!await this.requireSession(res, owner, sessionId)) return
+    try {
+      await this.deleteSchedulesForSession(sessionId)
+    } catch (error: unknown) {
+      json(res, 500, { error: { type: 'server_error', message: errorMessage(error), code: 'schedule_cleanup_failed' } })
+      return
+    }
     await this.deleteEnvironmentsForSession(owner, sessionId)
     await this.store.sessions.delete(sessionId, owner)
     this.approvals.cancelAll(sessionId)
@@ -734,6 +745,23 @@ export class AgentsGateway {
       }
     }
     json(res, 200, { id: sessionId, object: 'agent.session.deleted', deleted: true })
+  }
+
+  /**
+   * Delete every scheduled task that delivers to `sessionId`. Runs before the
+   * index row is removed, so `agentFor` never hands a deleted session's
+   * deliveries to the Host's default resolver. A task already deleted elsewhere
+   * is skipped.
+   * @param sessionId - session being deleted.
+   * @throws when the schedule service rejects `catalog` or a delete; the session is then left in place.
+   */
+  private async deleteSchedulesForSession(sessionId: string): Promise<void> {
+    const schedule = this.schedule()
+    if (schedule === undefined) return
+    for (const entry of await schedule.catalog()) {
+      if (!('sessionId' in entry.target) || entry.target.sessionId !== sessionId) continue
+      await schedule.edit({ id: entry.id, action: 'delete' })
+    }
   }
 
   private async postEvents(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -992,10 +1020,13 @@ export class AgentsGateway {
    * @throws AgentsApiRequestError 409 `session_not_resumable` when the row has no stored setup.
    */
   private async ensureLive(row: SessionIndexRow): Promise<void> {
-    if (this.sessionRegistry.get(row.id) !== undefined) {
-      await this.resuming.get(row.id)
+    // The resume registers its projector only after reading the log, so an in-flight attempt is checked first.
+    const inFlight = this.resuming.get(row.id)
+    if (inFlight !== undefined) {
+      await inFlight
       return
     }
+    if (this.sessionRegistry.get(row.id) !== undefined) return
     if (row.body === null) {
       throw new AgentsApiRequestError(`Session "${row.id}" ${NO_STORED_CONFIG} and cannot be continued`, 409, 'session_not_resumable')
     }
@@ -1004,6 +1035,24 @@ export class AgentsGateway {
     })
     this.resuming.set(row.id, attempt)
     await attempt
+  }
+
+  /**
+   * Live agent of a session this API owns, resuming it from its Session log
+   * with its stored setup when it is not live. Concurrent calls share one resume.
+   * @param sessionId - DSH session id, for example from `schedule/resolve-agent`.
+   * @returns the agent, or `undefined` when no index row has this id.
+   * @throws AgentsApiRequestError 409 `session_not_resumable` when the row has no stored setup.
+   * @throws StoreUnavailableError when the store is unavailable.
+   * @throws when the resume fails, or the session was deleted while it resumed.
+   */
+  async agentFor(sessionId: string): Promise<Agent | undefined> {
+    const row = await this.store.sessions.get(sessionId, 'any')
+    if (row === undefined) return undefined
+    await this.ensureLive(row)
+    const agent = this.handles.get(row.id)?.agent ?? this.ctx.agents.get(SessionId(row.id))
+    if (agent === undefined) throw new Error(`Session "${row.id}" has no live agent`)
+    return agent
   }
 
   private async listItems(res: ServerResponse, url: URL, params: Record<string, string>, owner: OwnerId): Promise<void> {
