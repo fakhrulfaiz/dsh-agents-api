@@ -3,6 +3,13 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Slash commands
+
+- `GET /v1/agents/commands?session_id=` lists Host commands (`name`, `description`, `input_hint`, `accepts_attachments`) for the `/` menu: the live agent's catalog, the default preset's catalog for a session that is not live (no resume), and an empty list without `session_id`. Cached per scope for `commands.cacheTtlSeconds` (default 60), dropped on `commands/change` and `agent-preset/selected`, strong `ETag` with `304`, `503 commands_unavailable` on a failed read. `@deepseek-ai/dsh-commands` is a new optional peer.
+- `POST /v1/agents/sessions/{id}/commands/{name}` (`{ input? }`) runs a command outside any turn: `200` with `status` `success` or `error` plus the result `item`, `404 command_not_found`, `409 session_busy` while a turn or another command is running, `500 command_failed`. Closing the request aborts the command.
+- `command/run` + `command/done` become one `slash_command` item (`turn_id: null` between turns) in items, history replay, and a new `agent.session.item.done` SSE event. Frame ids of sessions that already logged commands shift by one frame per command.
+- Write-up: [docs/changes/2026-11-10-slash-commands.md](docs/changes/2026-11-10-slash-commands.md). Wire detail: [docs/http-api.md](docs/http-api.md#slash-commands). Spec: `docs/superpowers/specs/2026-11-10-slash-commands-design.md`.
+
 ## 2026-11-10 — ask_user_question stays untimed
 
 - Checked live: with the shipped presets (`tool-ask-user` in blocking mode) a session that calls `ask_user_question` reaches `requires_action` with a `user_question` approval, so no bridge or profile change was needed. `tests/ask-user-mode.spec.ts` pins the default `mode: legacy`; a `mode: timed` row would bypass the bridge (`wait.timed` requests are delegated), so `timeout: -1` is not a fix for it.
