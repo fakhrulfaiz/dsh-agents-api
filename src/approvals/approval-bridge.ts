@@ -15,8 +15,11 @@
  *   and `AskUserQuestionAnswer { answers: { id; selected: string[]; custom? }[] }`
  *   (`dsh-user-questions/types`). Empty `selected` without `custom` means skipped.
  *
- * The listeners claim only requests whose agent is a registered Agents API
- * session and call `next()` for everything else, so the DSH web UI keeps
+ * The listeners run first (`prepend`): the DSH web remote bridge, mounted
+ * earlier, otherwise holds every request while a DSH web tab is connected and
+ * the Agents API client never sees it. They claim only requests whose agent is
+ * a registered Agents API session and call `next()` for everything else, so
+ * the DSH web UI keeps
  * answering its own sessions. A subagent's `agent.session.id` is its child id,
  * which is never registered: its approvals fall through and fail closed.
  * Timed questions (`wait.timed`) need a client claim over RPC; they are not
@@ -174,7 +177,7 @@ export function installApprovalBridge(ctx: Context, deps: ApprovalBridgeDeps): A
         },
       }, req.signal)
     })
-  }), 'agents-api: approval answerer')
+  }, { prepend: true }), 'agents-api: approval answerer')
 
   ctx.effect(() => ctx.on('user-questions/request', (req: AskUserQuestionRequestEvent, next: () => Promise<AskUserQuestionAnswer>) => {
     const sessionId = req.agent === undefined ? undefined : deps.claims(req.agent)
@@ -197,7 +200,7 @@ export function installApprovalBridge(ctx: Context, deps: ApprovalBridgeDeps): A
         },
       }, req.signal)
     })
-  }), 'agents-api: user-question answerer')
+  }, { prepend: true }), 'agents-api: user-question answerer')
 
   ctx.effect(() => ctx.on('session/event', (session: Session, event: SessionEvent) => {
     if (event.type === 'approval/asked') {

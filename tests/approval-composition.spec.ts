@@ -47,6 +47,21 @@ describe('approval bridge on the real approval service', () => {
     expect(bridge.pending(agent.session.id)).toEqual([])
   })
 
+  it('claims a session request ahead of an answerer registered earlier that never settles', async () => {
+    const { ctx, open } = await composed()
+    const agent = open()
+    // Stands in for the DSH web remote bridge, which is mounted before this plugin and holds the request for a connected tab.
+    ctx.on('approval/request', () => new Promise<never>(() => {}))
+    const bridge = installApprovalBridge(ctx, { claims: candidate => candidate.session.id === agent.session.id ? agent.session.id : undefined, onChange: vi.fn() })
+
+    const outcome = ctx.approval.request({ agent, toolName: 'bash', reason: 'run it' })
+    await new Promise(resolve => setImmediate(resolve))
+    const [action] = bridge.pending(agent.session.id)
+    expect(action).toMatchObject({ kind: 'tool_approval', tool_name: 'bash' })
+    expect(bridge.answer(agent.session.id, action!.id, 'deny')).toBe('resolved')
+    await expect(outcome).resolves.toBe('rejected')
+  })
+
   it('falls through to the next answerer for a session it does not own', async () => {
     const { ctx, open } = await composed()
     const bridge = installApprovalBridge(ctx, { claims: () => undefined, onChange: vi.fn() })
