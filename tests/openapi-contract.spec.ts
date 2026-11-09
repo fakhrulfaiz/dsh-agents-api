@@ -15,6 +15,7 @@ import { AgentsGateway } from '../src/gateway.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
 import { openAuthenticator } from './open-auth.ts'
 import { fakeLlm, fakeModel } from './support/fake-model.ts'
+import { FakeSchedule } from './support/fake-schedule.ts'
 import { FakeSessionQuery, logEvent, testGatewayOptions } from './support/fake-session-query.ts'
 import { MemoryStore } from './support/memory-store.ts'
 import { SpecValidator } from './support/openapi.ts'
@@ -52,9 +53,9 @@ function fakeContext(): Context {
   } as unknown as Context
 }
 
-async function start(authenticator: Authenticator = openAuthenticator, store = new MemoryStore()) {
+async function start(authenticator: Authenticator = openAuthenticator, store = new MemoryStore(), schedule?: FakeSchedule) {
   const query = new FakeSessionQuery()
-  const api = new AgentsGateway(fakeContext(), authenticator, '/v1', store, new SessionRegistry(), testGatewayOptions(environments, query))
+  const api = new AgentsGateway(fakeContext(), authenticator, '/v1', store, new SessionRegistry(), { ...testGatewayOptions(environments, query), schedule: () => schedule?.asService() })
   const server = createServer((req, res) => {
     void api.handle(req, res)
   })
@@ -172,6 +173,53 @@ describe('OpenAPI responses', () => {
     }
     const items = await call('GET', '/v1/agents/sessions/{session_id}/items', { session_id: id }, undefined, 200)
     expect(items.data).toMatchObject([{ role: 'user', source: 'schedule', schedule_id: 'schedule-a', content: [{ text: 'Check the build' }] }])
+  })
+
+  it('validates scheduled task requests and responses', async () => {
+    const fake = new FakeSchedule()
+    const { call } = await start(openAuthenticator, new MemoryStore(), fake)
+    const timings = [
+      { kind: 'after', after_seconds: 90 },
+      { kind: 'at', at: '2026-12-01T09:00:00.000Z' },
+      { kind: 'at', at: { date: '2026-12-01', time: '09:00', time_zone: 'Asia/Kuala_Lumpur' } },
+      { kind: 'every', every_seconds: 3600 },
+      { kind: 'daily', daily: { time: '08:00', time_zone: 'UTC' } },
+      { kind: 'weekly', weekly: { time: '08:00', time_zone: 'UTC', weekdays: [1, 2, 3, 4, 5] } },
+      { kind: 'cron', cron: { expression: '0 9 * * 1', time_zone: 'UTC' } },
+      { kind: 'rrule', rrule: 'DTSTART:20261201T090000Z\nRRULE:FREQ=DAILY' },
+    ]
+    for (const timing of timings) {
+      const task = await call('POST', '/v1/agents/schedules', {}, { title: 'T', prompt: 'P', timing, agent: { model: 'deepseek-chat' } }, 200)
+      expect(task.timing.kind).toBe(timing.kind)
+    }
+    const created = await call('POST', '/v1/agents/schedules', {}, { title: 'Brief', prompt: 'Summarize', timing: timings[4], agent: { model: 'deepseek-chat' } }, 200)
+    const params = { schedule_id: created.id as string }
+    fake.deliveries.set(created.id, [{ scheduledAt: '2026-11-10T08:00:00.000Z', deliveredAt: '2026-11-10T08:00:01.000Z', messageId: 'msg_1', targetSessionId: created.session_id }])
+    Object.assign(fake.entries.find(entry => entry.id === created.id)!, {
+      executionActive: true,
+      lastDelivery: { scheduledAt: '2026-11-10T08:00:00.000Z', deliveredAt: '2026-11-10T08:00:01.000Z', messageId: 'msg_1', targetSessionId: created.session_id },
+    })
+    const list = await call('GET', '/v1/agents/schedules', {}, undefined, 200)
+    expect(list.data).toHaveLength(9)
+    await call('GET', '/v1/agents/schedules/{schedule_id}', params, undefined, 200)
+    const updated = await call('POST', '/v1/agents/schedules/{schedule_id}', params, { title: 'Renamed', timing: timings[6], revision: created.revision }, 200)
+    await call('POST', '/v1/agents/schedules/{schedule_id}', params, { title: 'Stale', revision: created.revision }, 409)
+    await call('POST', '/v1/agents/schedules/{schedule_id}', params, {}, 400)
+    await call('POST', '/v1/agents/schedules/{schedule_id}/pause', params, undefined, 200)
+    await call('POST', '/v1/agents/schedules/{schedule_id}/resume', params, undefined, 200)
+    await call('POST', '/v1/agents/schedules/{schedule_id}/run', params, undefined, 200)
+    fake.runPending = true
+    await call('POST', '/v1/agents/schedules/{schedule_id}/run', params, undefined, 409)
+    const runs = await call('GET', '/v1/agents/schedules/{schedule_id}/runs', params, undefined, 200)
+    expect(runs.data).toHaveLength(1)
+    await call('GET', '/v1/agents/schedules/{schedule_id}', { schedule_id: 'missing' }, undefined, 404)
+    await call('DELETE', '/v1/agents/schedules/{schedule_id}', params, undefined, 200)
+    expect(updated.title).toBe('Renamed')
+  })
+
+  it('validates the 501 answer without a schedule service', async () => {
+    const { call } = await start()
+    await call('GET', '/v1/agents/schedules', {}, undefined, 501)
   })
 
   it('validates subagent resources', async () => {

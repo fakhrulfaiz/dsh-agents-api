@@ -6,12 +6,13 @@ Package-local reference and change notes for `@agentry/api`.
 
 | Page | Summary |
 | --- | --- |
-| [http-api.md](http-api.md) | Agents API routes, create/stream input, function-tool and approval wire contracts, live model and effort changes |
+| [http-api.md](http-api.md) | Agents API routes, create/stream input, function-tool and approval wire contracts, live model and effort changes, scheduled tasks |
 
 ## Changes
 
 | Note | Summary |
 | --- | --- |
+| [2026-11-09-scheduled-tasks.md](changes/2026-11-09-scheduled-tasks.md) | Owner-scoped `/agents/schedules` routes over the Host schedule service; ownership derived from the target session; deliveries resume Agentry sessions; scheduled prompts in the chat history; `this_session` prompt guidance |
 | [2026-11-09-openapi-contract.md](changes/2026-11-09-openapi-contract.md) | OpenAPI 3.1 contract with full schemas, `routeTable()`, and the drift and schema-validation tests |
 | [2026-11-09-approvals.md](changes/2026-11-09-approvals.md) | Approvals and user questions as `approval` required actions with `approval_response` input; live `model` / `reasoning.effort` updates; create passes the effort |
 | [2026-11-08-durable-history.md](changes/2026-11-08-durable-history.md) | Items, turns, and SSE replay derived from the Session log; restart recovery; `sessions.body` (migration 0002); status written to the index |

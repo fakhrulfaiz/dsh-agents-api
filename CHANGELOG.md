@@ -3,6 +3,12 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Scheduled tasks
+
+Summary of the scheduled-task work below (routes, session resolution, history items, prompt guidance, `ownersOf`, `createIdleSession`). Write-up: [docs/changes/2026-11-09-scheduled-tasks.md](docs/changes/2026-11-09-scheduled-tasks.md). Wire detail: [docs/http-api.md](docs/http-api.md#scheduled-tasks).
+
+- The `/v1/agents/schedules` contract is in `openapi/agentry.yaml` (9 operations; `ScheduleTiming` is a `oneOf` by `kind`) and the contract test validates every route.
+
 ## 2026-11-10 — Prompt guidance for chat-created scheduled tasks
 
 - Sessions get an agent-scoped system-prompt section `agentry:schedule` (just after `tool:schedule`) that tells the model to create scheduled tasks with target `this_session` only and to use the time zone the user stated, asking when it is unknown. The text is empty at each assembly where `schedule_create` is not visible, including after `host_tools.deny: ["schedule_create"]`. `new` and `new_once` targets would create sessions the API cannot list or resume.

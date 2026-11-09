@@ -16,6 +16,10 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 | `GET` `DELETE` | `/agents/environments/{id}` | Retrieve (status `failed` when the directory is gone) or delete one environment and its directory |
 | `POST` `GET` | `/agents/environments/{id}/files` | Write or list files in the environment workspace |
 | `GET` | `/agents/environments/{id}/files/{path}` | Read one environment file |
+| `POST` `GET` | `/agents/schedules` | Create or list scheduled tasks. See [Scheduled tasks](#scheduled-tasks) |
+| `GET` `POST` `DELETE` | `/agents/schedules/{schedule_id}` | Retrieve, update, or delete a scheduled task |
+| `POST` | `/agents/schedules/{schedule_id}/pause` `/resume` `/run` | Pause, resume, or run a task now |
+| `GET` | `/agents/schedules/{schedule_id}/runs` | List a task's deliveries, newest first |
 | `GET` `POST` `DELETE` | `/agents/{agent_id}` | Retrieve, update, or delete a saved agent |
 | `POST` `GET` | `/agents/sessions` | Create or list sessions (`agent` object and/or `agent_id`). The list is newest first; `order` is ignored |
 | `GET` `POST` `DELETE` | `/agents/sessions/{session_id}` | Retrieve, update (`model` / `reasoning.effort` / `service_tier` / `metadata`), or delete |
@@ -108,6 +112,31 @@ Limits:
 - Approvals requested by a subagent (child agent) are not exposed; they fail closed (the tool call is denied).
 - Timed questions (`tool-ask-user` in `mode: "timed"`) are not supported; the Host continues without an answer.
 - The profile must mount `tool-ask-user` for questions and keep the approval policy `ask`: under `never` (`DSH_PERMISSION_MODE=danger-full-access`) the Host rejects every approval before this API sees it.
+
+## Scheduled tasks
+
+Scheduled tasks use the Host schedule service (`ctx.schedule`). A profile without it answers every schedule route with 501 `schedules_unavailable`; the rest of the API is unaffected.
+
+**Ownership.** The Host service stores tasks without an owner. A task belongs to the owner of its target session, or else of the first session it involves that has a row in the session index. A task created over REST targets its own session; a task the agent creates in a chat targets that chat (`target: this_session`), so both belong to the chat's owner. Another owner's task answers 404 `schedule_not_found`, as an unknown id does, and no mutating call reaches the Host service first. Tasks that no indexed session establishes an owner for are invisible. The agent tools `schedule_list`, `schedule_view`, and `schedule_edit` still see every Host task; owner filtering of those tools is open (see the backlog in `AGENTS.md`).
+
+**Targets.** `POST /agents/schedules` creates an idle session for the task (metadata `source: "schedule"`, `title`) from `agent` / `agent_id` / `environment`, as session create does, and stores the task with a `session` target. Every run lands in that session, which is listed like any chat. With `session_id` in the body the task targets that session instead; it must belong to the caller (else 404 `resource_not_found`), and `agent`, `agent_id`, and `environment` are ignored. If the Host rejects the task, the session created for it is deleted. Deleting a task keeps its session; deleting a session deletes the tasks that deliver to it. The model is told to create chat tasks with `this_session` only, because `new` and `new_once` sessions have no index row.
+
+**Timing.** `timing` is the Host's tagged union, identical on input and output: `{kind:'after', after_seconds}`, `{kind:'at', at}` (RFC 3339 instant or `{date, time, time_zone}` on input; the instant on output), `{kind:'every', every_seconds}` (at least 60), `{kind:'daily', daily:{time, time_zone}}`, `{kind:'weekly', weekly:{time, time_zone, weekdays}}` (ISO weekdays, Monday 1), `{kind:'cron', cron:{expression, time_zone}}` (five fields), and `{kind:'rrule', rrule}` (`DTSTART` and `RRULE` lines). The server never guesses a time zone: send an explicit IANA name. Reads return `time` as `HH:mm:ss.SSS`.
+
+**Resource.** `AgentSchedule` has `id`, `object: "agent.schedule"`, `title`, `prompt`, `timing`, `status` (`active`, `paused`, `ended`), `next_run_at` (`null` unless active), `created_at`, `updated_at`, `revision` (equal to `updated_at`), `session_id`, `running` (a run is queued or executing), and `last_run`. A run (`AgentScheduleRun`: `scheduled_at`, `delivered_at`, `message_id`, `session_id`) records that the session accepted the message, not that the model finished.
+
+**Lists.** `GET /agents/schedules?status=&limit=&after=` returns the caller's tasks, active first by next run and then paused and ended newest first, in the usual list envelope (`limit` 1-100, default 20). `GET .../runs?limit=&before=` returns `{object:'list', data, has_more, next_before}`; pass `next_before` as `before` for the next page.
+
+**Update and concurrency.** `POST /agents/schedules/{id}` takes any of `title` (1-120 characters), `prompt`, `timing`, and `revision`. Send the `revision` you read; a task changed since then answers 409 `schedule_conflict` and stays unchanged. Resume recomputes the next occurrence and answers 400 `not_future` when there is none. `run` delivers now without moving the next occurrence and answers once the session accepted the prompt. A run that was delivered shows in the session items as a user message with `source: "schedule"` and the task prompt as its text.
+
+**Errors.** Host input errors answer 400 with the Host code as `error.code` (`invalid_rule`, `invalid_selector`, `invalid_time_zone`, `not_future`, `time_out_of_range`, `frequency_too_high`, `invalid_prompt`, `subagent_session`). Body fields are checked first and answer 400 `bad_request`. 404 `schedule_not_found`; 409 `schedule_conflict`, `schedule_execution_pending` (a run is active), `schedule_target_archived`, `session_not_resumable` (the session has no stored setup); 501 `schedules_unavailable`. Deleting a session whose tasks cannot be removed answers 500 `schedule_cleanup_failed` and keeps the session.
+
+```sh
+curl -X POST "$AGENTRY/v1/agents/schedules" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Morning brief","prompt":"Summarize overnight news","agent":{"model":"deepseek-chat"},
+       "timing":{"kind":"weekly","weekly":{"time":"08:00","time_zone":"Asia/Kuala_Lumpur","weekdays":[1,2,3,4,5]}}}'
+```
 
 ## Function tools
 
