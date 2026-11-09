@@ -201,3 +201,15 @@ describe('uploads configuration', () => {
     expect(stagingDirectory(uploads({ dir: '   ' }), '/srv/workspaces')).toBeUndefined()
   })
 })
+
+describe('verifyStaging', () => {
+  it('fails loudly, naming the directory, when the staging directory cannot be written', async () => {
+    const { verifyStaging } = await import('../src/index.ts')
+    const dir = await tmp()
+    await writeFile(join(dir, 'file'), 'x')
+    const bad = join(dir, 'file', 'staging')
+    await expect(verifyStaging(createFilesystemFileStore(bad), bad)).rejects.toThrow(/"uploads.dir" \(.*staging\) is not writable/u)
+    const good = join(dir, 'ok')
+    await expect(verifyStaging(createFilesystemFileStore(good), good)).resolves.toBeTypeOf('function')
+  })
+})

@@ -41,6 +41,7 @@ import { bridgeChildSessionEvent } from './bridge.ts'
 import { createLocalProvider } from './environment/local.ts'
 import { DEFAULT_ALLOWED_MEDIA_TYPES, stagingDirectory, validateUploads, type UploadsConfig } from './files/config.ts'
 import { createFilesystemFileStore, type FileStore } from './files/file-store.ts'
+import { startSweeper } from './files/sweeper.ts'
 import { AgentsGateway } from './gateway.ts'
 import { errorMessage } from './http.ts'
 import { createSessionHistory } from './history/session-history.ts'
@@ -84,6 +85,7 @@ export * from './files/content.ts'
 export * from './files/note.ts'
 export * from './files/ingest.ts'
 export * from './files/item-parts.ts'
+export * from './files/sweeper.ts'
 export * from './files/attached.ts'
 export * from './files/api.ts'
 export * from './store/store.ts'
@@ -388,7 +390,10 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
 
   if (staging !== undefined) ctx.effect(() => verifyStaging(staging, stagingDir!), 'agents-api: upload staging')
 
-  ctx.effect(() => openStore(ctx, config.database.url, gateway), 'agents-api: postgres store')
+  const sweep = staging === undefined
+    ? undefined
+    : { staging, ttlMs: config.uploads.stagedTtlMinutes * 60_000, intervalMs: config.uploads.sweepIntervalMinutes * 60_000 }
+  ctx.effect(() => openStore(ctx, config.database.url, gateway, sweep), 'agents-api: postgres store')
 
   installScheduleResolver(ctx, sessionId => gateway.agentFor(sessionId))
 
@@ -440,7 +445,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
  * @returns the effect disposer (nothing to undo).
  * @throws Error naming the directory when it cannot be created or written.
  */
-async function verifyStaging(staging: FileStore, dir: string): Promise<() => void> {
+export async function verifyStaging(staging: FileStore, dir: string): Promise<() => void> {
   try {
     await staging.verify()
   } catch (error: unknown) {
@@ -454,10 +459,16 @@ async function verifyStaging(staging: FileStore, dir: string): Promise<() => voi
  * @param ctx - plugin context, for logging.
  * @param url - Postgres connection URL.
  * @param gateway - gateway that serves from the store.
+ * @param sweep - staging bytes, TTL, and interval of the upload sweeper started once the store is attached; `undefined` when uploads are off.
  * @returns the effect disposer.
  * @throws StoreStartError after recording it on the gateway and logging it.
  */
-async function openStore(ctx: Context, url: string, gateway: AgentsGateway): Promise<() => Promise<void>> {
+async function openStore(
+  ctx: Context,
+  url: string,
+  gateway: AgentsGateway,
+  sweep: { staging: FileStore; ttlMs: number; intervalMs: number } | undefined,
+): Promise<() => Promise<void>> {
   let store: Store
   try {
     await migrate(url)
@@ -490,7 +501,11 @@ async function openStore(ctx: Context, url: string, gateway: AgentsGateway): Pro
       ctx.logger.error(`agents-api: session recovery stopped early: ${errorMessage(error)}`)
     }
   }
+  const stopSweeper = sweep === undefined
+    ? undefined
+    : startSweeper({ ...sweep, store: () => store, warn: message => ctx.logger.warn(message) })
   return async () => {
+    await stopSweeper?.()
     gateway.detachStore()
     await store.close()
   }
