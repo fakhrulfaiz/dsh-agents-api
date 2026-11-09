@@ -23,5 +23,6 @@ describe('dsh-agents-api bundle', () => {
     expect(patch).toContain('mode: development')
     expect(patch).toContain('!!js process.env.AGENTRY_DEV_KEY')
     expect(patch).toContain('url: !!js process.env.AGENTRY_DATABASE_URL')
+    expect(patch).toMatch(/- id: skill-office\n\s+name: '@deepseek-ai\/dsh-skill-office'/u)
   })
 })

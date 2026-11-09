@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Office skills in the profile
+
+- `cordis.patch.yml` mounts `@deepseek-ai/dsh-skill-office` as a host-level row, so the seven Office skills (`office`, `office-docx`, `office-pptx`, `office-xlsx`, `office-render`, `office-recalculate`, `office-export-pdf`) appear in `GET /v1/agents/skills` and load by name through every preset's `tool-skill`.
+
 ## 2026-11-10 — Host tool catalog scope
 
 - `GET /v1/agents/tools` leased the default preset scope through `standingKeyFor`, which the pinned DSH does not have, so the call fell back silently to the empty global registry. It now uses `agentPresets.acquireScope()` and releases the lease. `tests/host-tool-catalog.spec.ts` covers it.

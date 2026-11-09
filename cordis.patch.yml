@@ -15,3 +15,9 @@
           devKey:
             key: !!js process.env.AGENTRY_DEV_KEY
             owner: dev
+
+# Office skills (docx, pptx, xlsx, render, recalculate, export-pdf, office) in
+# the host-level skill layer, so every preset's tool-skill lists them by name.
+- insert:
+    - id: skill-office
+      name: '@deepseek-ai/dsh-skill-office'
