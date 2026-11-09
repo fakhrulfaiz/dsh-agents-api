@@ -116,6 +116,12 @@ Conventions: TDD, `pnpm typecheck && pnpm test` (see `package.json`) per task; u
 
 **B8 — Live verification (manual, controller).** Against a running profile: create an `at` task 90 s out (REST), restart the server, confirm the run is delivered into the non-live session after restart (items show the scheduled prompt, assistant reply, status back to `idle`); create from a chat with `schedule_create`, confirm it lists under that owner and a second api-key owner does not see it; `run` now. Record results in the change note.
 
+### B0 findings (2026-11-10, static check against `~/code/dsh-pinned`; no live boot, no code kept)
+
+1. `ctx.get('schedule')` resolves in the agentry profile. The profile bundles are `dsh-base`, `dsh-web-app`, `@agentry/api` (`~/.dsh/profiles/agents/package.json:6-11`). The web-app bundle declares `id: schedule` (`@deepseek-ai/dsh-schedule`) at `DSH:packages/bundle/web-app/cordis.patch.yml:135-136`, and the service augments `Context` with `schedule: ScheduleService` (`DSH:packages/schedule/schedule/src/index.ts:73-75`).
+2. The default preset mounts the schedule tools. The `standard` preset (`order: 1`, the lowest, `DSH:packages/bundle/web-app/presets/standard.patch.yml:8-9`) lists `tool-schedule` (`:38-39`). `tool-schedule` registers `schedule_create/list/view/edit` once `schedule` is injected (`DSH:packages/schedule/tool-schedule/src/index.ts:351,372,394`). B6 therefore does not need to mount it. Not confirmed through `GET /agents/tools` on a running server; B8 does that.
+3. `sessionController` exists: `DSH:packages/api/session-controller/src/index.ts:77` (`Context.sessionController`), constructed with that service name at `:179`.
+
 ## 6. Frontend tasks
 
 Conventions: astryx rules in `AGENTS.md` (templates first, no raw `<div>`, theme tokens, `astryx component <Name>` before using a component); all strings through the existing text patterns of the codebase; dated `CHANGELOG.md` bullet; `pnpm typecheck && pnpm test`; e2e mock API gets the new routes. Never put credentials in the browser (BFF only).
