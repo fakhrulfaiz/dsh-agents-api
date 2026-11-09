@@ -348,6 +348,10 @@ export interface OAIMessageItem {
   role: 'user' | 'assistant'
   content: OAITextContentPart[]
   phase?: 'commentary' | 'final_answer' | null
+  /** `schedule` for a prompt a scheduled task delivered; absent for messages the client sent. */
+  source?: 'schedule'
+  /** Task that delivered the message, when exactly one did. */
+  schedule_id?: string
   status: ItemStatus
   turn_id: string
 }

@@ -2572,6 +2572,12 @@ components:
                 - commentary
                 - final_answer
             - type: "null"
+        source:
+          const: schedule
+          description: Present when a scheduled task delivered the message; `content` is the task prompt.
+        schedule_id:
+          type: string
+          description: Task that delivered the message, when exactly one did.
         status:
           $ref: "#/components/schemas/ItemStatus"
         turn_id:

@@ -54,6 +54,28 @@ describe('WireProjector', () => {
     expect(folded.turns.map(turn => turn.id)).toEqual(['turn_1', 'turn_5'])
   })
 
+  it('projects scheduled prompts the same live and replayed, and skips change notices', () => {
+    const reminder = logEvent('user/message', {
+      content: [{ type: 'text', text: '[SCHEDULE REMINDER]\nschedule_id_json: "schedule-a"\nreminder_prompt_json: "Check the build"' }],
+      source: { kind: 'schedule' },
+    }, 2)
+    const notice = logEvent('user/message', {
+      content: [{ type: 'text', text: '[SCHEDULE CHANGE]\nchange: updated' }],
+      source: { kind: 'schedule' },
+    }, 3)
+    const events = [logEvent('turn/start', { turn: 1 }, 1), reminder, notice, assistant(4), logEvent('turn/end', { reason: { kind: 'completed' } }, 5)]
+    const shared = base()
+    const live = new WireProjector(shared, true)
+    for (const event of events) live.apply(event)
+    const folded = foldSession(shared, events)
+    expect(folded.items).toEqual(live.items)
+    expect(folded.items.map(item => item.type === 'message' ? [item.role, item.source ?? null, item.turn_id] : item.type)).toEqual([
+      ['user', 'schedule', 'turn_1'],
+      ['assistant', null, 'turn_1'],
+    ])
+    expect(folded.items[0]).toMatchObject({ content: [{ text: 'Check the build' }], schedule_id: 'schedule-a' })
+  })
+
   it('ids are deterministic across folds', () => {
     const events = turnLog(1)
     const shared = base()

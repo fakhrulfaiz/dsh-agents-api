@@ -155,6 +155,25 @@ describe('OpenAPI responses', () => {
     await call('DELETE', '/v1/agents/sessions/{session_id}', { session_id: id }, undefined, 200)
   })
 
+  it('validates a scheduled prompt item', async () => {
+    const { call, api, query } = await start()
+    const created = await call('POST', '/v1/agents/sessions', {}, { agent: { model: 'deepseek-chat' } }, 200)
+    const id = created.id as string
+    const events = [
+      logEvent('turn/start', { turn: 1 }, 1),
+      logEvent('user/message', {
+        content: [{ type: 'text', text: '[SCHEDULE REMINDER]\nschedule_id_json: "schedule-a"\nreminder_prompt_json: "Check the build"' }],
+        source: { kind: 'schedule' },
+      }, 2),
+    ]
+    for (const event of events) {
+      query.append(id, event)
+      api.applySessionEvent(id, event)
+    }
+    const items = await call('GET', '/v1/agents/sessions/{session_id}/items', { session_id: id }, undefined, 200)
+    expect(items.data).toMatchObject([{ role: 'user', source: 'schedule', schedule_id: 'schedule-a', content: [{ text: 'Check the build' }] }])
+  })
+
   it('validates subagent resources', async () => {
     const { call, api } = await start()
     const created = await call('POST', '/v1/agents/sessions', {}, { agent: { model: 'deepseek-chat' } }, 200)

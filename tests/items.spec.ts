@@ -101,3 +101,57 @@ describe('itemsFromEvent', () => {
     }), 'turn_1')[0]).toMatchObject({ call_id: 'call_1', output: 'x' })
   })
 })
+
+describe('itemsFromEvent for scheduled prompts', () => {
+  const scheduled = (text: string) => event('user/message', { content: [{ type: 'text', text }], source: { kind: 'schedule' } }, 7)
+  const reminder = (prompt: string) => [
+    '[SCHEDULE REMINDER]',
+    'This is a scheduled message from the user',
+    'schedule_id_json: "schedule-abc"',
+    'occurrence_at: 2026-11-11T08:00:00.000Z',
+    `reminder_prompt_json: ${JSON.stringify(prompt)}`,
+  ].join('\n')
+
+  it('projects a single reminder as a user message with the extracted prompt', () => {
+    expect(itemsFromEvent(scheduled(reminder('Summarize the news\nin three lines')), 'turn_2')).toEqual([{
+      id: 'item_msg_7',
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'Summarize the news\nin three lines' }],
+      source: 'schedule',
+      schedule_id: 'schedule-abc',
+      status: 'completed',
+      turn_id: 'turn_2',
+    }])
+  })
+
+  it('projects a reminder batch with the prompts joined and no task id for several tasks', () => {
+    const batch = (reminders: object[]) => ['[SCHEDULE REMINDER BATCH]', 'This is a scheduled message from the user', `reminders_json: ${JSON.stringify(reminders)}`].join('\n')
+    const two = itemsFromEvent(scheduled(batch([
+      { schedule_id: 'schedule-a', occurrence_at: '2026-11-11T08:00:00.000Z', reminder_prompt: 'First' },
+      { schedule_id: 'schedule-b', occurrence_at: '2026-11-11T08:00:00.000Z', reminder_prompt: 'Second' },
+    ])), 'turn_2')
+    expect(two).toMatchObject([{ content: [{ type: 'input_text', text: 'First\n\nSecond' }], source: 'schedule' }])
+    expect(two[0]).not.toHaveProperty('schedule_id')
+    expect(itemsFromEvent(scheduled(batch([{ schedule_id: 'schedule-a', occurrence_at: 'x', reminder_prompt: 'Only' }])), 'turn_2')).toMatchObject([
+      { content: [{ type: 'input_text', text: 'Only' }], schedule_id: 'schedule-a' },
+    ])
+  })
+
+  it.each([
+    ['a reminder prompt line that is not JSON', '[SCHEDULE REMINDER]\nreminder_prompt_json: {nope'],
+    ['a reminder without a prompt line', '[SCHEDULE REMINDER]\nThis is a scheduled message from the user'],
+    ['a reminder prompt that is not a string', '[SCHEDULE REMINDER]\nreminder_prompt_json: 42'],
+    ['a batch that is not JSON', '[SCHEDULE REMINDER BATCH]\nreminders_json: [oops'],
+    ['an empty batch', '[SCHEDULE REMINDER BATCH]\nreminders_json: []'],
+    ['a batch entry without a prompt', '[SCHEDULE REMINDER BATCH]\nreminders_json: [{"schedule_id":"a"}]'],
+  ])('falls back to the full text for %s', (_name, text) => {
+    expect(itemsFromEvent(scheduled(text), 'turn_2')).toMatchObject([{ content: [{ type: 'input_text', text }], source: 'schedule' }])
+  })
+
+  it('shows no item for schedule change notices or other schedule-sourced input', () => {
+    const notice = ['[SCHEDULE CHANGE]', 'A scheduled task involving this session was changed outside this session.', 'change: updated'].join('\n')
+    expect(itemsFromEvent(scheduled(notice), 'turn_2')).toEqual([])
+    expect(itemsFromEvent(scheduled('anything else'), 'turn_2')).toEqual([])
+  })
+})

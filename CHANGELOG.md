@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Scheduled prompts in the chat history
+
+- A prompt a scheduled task delivers to a session now appears as a user message item with `source: "schedule"` (and `schedule_id` when one task delivered it) and `content` set to the task prompt instead of the Host framing. A reminder batch joins its prompts with a blank line; framing that cannot be parsed shows the full text. `[SCHEDULE CHANGE]` notices still produce no item. Live and replayed projections agree. `MessageItem` in `openapi/agentry.yaml` declares both fields.
+
 ## 2026-11-10 — Scheduled task routes
 
 - New `/v1/agents/schedules` routes over the Host schedule service: create, list (`status`, `limit`, `after`), retrieve, update (`revision` guard), delete, pause, resume, run now, and `runs` (delivery history). Every route is owner scoped: a task belongs to the owner of its target session, else of the first involved session in the index, and another owner's task answers 404 `schedule_not_found` before any mutating call. A profile without the schedule service answers 501 `schedules_unavailable`.
