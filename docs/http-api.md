@@ -86,7 +86,7 @@ A sandbox escalation, a tool that needs approval, or an `ask_user_question` call
 - `kind` is `sandbox_escalation` (the request widens the sandbox mode), `tool_approval` (any other approval), or `user_question`.
 - `tool_name` and `call_id` are present for approvals when the Host knows them. For `user_question`, `options` holds the option labels when exactly one question was asked; `questions` carries the full question items (`id`, `question`, `options`, `multiSelect`, `intent`, …) for several questions.
 - For approvals `id` is the id the Host logs in `approval/asked`, so it is stable across SSE replay. For questions it is the tool `call_id` or a generated `appr_…` id.
-- `agent.session.requires_action` is sent as an ephemeral event (no `id:`, not replayed) when an approval appears; a reconnecting client reads `required_actions` from the status snapshot. When the last pending action clears, an ephemeral `agent.session.in_progress` follows.
+- `agent.session.requires_action` is sent as an ephemeral event (no `id:`, not replayed) when an approval appears. Pending approvals are not in the Session log, so a connection with `Last-Event-ID` receives, after the replayed and buffered frames, one ephemeral `agent.session.requires_action` snapshot carrying `required_actions` when the session is `requires_action` or has a pending approval; it goes to that connection only, and nothing extra is sent otherwise. A connection without `Last-Event-ID` gets the usual status snapshot. When the last pending action clears, an ephemeral `agent.session.in_progress` follows.
 
 Answer with `POST /agents/sessions/{id}/events`:
 
@@ -101,7 +101,7 @@ Answer with `POST /agents/sessions/{id}/events`:
 | question | `answer` with `payload` | the answer; `{ "selected": ["A"], "custom": "…" }` for one question, `{ "answers": [{ "id", "selected", "custom"? }] }` covering every question |
 | question | `deny` | skipped (empty `selected` for every question) |
 
-Errors: 400 `invalid_approval_response` (bad `id` or `decision`, or an incomplete or malformed `answer` payload); 400 `decision_not_applicable` (`answer` on an approval, `approve` on a question); 404 `approval_not_found` (unknown id, already answered, or cancelled by `agent.session.input.cancel`, a session delete, the end of the turn, or a server restart). Another owner's session answers 404 `resource_not_found`.
+Errors: 400 `invalid_approval_response` (bad `id` or `decision`, or an incomplete or malformed `answer` payload); 400 `decision_not_applicable` (`answer` on an approval, `approve` on a question); 404 `approval_not_found` (the session is not running in this process, unknown id, already answered, or cancelled by `agent.session.input.cancel`, a session delete, the end of the turn, or a server restart). Another owner's session answers 404 `resource_not_found`.
 
 Limits:
 

@@ -700,6 +700,14 @@ export class AgentsGateway {
       notFound(res, `Session "${sessionId}" not found`)
       return
     }
+    const input = await readBody(req)
+    const batch = inputEventsFromBody(input)
+    if (batch.length > 0 && batch.every(evt => evt.type === 'agent.session.input.approval_response')
+      && this.sessionRegistry.get(sessionId) === undefined) {
+      // Approvals never survive a restart, so there is nothing to resume for.
+      writeRequestError(res, new AgentsApiRequestError('No pending approval: the session is not running', 404, 'approval_not_found'))
+      return
+    }
     try {
       await this.ensureLive(row)
     } catch (error: unknown) {
@@ -714,9 +722,8 @@ export class AgentsGateway {
       notFound(res, `Session "${sessionId}" not found`)
       return
     }
-    const input = await readBody(req)
     try {
-      for (const evt of inputEventsFromBody(input)) {
+      for (const evt of batch) {
         await this.applyInputEvent(owner, row, evt)
       }
     } catch (error: unknown) {
@@ -804,6 +811,11 @@ export class AgentsGateway {
       if (sseId !== undefined && sseId <= lastWritten) continue
       write(evt, sseId)
       if (sseId !== undefined) lastWritten = sseId
+    }
+    // Pending approvals are not in the log, so replay cannot show them: tell this client once.
+    const live = this.sessionRegistry.getOAISession(sessionId)
+    if (live !== undefined && (live.status === 'requires_action' || live.required_actions.some(action => action.type === 'approval'))) {
+      write({ type: 'agent.session.requires_action', event_id: mintEventId(), session: live }, undefined)
     }
     replaying = false
   }

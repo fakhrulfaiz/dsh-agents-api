@@ -33,6 +33,7 @@ interface Fixture {
   agents: Map<string, { cancel: ReturnType<typeof vi.fn>; followup: ReturnType<typeof vi.fn>; model: FakeModel }>
   created: Array<{ agentOptions: Record<string, unknown> }>
   llm: ReturnType<typeof fakeLlm>
+  query: FakeSessionQuery
   /** Forget the live agent, as after a failed resume. */
   dropAgent: (id: string) => void
 }
@@ -58,16 +59,17 @@ async function fixture(): Promise<Fixture> {
     logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn() },
   } as unknown as Context
   const h = bridgeHarness([])
+  const query = new FakeSessionQuery()
   const store = new MemoryStore()
   const registry = new SessionRegistry()
-  const api = new AgentsGateway(ctx, openAuthenticator, '/v1', store, registry, testGatewayOptions(createLocalProvider(join(tmpdir(), 'agentry-approvals-spec')), new FakeSessionQuery(), h.bridge))
+  const api = new AgentsGateway(ctx, openAuthenticator, '/v1', store, registry, testGatewayOptions(createLocalProvider(join(tmpdir(), 'agentry-approvals-spec')), query, h.bridge))
   h.onChange.mockImplementation((sessionId, actions) => { api.setInteractionActions(sessionId, actions) })
   const server = createServer((req, res) => { void api.handle(req, res) })
   servers.push(server)
   await new Promise<void>((resolve) => { server.listen(0, '127.0.0.1', resolve) })
   return {
     root: `http://127.0.0.1:${String((server.address() as AddressInfo).port)}/v1`,
-    api, store, registry, h, agents, created, llm,
+    api, store, registry, h, agents, created, llm, query,
     dropAgent: id => agents.delete(id),
   }
 }
@@ -190,6 +192,61 @@ describe('approvals over the API', () => {
     const wrong = await events(f, id, { type: 'agent.session.input.approval_response', id: 'appr-1', decision: 'answer', payload: {} })
     expect(wrong.status).toBe(400)
     expect(await wrong.json()).toMatchObject({ error: { code: 'decision_not_applicable' } })
+  })
+})
+
+/** Read the SSE stream until `done(text)` or `quietMs` passes without a chunk. */
+async function sseText(response: Response, quietMs = 300): Promise<string> {
+  const reader = response.body!.getReader()
+  let text = ''
+  for (;;) {
+    const chunk = await Promise.race([reader.read(), new Promise<null>(resolve => setTimeout(() => { resolve(null) }, quietMs))])
+    if (chunk === null || chunk.done) break
+    text += new TextDecoder().decode(chunk.value)
+  }
+  await reader.cancel()
+  return text
+}
+
+describe('reconnecting streams', () => {
+  const connect = (f: Fixture, id: string) => fetch(`${f.root}/agents/sessions/${id}/events`, { headers: { 'last-event-id': '1' } })
+
+  it('sends a snapshot with the pending approval after the replayed frames, without an id', async () => {
+    const f = await fixture()
+    const id = await session(f)
+    f.query.append(id, logEvent('turn/start', { turn: 1 }, 1))
+    void parkApproval(f, id)
+    const text = await sseText(await connect(f, id))
+    const frames = text.split('\n\n').filter(Boolean)
+    const last = frames.at(-1)!
+    expect(last).not.toMatch(/^id:/mu)
+    expect(last).toContain('event: agent.session.requires_action')
+    expect(last).toContain('"id":"appr-1"')
+    expect(frames.slice(0, -1).every(frame => /^id: \d+/u.test(frame))).toBe(true)
+    expect(frames.length).toBeGreaterThan(1)
+  })
+
+  it('sends no extra snapshot when nothing is pending', async () => {
+    const f = await fixture()
+    const id = await session(f)
+    f.query.append(id, logEvent('turn/start', { turn: 1 }, 1))
+    f.api.applySessionEvent(id, logEvent('turn/start', { turn: 1 }, 1))
+    const text = await sseText(await connect(f, id))
+    expect(text).not.toContain('requires_action')
+    expect(text.split('\n\n').filter(Boolean).every(frame => /^id: \d+/u.test(frame))).toBe(true)
+  })
+})
+
+describe('approval answers for a session that is not live', () => {
+  it('answers 404 approval_not_found without resuming', async () => {
+    const f = await fixture()
+    const id = await session(f)
+    f.registry.delete(id)
+    const readsBefore = f.query.reads
+    const response = await events(f, id, { type: 'agent.session.input.approval_response', id: 'x', decision: 'approve' })
+    expect(response.status).toBe(404)
+    expect(await response.json()).toMatchObject({ error: { code: 'approval_not_found' } })
+    expect(f.query.reads).toBe(readsBefore)
   })
 })
 
