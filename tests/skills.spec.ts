@@ -6,13 +6,16 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { mkdir } from 'node:fs/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SkillSummary } from '@deepseek-ai/dsh-skill'
+import type { SkillSummary, SkillViewOptions } from '@deepseek-ai/dsh-skill'
 import { createLocalProvider } from '../src/environment/local.ts'
 import { AgentsGateway } from '../src/gateway.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
 import { matchesEtag } from '../src/skills.ts'
+import { ownerId } from '../src/auth/authenticator.ts'
+import type { SessionIndexRow } from '../src/store/store.ts'
 import { openAuthenticator } from './open-auth.ts'
 import { FakeSessionQuery, testGatewayOptions } from './support/fake-session-query.ts'
 import { MemoryStore } from './support/memory-store.ts'
@@ -35,12 +38,35 @@ function summary(name: string, description = `${name} skill`, source = 'user-dsh
   return { name, description, source, provider: 'filesystem', invocation: { modelInvocable: true, userInvocable: true } }
 }
 
+/** Scope key `acquireScope()` returns in the stub preset service. */
+const DEFAULT_SCOPE = { name: 'default-preset-scope' }
+/** Live agent object of session `sess_live` (the agent is its own scope key). */
+const LIVE_AGENT = { name: 'live-agent' }
+
+/** Session index row owned by `owner`. */
+function row(id: string, owner = 'test'): SessionIndexRow {
+  const now = new Date()
+  return { id, ownerId: ownerId(owner), agentId: null, environmentId: null, dshSessionId: id, status: 'idle', lastError: null, model: 'm', reasoningEffort: null, body: null, createdAt: now, updatedAt: now }
+}
+
 /** A gateway over a skill service stub; `list` is the stub's single method. */
-async function start(list: (() => Promise<readonly SkillSummary[]>) | undefined, ttlMs = 60_000) {
+async function start(list: ((options?: SkillViewOptions) => Promise<readonly SkillSummary[]>) | undefined, ttlMs = 60_000) {
   const warn = vi.fn()
-  const ctx = { logger: { warn } } as unknown as Context
-  const options = { ...testGatewayOptions(environments, new FakeSessionQuery()), skills: () => list === undefined ? undefined : { list }, skillsTtlMs: ttlMs }
-  const api = new AgentsGateway(ctx, openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), options)
+  const released = vi.fn()
+  const store = new MemoryStore()
+  await store.ensureOwner(ownerId('test'))
+  await store.ensureOwner(ownerId('other'))
+  const workspacesRoot = join(tmpdir(), `agentry-skills-ws-${String(process.pid)}-${String(Math.random()).slice(2)}`)
+  const ctx = {
+    logger: { warn },
+    get: (name: string) => name === 'agentPresets'
+      ? { acquireScope: () => Promise.resolve({ key: DEFAULT_SCOPE, [Symbol.asyncDispose]: () => { released(); return Promise.resolve() } }) }
+      : undefined,
+    agents: { get: (id: string) => id === 'sess_live' ? LIVE_AGENT : undefined },
+  } as unknown as Context
+  const base = testGatewayOptions(environments, new FakeSessionQuery())
+  const options = { ...base, workspacesRoot, skills: () => list === undefined ? undefined : { list }, skillsTtlMs: ttlMs }
+  const api = new AgentsGateway(ctx, openAuthenticator, '/v1', store, new SessionRegistry(), options)
   const server = createServer((req, res) => {
     void api.handle(req, res)
   })
@@ -49,7 +75,7 @@ async function start(list: (() => Promise<readonly SkillSummary[]>) | undefined,
     server.listen(0, '127.0.0.1', resolve)
   })
   const url = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}/v1/agents/skills`
-  return { url, warn }
+  return { url, warn, store, released, workspacesRoot }
 }
 
 describe('GET /v1/agents/skills', () => {
@@ -150,6 +176,66 @@ describe('GET /v1/agents/skills', () => {
     const retry = await fetch(url)
     expect(retry.status).toBe(200)
     expect(list).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('GET /v1/agents/skills targets', () => {
+  it('lists with the default preset scope and no cwd when the owner has no workspace root', async () => {
+    const list = vi.fn((_options?: SkillViewOptions) => Promise.resolve([summary('a')]))
+    const { url, released } = await start(list)
+    await fetch(url)
+    expect(list).toHaveBeenCalledWith({ scope: DEFAULT_SCOPE, cwd: undefined })
+    expect(released).toHaveBeenCalledOnce()
+  })
+
+  it('uses the owner default workspace root as cwd when it exists', async () => {
+    const list = vi.fn((_options?: SkillViewOptions) => Promise.resolve([summary('a')]))
+    const { url, workspacesRoot } = await start(list)
+    const root = join(workspacesRoot, 'test')
+    await mkdir(root, { recursive: true })
+    await fetch(url)
+    expect(list.mock.calls[0]?.[0]).toMatchObject({ scope: DEFAULT_SCOPE, cwd: expect.stringContaining('test') })
+  })
+
+  it('uses the live agent and workspace of an owned session', async () => {
+    const list = vi.fn((_options?: SkillViewOptions) => Promise.resolve([summary('a')]))
+    const { url, store } = await start(list)
+    await store.sessions.insert(row('sess_live'))
+    expect((await fetch(`${url}?session_id=sess_live`)).status).toBe(200)
+    expect(list.mock.calls[0]?.[0]?.scope).toBe(LIVE_AGENT)
+  })
+
+  it('falls back to the default preset scope for a session that is not live', async () => {
+    const list = vi.fn((_options?: SkillViewOptions) => Promise.resolve([summary('a')]))
+    const { url, store } = await start(list)
+    await store.sessions.insert(row('sess_cold'))
+    expect((await fetch(`${url}?session_id=sess_cold`)).status).toBe(200)
+    expect(list.mock.calls[0]?.[0]?.scope).toBe(DEFAULT_SCOPE)
+  })
+
+  it('answers 404 for another owner session and for an unknown session', async () => {
+    const list = vi.fn(() => Promise.resolve([summary('a')]))
+    const { url, store } = await start(list)
+    await store.sessions.insert(row('sess_theirs', 'other'))
+    expect((await fetch(`${url}?session_id=sess_theirs`)).status).toBe(404)
+    expect((await fetch(`${url}?session_id=sess_missing`)).status).toBe(404)
+    expect(list).not.toHaveBeenCalled()
+  })
+
+  it('caches, shares in-flight calls and validates per (scope, cwd)', async () => {
+    const list = vi.fn((options?: SkillViewOptions) => Promise.resolve([summary(options?.scope === LIVE_AGENT ? 'live' : 'default')]))
+    const { url, store } = await start(list)
+    await store.sessions.insert(row('sess_live'))
+    const [a, b] = await Promise.all([fetch(url), fetch(`${url}?session_id=sess_live`)])
+    expect(list).toHaveBeenCalledTimes(2)
+    await fetch(url)
+    await fetch(`${url}?session_id=sess_live`)
+    expect(list).toHaveBeenCalledTimes(2)
+    expect(a.headers.get('etag')).not.toBe(b.headers.get('etag'))
+    const stale = await fetch(`${url}?session_id=sess_live`, { headers: { 'if-none-match': a.headers.get('etag')! } })
+    expect(stale.status).toBe(200)
+    const hit = await fetch(`${url}?session_id=sess_live`, { headers: { 'if-none-match': b.headers.get('etag')! } })
+    expect(hit.status).toBe(304)
   })
 })
 

@@ -6,14 +6,14 @@
  * captured as an agent id.
  */
 
-import { mkdir } from 'node:fs/promises'
+import { mkdir, stat } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type { ScheduleService } from '@deepseek-ai/dsh-schedule'
-import type { SkillSummary } from '@deepseek-ai/dsh-skill'
+import type { SkillSummary, SkillViewOptions } from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
@@ -44,7 +44,7 @@ import { mountFunctionTools, validateMountableTools } from './mount-function-too
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
-import { SkillsApi } from './skills.ts'
+import { SkillsApi, type SkillTarget } from './skills.ts'
 import { SessionRegistry } from './session-registry.ts'
 import { WireProjector, type ProjectionBase } from './history/projector.ts'
 import type { SessionHistory } from './history/session-history.ts'
@@ -111,7 +111,7 @@ export interface GatewayOptions {
   /** The Host schedule service when the profile provides one, read at call time. */
   schedule: () => ScheduleService | undefined
   /** The Host skill registry when the profile provides one, read at call time. */
-  skills: () => { list: () => Promise<readonly SkillSummary[]> } | undefined
+  skills: () => { list: (options?: SkillViewOptions) => Promise<readonly SkillSummary[]> } | undefined
   /** Milliseconds the skill catalog is cached (`skills.cacheTtlSeconds` * 1000). */
   skillsTtlMs: number
   artifacts?: ArtifactS3Config
@@ -188,6 +188,7 @@ export class AgentsGateway {
     })
     const skillsApi = new SkillsApi({
       skills: options.skills,
+      resolveTarget: (owner, sessionId) => this.resolveSkillTarget(owner, sessionId),
       ttlMs: options.skillsTtlMs,
       warn: message => this.ctx.logger.warn(message),
     })
@@ -404,6 +405,34 @@ export class AgentsGateway {
       }
     }
     return this.ctx.tools.schemas()
+  }
+
+  /**
+   * Registry view for the skill catalog. A session id selects that session's live
+   * agent as scope and its workspace as cwd; otherwise the default preset's scope
+   * and the owner's default workspace root (when it exists) apply.
+   * @param owner - authenticated caller.
+   * @param sessionId - requested session, if any.
+   * @returns the view, or `undefined` when the session is not owned by `owner`.
+   */
+  private async resolveSkillTarget(owner: OwnerId, sessionId: string | undefined): Promise<SkillTarget | undefined> {
+    let cwd: string | undefined
+    if (sessionId !== undefined) {
+      const row = await this.store.sessions.get(sessionId, owner)
+      if (!row) return undefined
+      cwd = this.sessionRegistry.get(row.id)?.workspace ?? await this.history.workspace(row.id)
+      const live = this.ctx.agents.get(SessionId(row.id))
+      if (live !== undefined) return { scope: live as SkillViewOptions['scope'], cwd }
+    } else {
+      const root = join(this.workspacesRoot, directorySegment(owner, 'owner'))
+      cwd = await stat(root).then(info => info.isDirectory() ? root : undefined, () => undefined)
+    }
+    const presets = (this.ctx as { get?: (name: string) => unknown }).get?.call(this.ctx, 'agentPresets') as {
+      acquireScope?: (id?: string) => Promise<{ key: SkillViewOptions['scope'] } & AsyncDisposable>
+    } | undefined
+    if (typeof presets?.acquireScope !== 'function') return { scope: undefined, cwd }
+    const lease = await presets.acquireScope()
+    return { scope: lease.key, cwd, release: () => lease[Symbol.asyncDispose]() }
   }
 
   private async getAgent(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {

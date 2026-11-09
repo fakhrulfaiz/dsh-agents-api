@@ -135,11 +135,18 @@ paths:
     get:
       summary: List Host skills
       description: >-
-        Host-wide skill catalog for a `/` picker, sorted by name; empty when the profile has no skill service.
-        Cached in memory (`skills.cacheTtlSeconds`). Send the `ETag` back as `If-None-Match` to receive `304`.
+        Skill catalog for a `/` picker, sorted by name; empty when the profile has no skill service.
+        With `session_id` the catalog is that session's: its live agent scope and workspace. Without it, the default preset scope and the owner's default workspace root (when it exists).
+        Cached in memory per scope and workspace (`skills.cacheTtlSeconds`). Send the `ETag` back as `If-None-Match` to receive `304`.
       tags:
         - Agents
       parameters:
+        - name: session_id
+          in: query
+          required: false
+          description: A session owned by the caller; another owner's or an unknown session answers `404`.
+          schema:
+            type: string
         - name: If-None-Match
           in: header
           required: false
@@ -177,6 +184,8 @@ paths:
           $ref: "#/components/responses/Unauthenticated"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "503":
           description: The skill catalog could not be loaded (`error.code` is `skills_unavailable`) or the store is unavailable (`store_unavailable`). Not cached.
           content:

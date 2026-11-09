@@ -9,7 +9,7 @@ Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
 ## 2026-11-10 — Skill catalog endpoint
 
-- `GET /v1/agents/skills` lists Host skills (`name`, `description`, `source`) sorted by name from `ctx.skills.list()`, read at request time. Without the skill service it answers `200` with an empty list. Cached in memory for `skills.cacheTtlSeconds` (default 60, `0` disables), concurrent misses share one call, strong `ETag` with `304` on `If-None-Match`, `503 skills_unavailable` on a failed load (not cached). Wire detail: [docs/http-api.md](docs/http-api.md#skill-catalog); `openapi/agentry.yaml` declares the operation. `@deepseek-ai/dsh-skill` is a new optional peer.
+- `GET /v1/agents/skills` lists skills (`name`, `description`, `source`) sorted by name from `ctx.skills.list({ scope, cwd })`, read at request time. Optional `?session_id=` (owned by the caller, else `404`) selects that session's live agent scope and workspace; without it the default preset scope and the owner's default workspace root apply, so preset and `~/.agents/skills` skills appear in the Agentry profile. Without the skill service it answers `200` with an empty list. Cached in memory per (scope, cwd) for `skills.cacheTtlSeconds` (default 60, `0` disables), concurrent misses share one call, strong `ETag` with `304` on `If-None-Match`, `503 skills_unavailable` on a failed load (not cached). Wire detail: [docs/http-api.md](docs/http-api.md#skill-catalog); `openapi/agentry.yaml` declares the operation. `@deepseek-ai/dsh-skill` is a new optional peer.
 
 ## 2026-11-10 — Scheduled tasks
 

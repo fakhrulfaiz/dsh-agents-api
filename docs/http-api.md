@@ -10,7 +10,7 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 |---|---|---|
 | `POST` `GET` | `/agents` | Create or list saved agents |
 | `GET` | `/agents/tools` | List Host profile tools. `?session_id=` keeps only that session's `host_tools` mask; omit it for the full catalog |
-| `GET` | `/agents/skills` | List Host skills (`name`, `description`, `source`), sorted by name. See [Skill catalog](#skill-catalog) |
+| `GET` | `/agents/skills` | List skills (`name`, `description`, `source`), sorted by name; optional `session_id` query. See [Skill catalog](#skill-catalog) |
 | `POST` `GET` | `/agents/environments/templates` | Create or list environment templates |
 | `GET` `POST` `DELETE` | `/agents/environments/templates/{id}` | Retrieve, update, or delete one template |
 | `POST` `GET` | `/agents/environments` | Create or list environments. Each is a local directory `<workspaces>/<owner>/<environment_id>/` with `provider: "local"` |
@@ -141,10 +141,12 @@ curl -X POST "$AGENTRY/v1/agents/schedules" \
 
 ## Skill catalog
 
-`GET /agents/skills` returns `{ "object": "list", "data": [{ "name", "description", "source" }] }` sorted by `name`. It needs the same bearer authentication as the other `/agents/*` routes; the catalog is host-wide, not owner-scoped.
+`GET /agents/skills` returns `{ "object": "list", "data": [{ "name", "description", "source" }] }` sorted by `name`. It needs the same bearer authentication as the other `/agents/*` routes.
 
-- The list comes from the Host `skills` service (`ctx.skills.list()`) at request time. A profile without that service answers `200` with an empty list, not `501`.
-- The result is cached in memory for `skills.cacheTtlSeconds` (default 60; `0` disables the cache). Concurrent requests after expiry share one `list()` call.
+- Skills are layered by agent scope and workspace. With `?session_id=<id>` (a session of the caller; another owner's or an unknown id answers `404`) the catalog uses that session's live agent scope and workspace, which adds the preset's skills and `<workspace>/.agents/skills`. A session that is not live uses the default preset scope with its workspace. Without `session_id` it uses the default preset scope (the one new sessions get) and the owner's default workspace root when that directory exists.
+
+- The list comes from the Host `skills` service (`ctx.skills.list({ scope, cwd })`) at request time. A profile without that service answers `200` with an empty list, not `501`.
+- The result is cached in memory for `skills.cacheTtlSeconds` (default 60; `0` disables the cache). The cache, the shared in-flight call, and the `ETag` are per (scope, cwd). Concurrent requests for one key after expiry share one `list()` call.
 - Responses carry a strong `ETag` (SHA-256 of the body) and `Cache-Control: private, max-age=0, must-revalidate`. A matching `If-None-Match` answers `304` with no body.
 - A failed `list()` answers `503` with `error.code: "skills_unavailable"`; the failure is not cached, so the next request retries.
 
