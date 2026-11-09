@@ -11,7 +11,7 @@ import type { SessionConfig } from '../src/types.ts'
 import { materializeAgent } from '../src/agent-records.ts'
 import { migrate } from '../src/store/migrate.ts'
 import { openPostgresStore } from '../src/store/postgres.ts'
-import { guardStore, InvalidCursorError, StoreUnavailableError, type SessionIndexRow, type Store } from '../src/store/store.ts'
+import { guardStore, InvalidCursorError, StoreUnavailableError, type FileRow, type SessionIndexRow, type Store } from '../src/store/store.ts'
 import { MemoryStore } from './support/memory-store.ts'
 import { startPostgres, type TestPostgres } from './support/postgres.ts'
 
@@ -45,7 +45,7 @@ const harnesses: Array<[string, Harness]> = [
       const client = new pg.Client({ connectionString: await contractUrl() })
       await client.connect()
       try {
-        await client.query('truncate admin_audit, sessions, environments, environment_templates, agents, owners')
+        await client.query('truncate admin_audit, files, sessions, environments, environment_templates, agents, owners')
       } finally {
         await client.end()
       }
@@ -75,6 +75,24 @@ function sessionRow(id: string, owner: OwnerId, overrides: Partial<SessionIndexR
     body: null,
     createdAt: at,
     updatedAt: at,
+    ...overrides,
+  }
+}
+
+function fileRow(id: string, owner: OwnerId, overrides: Partial<FileRow> = {}): FileRow {
+  return {
+    id,
+    ownerId: owner,
+    name: 'notes.txt',
+    mediaType: 'text/plain',
+    bytes: 100,
+    sha256: 'a'.repeat(64),
+    status: 'staged',
+    sessionId: null,
+    attachment: null,
+    workspacePath: null,
+    createdAt: new Date('2026-11-10T10:00:00.000Z'),
+    attachedAt: null,
     ...overrides,
   }
 }
@@ -162,6 +180,85 @@ describe.each(harnesses)('Store contract (%s)', (_name, harness) => {
     expect((await store.environments.list(A, { limit: 20 })).data).toEqual([connected])
     expect((await store.environments.list(B, { limit: 20 })).data).toEqual([])
     expect(await store.templates.delete(A, 'tpl_1')).toBe(true)
+  })
+
+  it('files: another owner cannot read, claim, release, or delete a staged file', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    await store.ensureOwner(B)
+    await store.files.insert(fileRow('file_a', A))
+    expect(await store.files.get('file_a', A)).toEqual(fileRow('file_a', A))
+    expect(await store.files.get('file_a', B)).toBeUndefined()
+    expect(await store.files.getMany(B, ['file_a'])).toEqual([])
+    expect(await store.files.claim(B, ['file_a'], 'sess_1')).toBeUndefined()
+    expect(await store.files.deleteStaged('file_a', B)).toBeUndefined()
+    expect((await store.files.get('file_a', A))?.status).toBe('staged')
+    await expect(store.files.insert(fileRow('file_a', A))).rejects.toThrow()
+    await expect(store.files.insert(fileRow('file_x', ownerId('nobody')))).rejects.toThrow()
+  })
+
+  it('files: claim is all or nothing and a second claim of the same file loses', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    await store.files.insert(fileRow('file_1', A))
+    await store.files.insert(fileRow('file_2', A))
+    expect(await store.files.claim(A, ['file_1', 'file_missing'], 'sess_1')).toBeUndefined()
+    expect((await store.files.get('file_1', A))?.status).toBe('staged')
+    expect(await store.files.claim(A, ['file_1', 'file_1'], 'sess_1')).toBeUndefined()
+    const claimed = await store.files.claim(A, ['file_2', 'file_1'], 'sess_1')
+    expect(claimed?.map(row => row.id)).toEqual(['file_2', 'file_1'])
+    expect(claimed?.every(row => row.status === 'attached' && row.sessionId === 'sess_1' && row.attachedAt !== null)).toBe(true)
+    expect(await store.files.claim(A, ['file_1'], 'sess_2')).toBeUndefined()
+    const raced = await Promise.all([store.files.insert(fileRow('file_r', A)).then(() => store.files.claim(A, ['file_r'], 's1')), store.files.claim(A, ['file_r'], 's2')])
+    expect(raced.filter(result => result !== undefined).length).toBeLessThanOrEqual(1)
+  })
+
+  it('files: markAttached, listForSession, release, and deleteStaged on an attached row', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    await store.ensureOwner(B)
+    await store.files.insert(fileRow('file_1', A))
+    await store.files.claim(A, ['file_1'], 'sess_1')
+    expect(await store.files.listForSession(A, 'sess_1')).toEqual([])
+    const attachment = { kind: 'file' as const, ref: { attachmentId: 'sha256:abc', name: 'notes.txt', bytes: 100 } }
+    await store.files.markAttached('file_1', B, { attachment, workspacePath: 'uploads/other.txt' })
+    expect(await store.files.listForSession(A, 'sess_1')).toEqual([])
+    await store.files.markAttached('file_1', A, { attachment, workspacePath: 'uploads/notes.txt' })
+    const listed = await store.files.listForSession(A, 'sess_1')
+    expect(listed).toHaveLength(1)
+    expect(listed[0]).toMatchObject({ id: 'file_1', attachment, workspacePath: 'uploads/notes.txt', status: 'attached' })
+    expect(await store.files.listForSession(B, 'sess_1')).toEqual([])
+    expect(await store.files.deleteStaged('file_1', A)).toBe('attached')
+    expect(await store.files.stagedBytes(A)).toBe(0)
+    await store.files.release(B, ['file_1'])
+    expect((await store.files.get('file_1', A))?.status).toBe('attached')
+    await store.files.release(A, ['file_1'])
+    expect(await store.files.get('file_1', A)).toEqual(fileRow('file_1', A))
+    expect(await store.files.stagedBytes(A)).toBe(100)
+  })
+
+  it('files: staged bytes, expiry, staged ids, and session cleanup', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    await store.ensureOwner(B)
+    await store.files.insert(fileRow('file_old', A, { createdAt: new Date('2026-11-08T00:00:00.000Z'), bytes: 10 }))
+    await store.files.insert(fileRow('file_new', A, { bytes: 20 }))
+    await store.files.insert(fileRow('file_b', B, { createdAt: new Date('2026-11-07T00:00:00.000Z'), bytes: 5 }))
+    await store.files.insert(fileRow('file_att', A, { createdAt: new Date('2026-11-01T00:00:00.000Z') }))
+    await store.files.claim(A, ['file_att'], 'sess_9')
+    expect(await store.files.stagedBytes(A)).toBe(30)
+    expect(await store.files.stagedBytes(B)).toBe(5)
+    expect(await store.files.stagedIds(['file_old', 'file_att', 'file_nope'])).toEqual(new Set(['file_old']))
+    expect(await store.files.stagedIds([])).toEqual(new Set())
+    const expired = await store.files.expireStaged(new Date('2026-11-09T00:00:00.000Z'))
+    expect(expired.map(row => row.id).sort()).toEqual(['file_b', 'file_old'])
+    expect(await store.files.get('file_old', A)).toBeUndefined()
+    expect((await store.files.get('file_att', A))?.status).toBe('attached')
+    expect(await store.files.deleteForSession(B, 'sess_9')).toBe(0)
+    expect(await store.files.deleteForSession(A, 'sess_9')).toBe(1)
+    expect(await store.files.get('file_att', A)).toBeUndefined()
+    expect(await store.files.deleteStaged('file_new', A)).toMatchObject({ id: 'file_new' })
+    expect(await store.files.deleteStaged('file_new', A)).toBeUndefined()
   })
 
   it('reads, updates, and deletes session rows per owner', async () => {
@@ -274,19 +371,19 @@ describe.each(harnesses)('Store contract (%s)', (_name, harness) => {
 describe('Postgres migrations', () => {
   it('migrations apply from empty', async () => {
     const url = await postgres!.createDatabase('empty')
-    expect(await migrate(url)).toEqual({ applied: ['0001-initial.sql', '0002-session-config.sql'] })
+    expect(await migrate(url)).toEqual({ applied: ['0001-initial.sql', '0002-session-config.sql', '0003-files.sql'] })
     expect(await migrate(url)).toEqual({ applied: [] })
   })
 
   it('migrations are idempotent under concurrent start', async () => {
     const url = await postgres!.createDatabase('concurrent')
     const results = await Promise.all([migrate(url), migrate(url)])
-    expect(results.flatMap(result => result.applied)).toEqual(['0001-initial.sql', '0002-session-config.sql'])
+    expect(results.flatMap(result => result.applied)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql'])
     const client = new pg.Client({ connectionString: url })
     await client.connect()
     try {
       const rows = await client.query<{ name: string }>('select name from schema_migrations')
-      expect(rows.rows.map(row => row.name)).toEqual(['0001-initial.sql', '0002-session-config.sql'])
+      expect(rows.rows.map(row => row.name)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql'])
     } finally {
       await client.end()
     }
@@ -300,7 +397,7 @@ describe('Postgres migrations', () => {
         "select table_name from information_schema.tables where table_schema = 'public' order by table_name",
       )
       expect(tables.rows.map(row => row.table_name)).toEqual([
-        'admin_audit', 'agents', 'environment_templates', 'environments', 'owners', 'schema_migrations', 'sessions',
+        'admin_audit', 'agents', 'environment_templates', 'environments', 'files', 'owners', 'schema_migrations', 'sessions',
       ])
       const indexes = await client.query<{ indexdef: string }>(
         "select indexdef from pg_indexes where schemaname = 'public' and indexname like '%\\_idx' order by indexname",
@@ -309,6 +406,8 @@ describe('Postgres migrations', () => {
         '(owner_id, created_at DESC)',
         '(owner_id, created_at DESC)',
         '(owner_id, created_at DESC)',
+        '(owner_id, session_id, attachment_id)',
+        '(owner_id, status, created_at)',
         '(owner_id, created_at DESC)',
         '(status)',
       ])

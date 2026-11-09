@@ -8,6 +8,8 @@ import type { EnvironmentRecord, EnvironmentTemplate } from '../../src/environme
 import type { ListQuery } from '../../src/http.ts'
 import {
   RESUMABLE_STATUSES,
+  type FileCollection,
+  type FileRow,
   decodeSessionCursor,
   encodeSessionCursor,
   type OwnedCollection,
@@ -53,6 +55,105 @@ export class MemoryStore implements Store {
   readonly agents: OwnedCollection<OAIAgent> = this.#collection<OAIAgent>()
   readonly templates: OwnedCollection<EnvironmentTemplate> = this.#collection<EnvironmentTemplate>()
   readonly environments: OwnedCollection<EnvironmentRecord> = this.#collection<EnvironmentRecord>()
+
+  readonly #files = new Map<string, FileRow>()
+
+  readonly files: FileCollection = {
+    insert: async (row) => {
+      this.#check()
+      this.#requireOwner(row.ownerId)
+      if (this.#files.has(row.id)) throw new Error(`duplicate file ${row.id}`)
+      this.#files.set(row.id, structuredClone(row))
+    },
+    get: async (id, owner) => {
+      this.#check()
+      const row = this.#files.get(id)
+      return row !== undefined && row.ownerId === owner ? structuredClone(row) : undefined
+    },
+    getMany: async (owner, ids) => {
+      this.#check()
+      return ids.flatMap((id) => {
+        const row = this.#files.get(id)
+        return row !== undefined && row.ownerId === owner ? [structuredClone(row)] : []
+      })
+    },
+    deleteStaged: async (id, owner) => {
+      this.#check()
+      const row = this.#files.get(id)
+      if (row === undefined || row.ownerId !== owner) return undefined
+      if (row.status !== 'staged') return 'attached'
+      this.#files.delete(id)
+      return structuredClone(row)
+    },
+    stagedBytes: async (owner) => {
+      this.#check()
+      return [...this.#files.values()].filter(row => row.ownerId === owner && row.status === 'staged').reduce((sum, row) => sum + row.bytes, 0)
+    },
+    claim: async (owner, ids, sessionId) => {
+      this.#check()
+      const rows = ids.map(id => this.#files.get(id))
+      if (rows.some(row => row === undefined || row.ownerId !== owner || row.status !== 'staged') || new Set(ids).size !== ids.length) return undefined
+      const now = new Date()
+      return rows.map((row) => {
+        row!.status = 'attached'
+        row!.sessionId = sessionId
+        row!.attachedAt = now
+        return structuredClone(row!)
+      })
+    },
+    markAttached: async (id, owner, patch) => {
+      this.#check()
+      const row = this.#files.get(id)
+      if (row === undefined || row.ownerId !== owner || row.status !== 'attached') return
+      row.attachment = structuredClone(patch.attachment)
+      row.workspacePath = patch.workspacePath
+    },
+    release: async (owner, ids) => {
+      this.#check()
+      for (const id of ids) {
+        const row = this.#files.get(id)
+        if (row === undefined || row.ownerId !== owner || row.status !== 'attached') continue
+        row.status = 'staged'
+        row.sessionId = null
+        row.attachment = null
+        row.workspacePath = null
+        row.attachedAt = null
+      }
+    },
+    listForSession: async (owner, sessionId) => {
+      this.#check()
+      return [...this.#files.values()]
+        .filter(row => row.ownerId === owner && row.sessionId === sessionId && row.status === 'attached' && row.attachment !== null)
+        .sort((a, b) => (a.attachedAt?.getTime() ?? 0) - (b.attachedAt?.getTime() ?? 0) || (a.id < b.id ? -1 : 1))
+        .map(row => structuredClone(row))
+    },
+    deleteForSession: async (owner, sessionId) => {
+      this.#check()
+      let removed = 0
+      for (const [id, row] of this.#files) {
+        if (row.ownerId === owner && row.sessionId === sessionId) {
+          this.#files.delete(id)
+          removed += 1
+        }
+      }
+      return removed
+    },
+    expireStaged: async (before) => {
+      this.#check()
+      const expired: FileRow[] = []
+      for (const [id, row] of this.#files) {
+        if (row.status === 'staged' && row.createdAt.getTime() < before.getTime()) {
+          this.#files.delete(id)
+          expired.push(structuredClone(row))
+        }
+      }
+      return expired
+    },
+    stagedIds: async (ids) => {
+      this.#check()
+      return new Set(ids.filter(id => this.#files.get(id)?.status === 'staged'))
+    },
+  }
 
   readonly sessions: Store['sessions'] = {
     insert: async (row) => {

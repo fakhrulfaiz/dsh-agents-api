@@ -15,6 +15,9 @@ import type { ListQuery } from '../http.ts'
 import type { OAIAgent, OAIListResponse, SessionConfig } from '../types.ts'
 import {
   RESUMABLE_STATUSES,
+  type FileAttachmentSnapshot,
+  type FileCollection,
+  type FileRow,
   decodeSessionCursor,
   encodeSessionCursor,
   type OwnedCollection,
@@ -92,6 +95,138 @@ function sessionFromDb(row: SessionDbRow): SessionIndexRow {
     body: Object.keys(row.body).length === 0 ? null : row.body as SessionConfig,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  }
+}
+
+const FILE_COLUMNS = 'id, owner_id, name, media_type, bytes, sha256, status, session_id, attachment, workspace_path, created_at, attached_at'
+
+interface FileDbRow {
+  id: string
+  owner_id: string
+  name: string
+  media_type: string
+  /** `bigint` arrives as text from `pg`. */
+  bytes: string
+  sha256: string
+  status: FileRow['status']
+  session_id: string | null
+  attachment: FileAttachmentSnapshot | null
+  workspace_path: string | null
+  created_at: Date
+  attached_at: Date | null
+}
+
+/**
+ * @param row - `files` row.
+ * @returns the file record.
+ */
+function fileFromDb(row: FileDbRow): FileRow {
+  return {
+    id: row.id,
+    ownerId: row.owner_id as OwnerId,
+    name: row.name,
+    mediaType: row.media_type,
+    bytes: Number(row.bytes),
+    sha256: row.sha256,
+    status: row.status,
+    sessionId: row.session_id,
+    attachment: row.attachment,
+    workspacePath: row.workspace_path,
+    createdAt: row.created_at,
+    attachedAt: row.attached_at,
+  }
+}
+
+/**
+ * @param pool - connection pool.
+ * @returns the file collection over the `files` table.
+ */
+function fileCollection(pool: pg.Pool): FileCollection {
+  return {
+    async insert(row) {
+      await pool.query(
+        `insert into files (${FILE_COLUMNS}) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        [row.id, row.ownerId, row.name, row.mediaType, row.bytes, row.sha256, row.status, row.sessionId, row.attachment === null ? null : JSON.stringify(row.attachment), row.workspacePath, row.createdAt, row.attachedAt],
+      )
+    },
+    async get(id, owner) {
+      const result = await pool.query<FileDbRow>(`select ${FILE_COLUMNS} from files where id = $1 and owner_id = $2`, [id, owner])
+      return result.rows[0] === undefined ? undefined : fileFromDb(result.rows[0])
+    },
+    async getMany(owner, ids) {
+      if (ids.length === 0) return []
+      const result = await pool.query<FileDbRow>(`select ${FILE_COLUMNS} from files where owner_id = $1 and id = any($2::text[])`, [owner, ids])
+      return result.rows.map(fileFromDb)
+    },
+    async deleteStaged(id, owner) {
+      const removed = await pool.query<FileDbRow>(`delete from files where id = $1 and owner_id = $2 and status = 'staged' returning ${FILE_COLUMNS}`, [id, owner])
+      if (removed.rows[0] !== undefined) return fileFromDb(removed.rows[0])
+      const existing = await pool.query('select 1 from files where id = $1 and owner_id = $2', [id, owner])
+      return (existing.rowCount ?? 0) > 0 ? 'attached' : undefined
+    },
+    async stagedBytes(owner) {
+      const result = await pool.query<{ total: string }>("select coalesce(sum(bytes), 0)::text as total from files where owner_id = $1 and status = 'staged'", [owner])
+      return Number(result.rows[0]!.total)
+    },
+    async claim(owner, ids, sessionId) {
+      if (new Set(ids).size !== ids.length) return undefined
+      const client = await pool.connect()
+      try {
+        await client.query('begin')
+        const result = await client.query<FileDbRow>(
+          `update files set status = 'attached', session_id = $3, attached_at = clock_timestamp()
+           where owner_id = $1 and id = any($2::text[]) and status = 'staged'
+           returning ${FILE_COLUMNS}`,
+          [owner, ids, sessionId],
+        )
+        if (result.rows.length !== ids.length) {
+          await client.query('rollback')
+          return undefined
+        }
+        await client.query('commit')
+        const byId = new Map(result.rows.map(row => [row.id, fileFromDb(row)]))
+        return ids.map(id => byId.get(id)!)
+      } catch (error: unknown) {
+        await client.query('rollback').catch(() => undefined)
+        throw error
+      } finally {
+        client.release()
+      }
+    },
+    async markAttached(id, owner, patch) {
+      await pool.query(
+        "update files set attachment = $3, attachment_id = $4, workspace_path = $5 where id = $1 and owner_id = $2 and status = 'attached'",
+        [id, owner, JSON.stringify(patch.attachment), patch.attachment.ref.attachmentId, patch.workspacePath],
+      )
+    },
+    async release(owner, ids) {
+      if (ids.length === 0) return
+      await pool.query(
+        `update files set status = 'staged', session_id = null, attachment = null, attachment_id = null, workspace_path = null, attached_at = null
+         where owner_id = $1 and id = any($2::text[]) and status = 'attached'`,
+        [owner, ids],
+      )
+    },
+    async listForSession(owner, sessionId) {
+      const result = await pool.query<FileDbRow>(
+        `select ${FILE_COLUMNS} from files where owner_id = $1 and session_id = $2 and status = 'attached' and attachment_id is not null order by attached_at, id`,
+        [owner, sessionId],
+      )
+      return result.rows.map(fileFromDb)
+    },
+    async deleteForSession(owner, sessionId) {
+      const result = await pool.query('delete from files where owner_id = $1 and session_id = $2', [owner, sessionId])
+      return result.rowCount ?? 0
+    },
+    async expireStaged(before) {
+      const result = await pool.query<FileDbRow>(`delete from files where status = 'staged' and created_at < $1 returning ${FILE_COLUMNS}`, [before])
+      return result.rows.map(fileFromDb)
+    },
+    async stagedIds(ids) {
+      if (ids.length === 0) return new Set()
+      const result = await pool.query<{ id: string }>("select id from files where status = 'staged' and id = any($1::text[])", [ids])
+      return new Set(result.rows.map(row => row.id))
+    },
   }
 }
 
@@ -178,6 +313,7 @@ export async function openPostgresStore(url: string, onIdleClientError?: (error:
     agents: ownedCollection(pool, plainTable<OAIAgent>('agents')),
     templates: ownedCollection(pool, plainTable<EnvironmentTemplate>('environment_templates')),
     environments: ownedCollection(pool, ENVIRONMENTS),
+    files: fileCollection(pool),
     sessions: {
       async insert(row) {
         await pool.query(

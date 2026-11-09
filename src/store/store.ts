@@ -90,6 +90,122 @@ export interface SessionListQuery {
   limit: number
 }
 
+/** DSH attachment reference stored on an attached file, as JSON. */
+export interface FileAttachmentSnapshot {
+  /** `image` for a normalized raster stored with `saveImage`; `file` for verbatim bytes. */
+  kind: 'image' | 'file'
+  /** `ImageAttachmentRef` or `FileAttachmentRef` of `@deepseek-ai/dsh-attachment`; `attachmentId` is always present. */
+  ref: { attachmentId: string } & Record<string, unknown>
+}
+
+/** One uploaded file. `staged` bytes live in the staging `FileStore`; `attached` bytes live in the DSH attachment store. */
+export interface FileRow {
+  /** `file_<random>`. */
+  id: string
+  ownerId: OwnerId
+  /** Sanitized leaf name; never a path. */
+  name: string
+  /** Server-decided media type (magic bytes for rasters, extension allow-list otherwise). */
+  mediaType: string
+  /** Exact byte length of the upload. */
+  bytes: number
+  /** Hex sha256 of the uploaded bytes. */
+  sha256: string
+  status: 'staged' | 'attached'
+  /** Session the file was attached to; `null` while staged. */
+  sessionId: string | null
+  /** DSH reference after attach; `null` while staged. */
+  attachment: FileAttachmentSnapshot | null
+  /** Path of the workspace copy relative to the session workspace (`uploads/<name>`); `null` while staged. */
+  workspacePath: string | null
+  createdAt: Date
+  attachedAt: Date | null
+}
+
+/** What `files.markAttached` records once the DSH object and the workspace copy exist. */
+export interface FileAttachedPatch {
+  attachment: FileAttachmentSnapshot
+  workspacePath: string
+}
+
+/** Uploaded-file records. Every method is owner-scoped except the sweep helpers. */
+export interface FileCollection {
+  /**
+   * @param row - new `staged` row; its owner must exist and `id` must be new.
+   */
+  insert(row: FileRow): Promise<void>
+  /**
+   * @param id - file id.
+   * @param owner - calling principal.
+   * @returns the row, or `undefined` when missing or owned by someone else.
+   */
+  get(id: string, owner: OwnerId): Promise<FileRow | undefined>
+  /**
+   * @param owner - calling principal.
+   * @param ids - file ids.
+   * @returns the rows of `owner` among `ids`, in no particular order; unknown and foreign ids are absent.
+   */
+  getMany(owner: OwnerId, ids: readonly string[]): Promise<FileRow[]>
+  /**
+   * Remove a `staged` row.
+   * @param id - file id.
+   * @param owner - calling principal.
+   * @returns the removed row; `'attached'` when the row exists but is attached (nothing removed); `undefined` when missing or foreign.
+   */
+  deleteStaged(id: string, owner: OwnerId): Promise<FileRow | 'attached' | undefined>
+  /**
+   * @param owner - calling principal.
+   * @returns total bytes of the owner's `staged` rows.
+   */
+  stagedBytes(owner: OwnerId): Promise<number>
+  /**
+   * Atomically move `ids` from `staged` to `attached` for `sessionId`. All or none: when any id is
+   * missing, foreign, or not `staged` (for example claimed by a concurrent send), nothing changes.
+   * @param owner - calling principal.
+   * @param ids - distinct file ids.
+   * @param sessionId - session the files are attached to.
+   * @returns the claimed rows in `ids` order, or `undefined` when the claim failed.
+   */
+  claim(owner: OwnerId, ids: readonly string[], sessionId: string): Promise<FileRow[] | undefined>
+  /**
+   * Record the DSH object and workspace copy of a claimed row.
+   * @param id - file id.
+   * @param owner - calling principal.
+   * @param patch - attachment reference and workspace path.
+   */
+  markAttached(id: string, owner: OwnerId, patch: FileAttachedPatch): Promise<void>
+  /**
+   * Return claimed rows to `staged` and clear their attach fields, after a send failed before the message was queued.
+   * @param owner - calling principal.
+   * @param ids - file ids; rows that are not `attached` are left alone.
+   */
+  release(owner: OwnerId, ids: readonly string[]): Promise<void>
+  /**
+   * @param owner - calling principal.
+   * @param sessionId - session id.
+   * @returns the owner's `attached` rows of the session that carry a DSH reference.
+   */
+  listForSession(owner: OwnerId, sessionId: string): Promise<FileRow[]>
+  /**
+   * Remove the rows of a removed session. DSH objects are content-addressed and stay.
+   * @param owner - calling principal.
+   * @param sessionId - session id.
+   * @returns how many rows were removed.
+   */
+  deleteForSession(owner: OwnerId, sessionId: string): Promise<number>
+  /**
+   * Remove `staged` rows created before `before`, for every owner.
+   * @param before - cutoff.
+   * @returns the removed rows, so the caller can remove their bytes.
+   */
+  expireStaged(before: Date): Promise<FileRow[]>
+  /**
+   * @param ids - file ids, any owner.
+   * @returns the subset that exists as `staged` rows.
+   */
+  stagedIds(ids: readonly string[]): Promise<Set<string>>
+}
+
 /** Agentry's durable storage. Rejections mean the backing database failed, except `InvalidCursorError`. */
 export interface Store {
   /**
@@ -100,6 +216,7 @@ export interface Store {
   agents: OwnedCollection<OAIAgent>
   templates: OwnedCollection<EnvironmentTemplate>
   environments: OwnedCollection<EnvironmentRecord>
+  files: FileCollection
   sessions: {
     /**
      * @param row - new index row; its owner must exist.
@@ -230,6 +347,28 @@ function guardCollection<T extends { id: string }>(collection: OwnedCollection<T
 }
 
 /**
+ * Guard every method of the file collection.
+ * @param files - file collection.
+ * @returns the same collection with outage rejections normalized.
+ */
+function guardFiles(files: FileCollection): FileCollection {
+  return {
+    insert: guard(files.insert.bind(files)),
+    get: guard(files.get.bind(files)),
+    getMany: guard(files.getMany.bind(files)),
+    deleteStaged: guard(files.deleteStaged.bind(files)),
+    stagedBytes: guard(files.stagedBytes.bind(files)),
+    claim: guard(files.claim.bind(files)),
+    markAttached: guard(files.markAttached.bind(files)),
+    release: guard(files.release.bind(files)),
+    listForSession: guard(files.listForSession.bind(files)),
+    deleteForSession: guard(files.deleteForSession.bind(files)),
+    expireStaged: guard(files.expireStaged.bind(files)),
+    stagedIds: guard(files.stagedIds.bind(files)),
+  }
+}
+
+/**
  * View of `store` whose rejections are `StoreUnavailableError` (or
  * `InvalidCursorError`), so a route handler can answer 503 without knowing
  * the implementation's error types.
@@ -252,6 +391,7 @@ export function guardStore(store: Store): Store {
       listResumable: guard(sessions.listResumable.bind(sessions)),
       ownersOf: guard(sessions.ownersOf.bind(sessions)),
     },
+    files: guardFiles(store.files),
     audit: guard(store.audit.bind(store)),
     close: () => store.close(),
   }
