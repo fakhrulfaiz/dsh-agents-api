@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Host tool catalog scope
+
+- `GET /v1/agents/tools` leased the default preset scope through `standingKeyFor`, which the pinned DSH does not have, so the call fell back silently to the empty global registry. It now uses `agentPresets.acquireScope()` and releases the lease. `tests/host-tool-catalog.spec.ts` covers it.
+
 ## 2026-11-10 — Scheduled task hardening
 
 - `DELETE /agents/sessions/{id}` stops the live agent before it deletes tasks, and deletes tasks that list the session in `involvedSessionIds` as well as those that target it. Pause, resume, and delete send the revision read for the ownership check as `expectedUpdatedAt` (409 `schedule_conflict` on a change). `schedule_cleanup_failed` and session-create 500s return generic messages and log the cause. Write-up: [docs/changes/2026-11-09-scheduled-tasks.md](docs/changes/2026-11-09-scheduled-tasks.md#hardening).

@@ -386,19 +386,23 @@ export class AgentsGateway {
    * Schemas a new session can call.
    *
    * The web profile keeps model-facing tools on the default agent preset, so
-   * the global `schemas()` view is empty. The preset's standing scope is that
-   * list. Profiles without a preset roster keep the global registry.
+   * the global `schemas()` view is empty. The default preset's scope (leased
+   * through `acquireScope`) is that list. Profiles without a preset roster keep the global registry.
    */
   private async hostToolSchemas(): Promise<ReturnType<Context['tools']['schemas']>> {
     const get = (this.ctx as { get?: (name: string) => unknown }).get
     if (typeof get === 'function') {
       try {
         const presets = get.call(this.ctx, 'agentPresets') as {
-          standingKeyFor?: (id?: string) => Promise<unknown>
+          acquireScope?: (id?: string) => Promise<{ key: Parameters<Context['tools']['schemas']>[0] } & AsyncDisposable>
         } | undefined
-        if (presets !== undefined && typeof presets.standingKeyFor === 'function') {
-          const scope = await presets.standingKeyFor()
-          return this.ctx.tools.schemas(scope as never)
+        if (presets !== undefined && typeof presets.acquireScope === 'function') {
+          const lease = await presets.acquireScope()
+          try {
+            return this.ctx.tools.schemas(lease.key)
+          } finally {
+            await lease[Symbol.asyncDispose]()
+          }
         }
       } catch {
         // No preset roster, or the default preset did not mount.
