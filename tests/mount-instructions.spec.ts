@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import {
+  AGENTS_API_GUIDANCE_ORDER,
+  AGENTS_API_GUIDANCE_SECTION,
+  AGENTS_API_GUIDANCE_TEXT,
   AGENTS_API_INSTRUCTIONS_ORDER,
   AGENTS_API_INSTRUCTIONS_SECTION,
   mountAgentInstructions,
@@ -18,15 +21,23 @@ describe('mountAgentInstructions', () => {
       },
     } as unknown as Context
 
+    const guidance = {
+      name: AGENTS_API_GUIDANCE_SECTION,
+      order: AGENTS_API_GUIDANCE_ORDER,
+      text: AGENTS_API_GUIDANCE_TEXT,
+    }
+
     mountAgentInstructions(agentCtx, null)
     mountAgentInstructions(agentCtx, '   ')
+    expect(sections).toEqual([guidance, guidance])
+    sections.length = 0
     mountAgentInstructions(agentCtx, '  be brief  ')
 
     expect(sections).toEqual([{
       name: AGENTS_API_INSTRUCTIONS_SECTION,
       order: AGENTS_API_INSTRUCTIONS_ORDER,
       text: 'be brief',
-    }])
+    }, guidance])
   })
 
   it('fails session setup when the Host has no system prompt', () => {

@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Workspace and shell guidance
+
+- Every agent session now gets a system-prompt rule: do not search the whole filesystem (`/`, `/mnt`, home-wide `find`), stay in the workspace, and use the matching office skill's own scripts for docx/pptx/xlsx. The shell executor already defaults to a 120s timeout (max 600s) in DSH, so no profile patch was needed.
+
 ## 2026-11-10 — File attachments (backend)
 
 - `POST /v1/agents/files` (multipart upload, magic-byte sniffing, size and quota limits, traversal-safe names), `GET /v1/agents/files/{file_id}/content` (owner-checked, `nosniff`, sandbox CSP, rasters inline, everything else a download), `DELETE /v1/agents/files/{file_id}` (staged only).
