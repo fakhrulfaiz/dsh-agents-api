@@ -279,6 +279,16 @@ describe('sessions on hosted environments', () => {
     async writeFile() {},
   }
 
+  it('lists the registered providers with their capabilities and the default', async () => {
+    const { root } = await harness([noExec])
+    const out = await (await fetch(`${root}/v1/agents/environments/providers`)).json() as { object: string; data: unknown[] }
+    expect(out.object).toBe('list')
+    expect(out.data).toEqual([
+      { object: 'sandbox.provider', name: 'local', default: true, capabilities: { templateFields: ['files'], files: true, exec: true } },
+      { object: 'sandbox.provider', name: 'files-only', default: false, capabilities: { templateFields: ['files'], files: true, exec: false } },
+    ])
+  })
+
   it('provisions an environment from a template or inline fields and uses its directory as the session cwd', async () => {
     const { post, session, root } = await harness()
     const template = await (await post('/agents/environments/templates', { files: [{ type: 'inline', path: '/workspace/seed.txt', data: Buffer.from('s').toString('base64') }] })).json() as { id: string }

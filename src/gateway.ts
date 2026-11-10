@@ -251,6 +251,7 @@ export class AgentsGateway {
       { method: 'GET', pattern: '/agents/environments/templates/:template_id', handler: (_req, res, _url, params, p) => this.getTemplate(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/environments/templates/:template_id', handler: (req, res, _url, params, p) => this.updateTemplate(req, res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/environments/templates/:template_id', handler: (_req, res, _url, params, p) => this.deleteTemplate(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/providers', handler: async (_req, res) => { json(res, 200, { object: 'list', data: this.sandboxes.list().map(({ name, ...rest }) => ({ object: 'sandbox.provider', name, ...rest })) }) } },
       { method: 'POST', pattern: '/agents/environments', handler: (req, res, _url, _params, p) => this.createEnvironment(req, res, p.owner) },
       { method: 'GET', pattern: '/agents/environments', handler: (_req, res, url, _params, p) => this.listEnvironments(res, url, p.owner) },
       { method: 'POST', pattern: '/agents/environments/:environment_id/files', handler: (req, res, _url, params, p) => this.writeEnvironmentFile(req, res, params, p.owner) },

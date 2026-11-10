@@ -3,6 +3,13 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-11 — Pluggable sandbox providers, OpenAI Agents API shapes
+
+- `SandboxProvider` contract and `SandboxRegistry`; the gateway names no concrete provider. `GET /agents/environments/providers` lists them with capabilities. See `docs/sandbox.md`.
+- Environment templates, environments and environment files use the OpenAI Agents API shapes (`agent.environment.template`, `agent.environment`, `agent.environment.file`; token-paged file lists) with `provider`, `provider_metadata`, `image` and `unsupported_fields` as extensions. Breaking for clients of the earlier shapes: environment status values are `pending connected disconnected expired failed`, file paths are absolute `/workspace/...`, and the file list is a token page.
+- A session `environment` of `openai_hosted` with `environment_template_id` or inline fields provisions through a provider; `sandbox` with `environment_id` attaches one. New errors: 400 `sandbox_exec_unavailable`, `sandbox_template_unsupported`.
+- Codebox is removed (`CodeboxRemovedError` at load for its settings).
+
 ## 2026-11-10 — Bundled office runtime
 
 - `cordis.patch.yml` mounts `@deepseek-ai/dsh-tool-workspace-dependencies` from a prebuilt payload (`AGENTRY_OFFICE_RUNTIME`, default `~/.dsh/office-runtime/primary-runtime`) and points `skill-office` at the sibling `office-skills`, so agents use the bundled Python instead of pip-installing libraries. Build it with `pnpm run prepare:primary-runtime --target linux-x64 --output ~/.dsh/office-runtime` in the DSH checkout.

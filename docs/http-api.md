@@ -15,7 +15,8 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 | `POST` | `/agents/sessions/{id}/commands/{name}` | Run one Host slash command in a session and answer its outcome. See [Slash commands](#slash-commands) |
 | `POST` `GET` | `/agents/environments/templates` | Create or list environment templates |
 | `GET` `POST` `DELETE` | `/agents/environments/templates/{id}` | Retrieve, update, or delete one template |
-| `POST` `GET` | `/agents/environments` | Create or list environments. Each is a local directory `<workspaces>/<owner>/<environment_id>/` with `provider: "local"` |
+| `GET` | `/agents/environments/providers` | Extension. List sandbox providers with their capabilities and the default |
+| `POST` `GET` | `/agents/environments` | Create or list environments (`agent.environment`). The default `local` provider makes a directory `<workspaces>/<owner>/<environment_id>/`; `template_id` or `provider` selects another. See [sandbox.md](sandbox.md) |
 | `GET` `DELETE` | `/agents/environments/{id}` | Retrieve (status `failed` when the directory is gone) or delete one environment and its directory |
 | `POST` `GET` | `/agents/environments/{id}/files` | Write or list files in the environment workspace |
 | `GET` | `/agents/environments/{id}/files/{path}` | Read one environment file |
@@ -228,7 +229,7 @@ Non-empty `agent.instructions` is mounted as Host system-prompt section `agents-
 
 `GET /health` is registered on the webserver outside `/v1` and returns `{ ok: true, service: "agents-api" }`.
 
-Session create accepts `environment.type` `local` with an absolute `workspace_directory` (same cwd as `self_hosted`). `environment.type` `sandbox` returns an error; there is no sandbox. Omitting the environment, or sending `none`, stores a local workspace. `self_hosted` and `openai_hosted` stay as before. The configured `workspaces` root supplies the cwd when the request does not pass an absolute directory. Deleting a session deletes environments whose `session_id` is that session.
+Session create accepts `environment.type` `local` with an absolute `workspace_directory` (same cwd as `self_hosted`). `environment.type` `openai_hosted` with `environment_template_id` or inline template fields provisions an environment through a sandbox provider, and `sandbox` with `environment_id` attaches an existing one (errors: 400 `sandbox_exec_unavailable`, `sandbox_template_unsupported`); a bare `openai_hosted` uses the default workspace. See [sandbox.md](sandbox.md). Omitting the environment, or sending `none`, stores a local workspace. `self_hosted` and `openai_hosted` stay as before. The configured `workspaces` root supplies the cwd when the request does not pass an absolute directory. Deleting a session deletes environments whose `session_id` is that session.
 
 ### Event ids and replay
 

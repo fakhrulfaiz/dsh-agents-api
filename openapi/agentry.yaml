@@ -807,6 +807,60 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/environments/providers:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    get:
+      summary: List sandbox providers
+      description: Extension. Names each registered sandbox provider, whether it is the default, and what it supports, so a client can pick a `provider` and know which template fields it applies.
+      tags:
+        - Environments
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        object:
+                          const: sandbox.provider
+                        name:
+                          type: string
+                        default:
+                          type: boolean
+                        capabilities:
+                          type: object
+                          properties:
+                            templateFields:
+                              type: array
+                              items:
+                                type: string
+                            files:
+                              type: boolean
+                            exec:
+                              type: boolean
+                          required:
+                            - templateFields
+                            - files
+                            - exec
+                      required:
+                        - object
+                        - name
+                        - default
+                        - capabilities
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
   /v1/agents/environments/templates:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"

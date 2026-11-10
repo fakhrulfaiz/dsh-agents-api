@@ -164,7 +164,8 @@ npx openapi-typescript openapi/agentry.yaml -o src/api/agentry.d.ts
 | `GET` | `/agents/environments/templates/{id}` | Read one template. |
 | `POST` | `/agents/environments/templates/{id}` | Update one template's name or config. |
 | `DELETE` | `/agents/environments/templates/{id}` | Delete one template. |
-| `POST` | `/agents/environments` | Create a local environment: the directory `<workspaces>/<owner>/<environment_id>/`. `template_id` and `session_id` must name the caller's records. `environment.type: "sandbox"` on a session is rejected. |
+| `GET` | `/agents/environments/providers` | List sandbox providers, their capabilities and the default ([docs/sandbox.md](docs/sandbox.md)). |
+| `POST` | `/agents/environments` | Create an environment. The `local` provider makes the directory `<workspaces>/<owner>/<environment_id>/`; `template_id` and `provider` select a template and provider. `template_id` and `session_id` must name the caller's records. |
 | `GET` | `/agents/environments` | List the caller's environments. |
 | `GET` | `/agents/environments/{id}` | Read one environment; its status becomes `failed` when the directory is gone. |
 | `DELETE` | `/agents/environments/{id}` | Remove the directory and delete the record. |
