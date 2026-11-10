@@ -8,10 +8,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import type { CommandDescriptor } from '@deepseek-ai/dsh-commands/types'
+import type { CommandDescriptor, CommandExecution } from '@deepseek-ai/dsh-commands/types'
 import { createLocalProvider } from '../src/environment/local.ts'
 import { AgentsGateway } from '../src/gateway.ts'
+import { WireProjector } from '../src/history/projector.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
+import { baseOf } from '../src/session-resource.ts'
 import { ownerId } from '../src/auth/authenticator.ts'
 import type { SessionIndexRow } from '../src/store/store.ts'
 import { openAuthenticator } from './open-auth.ts'
@@ -46,9 +48,10 @@ function row(id: string, owner = 'test'): SessionIndexRow {
 }
 
 type List = (agent: unknown) => readonly CommandDescriptor[]
+type Execute = (agent: unknown, line: string, attachments: readonly unknown[], signal: AbortSignal) => Promise<CommandExecution | undefined>
 
 /** A gateway over a command service stub; `list` is the stub's single method. */
-async function start(list: List | undefined, ttlMs = 60_000) {
+async function start(list: List | undefined, ttlMs = 60_000, execute: Execute = () => Promise.resolve(undefined)) {
   const warn = vi.fn()
   const released = vi.fn()
   const store = new MemoryStore()
@@ -62,8 +65,9 @@ async function start(list: List | undefined, ttlMs = 60_000) {
     agents: { get: (id: string) => id === 'sess_live' ? LIVE_AGENT : undefined },
   } as unknown as Context
   const base = testGatewayOptions(environments, new FakeSessionQuery())
-  const options = { ...base, commands: () => list === undefined ? undefined : { list }, commandsTtlMs: ttlMs }
-  const api = new AgentsGateway(ctx, openAuthenticator, '/v1', store, new SessionRegistry(), options)
+  const options = { ...base, commands: () => list === undefined ? undefined : { list, execute: execute as never }, commandsTtlMs: ttlMs }
+  const registry = new SessionRegistry()
+  const api = new AgentsGateway(ctx, openAuthenticator, '/v1', store, registry, options)
   const server = createServer((req, res) => {
     void api.handle(req, res)
   })
@@ -74,7 +78,11 @@ async function start(list: List | undefined, ttlMs = 60_000) {
   const url = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}/v1/agents/commands`
   await store.sessions.insert(row('sess_live'))
   await store.sessions.insert(row('sess_cold'))
-  return { url: `${url}?session_id=sess_live`, bare: url, base: url, warn, store, released, api }
+  const projector = new WireProjector(baseOf(row('sess_live')), false)
+  registry.register(projector)
+  const run = (id: string, name: string, body: unknown = {}) =>
+    fetch(`http://127.0.0.1:${String((server.address() as AddressInfo).port)}/v1/agents/sessions/${id}/commands/${name}`, { method: 'POST', body: JSON.stringify(body) })
+  return { url: `${url}?session_id=sess_live`, bare: url, base: url, warn, store, released, api, run, projector }
 }
 
 describe('GET /v1/agents/commands', () => {
@@ -216,6 +224,131 @@ describe('GET /v1/agents/commands', () => {
     expect(body.error.message).not.toContain('/secret')
     expect(warn).toHaveBeenCalledOnce()
     expect((await fetch(url)).status).toBe(200)
+  })
+})
+
+const execution = (kind: 'success' | 'error', text?: string): CommandExecution =>
+  ({ commandId: 'cmd_1', result: kind === 'success' ? { kind, ...(text === undefined ? {} : { text }) } : { kind, text: text ?? 'failed' } }) as never
+
+describe('POST /v1/agents/sessions/{id}/commands/{name}', () => {
+  it('runs the command with the verbatim input and answers its outcome', async () => {
+    const execute = vi.fn<Execute>(() => Promise.resolve(execution('success', 'Compacted')))
+    const { run } = await start(() => [], 60_000, execute)
+    const res = await run('sess_live', 'goal', { input: 'edit ship it' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ command_id: 'cmd_1', name: 'goal', status: 'success', text: 'Compacted' })
+    expect(execute.mock.calls[0]?.[0]).toBe(LIVE_AGENT)
+    expect(execute.mock.calls[0]?.[1]).toBe('/goal edit ship it')
+    expect(execute.mock.calls[0]?.[2]).toEqual([])
+  })
+
+  it('answers the projected item for the run, turn-less between turns', async () => {
+    const { run, api } = await start(() => [], 60_000, (_agent, line) => {
+      api.applySessionEvent('sess_live', { type: 'command/run', seq: 7, time: 7000, data: { commandId: 'cmd_1', name: 'compact', source: { kind: 'user' } } } as never)
+      api.applySessionEvent('sess_live', { type: 'command/done', seq: 8, time: 8000, data: { commandId: 'cmd_1', kind: 'success', text: line } } as never)
+      return Promise.resolve(execution('success', line))
+    })
+    const body = await (await run('sess_live', 'compact')).json() as { item: unknown }
+    expect(body.item).toEqual({ id: 'item_cmd_7', type: 'slash_command', command_id: 'cmd_1', name: 'compact', status: 'completed', text: '/compact', turn_id: null })
+  })
+
+  it('sends a bare line without input', async () => {
+    const execute = vi.fn<Execute>(() => Promise.resolve(execution('success')))
+    const { run } = await start(() => [], 60_000, execute)
+    await run('sess_live', 'compact')
+    expect(execute.mock.calls[0]?.[1]).toBe('/compact')
+  })
+
+  it('answers a handler error result as 200 with status error', async () => {
+    const { run } = await start(() => [], 60_000, () => Promise.resolve(execution('error', 'Usage: /compact')))
+    const res = await run('sess_live', 'compact', { input: 'x' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ status: 'error', text: 'Usage: /compact' })
+  })
+
+  it('answers 404 command_not_found for an unresolved or malformed name', async () => {
+    const { run } = await start(() => [], 60_000, () => Promise.resolve(undefined))
+    for (const name of ['nope', 'Bad', '1x']) {
+      const res = await run('sess_live', name)
+      expect(res.status).toBe(404)
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe('command_not_found')
+    }
+  })
+
+  it('answers 404 command_not_found without the command service', async () => {
+    const { run } = await start(undefined)
+    expect((await run('sess_live', 'compact')).status).toBe(404)
+  })
+
+  it('answers 404 for another owner session and an unknown session without executing', async () => {
+    const execute = vi.fn<Execute>(() => Promise.resolve(execution('success')))
+    const { run, store } = await start(() => [], 60_000, execute)
+    await store.sessions.insert(row('sess_theirs', 'other'))
+    expect((await run('sess_theirs', 'compact')).status).toBe(404)
+    expect((await run('sess_missing', 'compact')).status).toBe(404)
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('answers 409 session_not_resumable for a stopped session without stored setup', async () => {
+    const execute = vi.fn<Execute>(() => Promise.resolve(execution('success')))
+    const { run } = await start(() => [], 60_000, execute)
+    const res = await run('sess_cold', 'compact')
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('session_not_resumable')
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('answers 409 session_busy while a turn is running, before executing', async () => {
+    const execute = vi.fn<Execute>(() => Promise.resolve(execution('success')))
+    const { run, projector } = await start(() => [], 60_000, execute)
+    projector.apply({ type: 'turn/start', seq: 1, time: 1000, data: {} } as never)
+    const res = await run('sess_live', 'compact')
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('session_busy')
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('answers 409 session_busy to a second command while one executes', async () => {
+    let release: (value: CommandExecution) => void = () => {}
+    const execute = vi.fn<Execute>(() => new Promise<CommandExecution>((resolve) => { release = resolve }))
+    const { run } = await start(() => [], 60_000, execute)
+    const first = run('sess_live', 'compact')
+    await vi.waitFor(() => { expect(execute).toHaveBeenCalled() })
+    expect((await run('sess_live', 'goal')).status).toBe(409)
+    release(execution('success'))
+    expect((await first).status).toBe(200)
+    execute.mockResolvedValue(execution('success'))
+    expect((await run('sess_live', 'goal')).status).toBe(200)
+  })
+
+  it('answers 500 command_failed with a generic message when the handler throws', async () => {
+    const { run, warn } = await start(() => [], 60_000, () => Promise.reject(new Error('boom /secret')))
+    const res = await run('sess_live', 'compact')
+    expect(res.status).toBe(500)
+    const body = await res.json() as { error: { code: string; message: string } }
+    expect(body.error.code).toBe('command_failed')
+    expect(body.error.message).not.toContain('/secret')
+    expect(warn).toHaveBeenCalledOnce()
+  })
+
+  it('aborts the signal when the client disconnects', async () => {
+    let signal: AbortSignal | undefined
+    const execute = vi.fn<Execute>((_a, _l, _x, s) => { signal = s; return new Promise<CommandExecution>(() => {}) })
+    const { bare } = await start(() => [], 60_000, execute)
+    const controller = new AbortController()
+    const pending = fetch(`${bare.replace('/agents/commands', '')}/agents/sessions/sess_live/commands/compact`, { signal: controller.signal, method: 'POST', body: '{}' }).catch(() => undefined)
+    await vi.waitFor(() => { expect(execute).toHaveBeenCalled() })
+    expect(signal?.aborted).toBe(false)
+    controller.abort()
+    await pending
+    await vi.waitFor(() => { expect(signal?.aborted).toBe(true) })
+  })
+
+  it('rejects a non-string input with 400', async () => {
+    const execute = vi.fn<Execute>(() => Promise.resolve(execution('success')))
+    const { run } = await start(() => [], 60_000, execute)
+    expect((await run('sess_live', 'goal', { input: 5 })).status).toBe(400)
+    expect(execute).not.toHaveBeenCalled()
   })
 })
 

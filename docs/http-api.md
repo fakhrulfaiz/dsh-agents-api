@@ -11,6 +11,8 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 | `POST` `GET` | `/agents` | Create or list saved agents |
 | `GET` | `/agents/tools` | List Host profile tools. `?session_id=` keeps only that session's `host_tools` mask; omit it for the full catalog |
 | `GET` | `/agents/skills` | List skills (`name`, `description`, `source`), sorted by name; optional `session_id` query. See [Skill catalog](#skill-catalog) |
+| `GET` | `/agents/commands` | List Host slash commands (`name`, `description`, `input_hint`, `accepts_attachments`), sorted by name; optional `session_id` query. See [Slash commands](#slash-commands) |
+| `POST` | `/agents/sessions/{id}/commands/{name}` | Run one Host slash command in a session and answer its outcome. See [Slash commands](#slash-commands) |
 | `POST` `GET` | `/agents/environments/templates` | Create or list environment templates |
 | `GET` `POST` `DELETE` | `/agents/environments/templates/{id}` | Retrieve, update, or delete one template |
 | `POST` `GET` | `/agents/environments` | Create or list environments. Each is a local directory `<workspaces>/<owner>/<environment_id>/` with `provider: "local"` |
@@ -179,6 +181,35 @@ POST /agents/sessions/{id}/events   (or `input` of POST /agents/sessions)
 - The result is cached in memory for `skills.cacheTtlSeconds` (default 60; `0` disables the cache). The cache, the shared in-flight call, and the `ETag` are per (scope, cwd). Concurrent requests for one key after expiry share one `list()` call.
 - Responses carry a strong `ETag` (SHA-256 of the body) and `Cache-Control: private, max-age=0, must-revalidate`. A matching `If-None-Match` answers `304` with no body.
 - A failed `list()` answers `503` with `error.code: "skills_unavailable"`; the failure is not cached, so the next request retries.
+
+## Slash commands
+
+Host commands (`/compact`, `/goal`, `/feedback`, ...) run on the backend, outside any turn, and never reach the model. The set depends on the session's preset.
+
+### Catalog
+
+`GET /agents/commands?session_id=<id>` returns `{ "object": "list", "data": [{ "name", "description", "input_hint?", "accepts_attachments" }] }` sorted by `name`.
+
+- A live session lists its agent's commands. A session that is not live lists the default preset's catalog and is not resumed. Another owner's or an unknown id answers `404`.
+- Without `session_id` the list is empty, because preset-scoped commands need an agent. A profile without the `commands` service also answers `200` with an empty list.
+- Cached in memory per scope for `commands.cacheTtlSeconds` (default 60; `0` disables). The cache is dropped when a command registers or unregisters (`commands/change`) and when a session logs `agent-preset/selected`. Strong `ETag` and `Cache-Control: private, max-age=0, must-revalidate`; a matching `If-None-Match` answers `304`. A failed read answers `503` `commands_unavailable` and is not cached.
+
+### Run
+
+`POST /agents/sessions/{id}/commands/{name}` with body `{ "input"?: string }`. The server runs `/{name} {input}` after resuming a stopped session, passing no attachments. Answers `200`:
+
+```json
+{ "command_id": "...", "name": "compact", "status": "success", "text": "...", "item": { "type": "slash_command", "...": "..." } }
+```
+
+- `status` is `error` for an expected failure such as bad usage; the HTTP status stays `200` and `text` carries the reason.
+- `404 command_not_found` for an unknown or malformed name, `404 resource_not_found` for a session the caller does not own, `400` for a non-string `input`.
+- `409 session_busy` while a turn is running (`in_progress` or `requires_action`) or another command is executing in the session. Nothing is logged. `409 session_not_resumable` for a stopped session without stored setup.
+- `500 command_failed` when the handler throws (generic message; the cause is logged). Closing the request aborts the command's signal.
+
+### Result item
+
+DSH logs `command/run` and `command/done` as log-only events. The projector pairs them by `commandId` into one `slash_command` item (`id` `item_cmd_<seq of the run event>`, `command_id`, `name`, `args?`, `status` `completed` or `failed`, `text?`, `turn_id`). `turn_id` is `null` when the command ran between turns. Items and the SSE replay rebuild it from the Session log, and a live stream carries it as `agent.session.item.done` (`turn_id` nullable). Sessions whose log already holds commands get one extra frame per command, so their frame ids differ from before this change.
 
 ## Function tools
 

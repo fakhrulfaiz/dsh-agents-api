@@ -12,7 +12,8 @@
 
 import { createHash } from 'node:crypto'
 import type { ServerResponse } from 'node:http'
-import type { CommandDescriptor } from '@deepseek-ai/dsh-commands/types'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { CommandDescriptor, CommandExecution, CommandSubmitAttachment } from '@deepseek-ai/dsh-commands/types'
 import type { OwnerId } from './auth/authenticator.ts'
 import type { Route } from './gateway.ts'
 import { errorMessage, json, notFound } from './http.ts'
@@ -27,10 +28,27 @@ export interface CommandTarget {
   release?: () => PromiseLike<void>
 }
 
+/** The part of the Host command registry this API calls. */
+export interface CommandService {
+  /**
+   * @param agent - receiving agent, or a scope key standing in for one when no agent is live.
+   * @returns the effective descriptors for that scope.
+   */
+  list: (agent: Agent) => readonly CommandDescriptor[]
+  /**
+   * @param agent - receiving agent.
+   * @param line - complete slash-command line.
+   * @param attachments - submitted attachments.
+   * @param signal - cancellation signal.
+   * @returns the settled execution, or `undefined` when the name or syntax does not resolve.
+   */
+  execute: (agent: Agent, line: string, attachments: readonly CommandSubmitAttachment[], signal: AbortSignal) => Promise<CommandExecution | undefined>
+}
+
 /** What `CommandsApi` needs from the gateway. */
 export interface CommandsApiDeps {
   /** The Host command registry, read at call time; `undefined` answers an empty list. */
-  commands: () => { list: (agent: never) => readonly CommandDescriptor[] } | undefined
+  commands: () => CommandService | undefined
   /**
    * Resolve the registry view of a session.
    * @param owner - authenticated caller.
@@ -51,6 +69,18 @@ const CACHE_CONTROL = 'private, max-age=0, must-revalidate'
 
 /** Cache key for the global-layer view. */
 const GLOBAL_SCOPE = {}
+
+/** Command name grammar of the Host registry. */
+export const COMMAND_NAME = /^[a-z][a-z0-9_-]*$/u
+
+/**
+ * Answer 404 `command_not_found`.
+ * @param res - outgoing response.
+ * @param name - requested command name.
+ */
+export function commandNotFound(res: ServerResponse, name: string): void {
+  json(res, 404, { error: { type: 'invalid_request_error', message: `Command "${name}" not found`, code: 'command_not_found' } })
+}
 
 /** A serialized catalog and its validator. */
 interface Loaded {
@@ -156,7 +186,7 @@ export class CommandsApi {
     const generation = this.#generation
     const flight = Promise.resolve()
       .then(() => {
-        const loaded = serialize(service.list(target.scope as never).map(toWireCommand))
+        const loaded = serialize(service.list(target.scope as Agent).map(toWireCommand))
         if (this.deps.ttlMs > 0) this.#loaded.set(key, { ...loaded, expiresAt: now() + this.deps.ttlMs, generation })
         return loaded
       })

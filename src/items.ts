@@ -14,6 +14,7 @@ import type {
   OAIMessageItem,
   OAIReasoningItem,
   OAISessionItem,
+  OAISlashCommandItem,
 } from './types.ts'
 
 const SHELL_TOOLS = new Set(['bash', 'pwsh', 'terminal'])
@@ -83,6 +84,40 @@ function scheduledPromptItems(seq: number, text: string, turnId: string): OAIMes
     status: 'completed',
     turn_id: turnId,
   }]
+}
+
+/** A `command/run` event waiting for its `command/done`. */
+export interface CommandRun {
+  /** Position of the `command/run` event; names the item. */
+  seq: number
+  commandId: string
+  name: string
+  args?: string
+}
+
+/**
+ * Pair a settled command with its run record.
+ * @param run - the command's `command/run` data.
+ * @param done - the command's `command/done` data.
+ * @param turnId - open turn id, or `null` between turns.
+ * @returns the saved item.
+ */
+export function slashCommandItem(
+  run: CommandRun,
+  done: { kind: 'success' | 'error'; text?: string },
+  turnId: string | null,
+): OAISlashCommandItem {
+  const args = run.args?.trim()
+  return {
+    id: `item_cmd_${String(run.seq)}`,
+    type: 'slash_command',
+    command_id: run.commandId,
+    name: run.name,
+    ...(args === undefined || args === '' ? {} : { args }),
+    status: done.kind === 'success' ? 'completed' : 'failed',
+    ...(done.text === undefined ? {} : { text: done.text }),
+    turn_id: turnId,
+  }
 }
 
 /**

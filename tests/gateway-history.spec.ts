@@ -344,6 +344,26 @@ describe('history routes after restart', () => {
     expect((await fetch(`${second.origin}/v1/agents/sessions/${id}/turns/turn_9`)).status).toBe(404)
   })
 
+  it('replays a slash command result as a turn-less item across restart', async () => {
+    const store = new MemoryStore()
+    const query = new FakeSessionQuery()
+    const first = await startProcess(store, query)
+    const id = await createSession(first.origin, { agent: { model: 'deepseek-chat' } })
+    first.feed(id, logEvent('command/run', { commandId: 'c1', name: 'compact', source: { kind: 'user' } }, 1))
+    first.feed(id, logEvent('command/done', { commandId: 'c1', kind: 'success', text: 'Compacted' }, 2))
+    await first.api.statusWritesSettled()
+    query.crash()
+
+    const second = await startProcess(store, query)
+    const items = await (await fetch(`${second.origin}/v1/agents/sessions/${id}/items`)).json() as { data: unknown[] }
+    expect(items.data).toEqual([{ id: 'item_cmd_1', type: 'slash_command', command_id: 'c1', name: 'compact', status: 'completed', text: 'Compacted', turn_id: null }])
+    const events = await fetch(`${second.origin}/v1/agents/sessions/${id}/events`, { headers: { 'last-event-id': '1' } })
+    const reader = events.body!.getReader()
+    const text = new TextDecoder().decode((await reader.read()).value)
+    await reader.cancel()
+    expect(text).toContain('event: agent.session.item.done')
+  })
+
   it('lists sessions from index rows with consistent first_id, last_id, and has_more', async () => {
     const store = new MemoryStore()
     const first = await startProcess(store, new FakeSessionQuery())

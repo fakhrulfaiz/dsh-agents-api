@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { itemsFromEvent } from '../src/items.ts'
 import { ATTACHMENT_NOTE_PREFIX } from '../src/files/note.ts'
+import { itemsFromEvent, slashCommandItem } from '../src/items.ts'
 
 function event(type: SessionEvent['type'], data: unknown, seq = 1): SessionEvent {
   return { type, seq, time: seq, data } as SessionEvent
@@ -199,5 +199,16 @@ describe('user message attachments', () => {
     expect(itemsFromEvent(event('user/message', { content: [{ type: 'text', text: 'delegate' }], source: { kind: 'subagent' } }), 'turn_1')).toEqual([])
     const [scheduled] = itemsFromEvent(event('user/message', { content: [{ type: 'text', text: '[SCHEDULE REMINDER]\nreminder_prompt_json: "ping"\nschedule_id_json: "sch_1"' }], source: { kind: 'schedule' } }), 'turn_1')
     expect(scheduled).toMatchObject({ source: 'schedule', content: [{ type: 'input_text', text: 'ping' }] })
+  })
+})
+
+describe('slashCommandItem', () => {
+  it('maps a success to completed and a blank args string to no args', () => {
+    expect(slashCommandItem({ seq: 4, commandId: 'c', name: 'goal', args: '  ' }, { kind: 'success', text: 'ok' }, 'turn_1'))
+      .toEqual({ id: 'item_cmd_4', type: 'slash_command', command_id: 'c', name: 'goal', status: 'completed', text: 'ok', turn_id: 'turn_1' })
+  })
+  it('maps an error to failed', () => {
+    expect(slashCommandItem({ seq: 4, commandId: 'c', name: 'goal', args: 'edit x' }, { kind: 'error', text: 'no' }, null))
+      .toMatchObject({ status: 'failed', args: 'edit x', turn_id: null })
   })
 })
