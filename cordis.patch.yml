@@ -23,3 +23,9 @@
 - insert:
     - id: skill-office
       name: '@deepseek-ai/dsh-skill-office'
+
+# Cap per-call shell timeouts at the default (2 min) so one slow command
+# (e.g. a filesystem-wide find over /mnt on WSL) cannot hold a turn for 10 min.
+- id: bash-local
+  config:
+    maxTimeoutMs: 120000
