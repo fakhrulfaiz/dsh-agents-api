@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Bundled office runtime
+
+- `cordis.patch.yml` mounts `@deepseek-ai/dsh-tool-workspace-dependencies` from a prebuilt payload (`AGENTRY_OFFICE_RUNTIME`, default `~/.dsh/office-runtime/primary-runtime`) and points `skill-office` at the sibling `office-skills`, so agents use the bundled Python instead of pip-installing libraries. Build it with `pnpm run prepare:primary-runtime --target linux-x64 --output ~/.dsh/office-runtime` in the DSH checkout.
+
 ## 2026-11-10 — Session deliverables
 
 - `GET /v1/agents/sessions/{id}/deliverables` lists the files the agent declared with the DSH `present` tool (`path` made workspace-relative when inside the workspace, optional `description`, `turn_id`, `created_at`), read from the Session log and owner-scoped. `present` and its prompt guidance already come from the web-app bundle's presets, so `cordis.patch.yml` is unchanged. Use it instead of the artifact listing to show only delivered files; bytes still come from the artifacts content route.

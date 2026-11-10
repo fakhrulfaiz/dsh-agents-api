@@ -20,9 +20,19 @@
 
 # Office skills (docx, pptx, xlsx, render, recalculate, export-pdf, office) in
 # the host-level skill layer, so every preset's tool-skill lists them by name.
+# workspace-dependencies mounts the prebuilt Python (python-docx, openpyxl, ...)
+# built by `pnpm run prepare:primary-runtime` in the DSH checkout.
 - insert:
+    - id: workspace-dependencies
+      name: '@deepseek-ai/dsh-tool-workspace-dependencies'
+      config:
+        source: !!js process.env.AGENTRY_OFFICE_RUNTIME ?? `${process.env.HOME}/.dsh/office-runtime/primary-runtime`
+
     - id: skill-office
       name: '@deepseek-ai/dsh-skill-office'
+      config:
+        assetRoot: !!js `${process.env.AGENTRY_OFFICE_RUNTIME ?? `${process.env.HOME}/.dsh/office-runtime/primary-runtime`}/../office-skills`
+        node: !!js `${process.env.AGENTRY_OFFICE_RUNTIME ?? `${process.env.HOME}/.dsh/office-runtime/primary-runtime`}/dependencies/node/bin/node`
 
 # Cap per-call shell timeouts at the default (2 min) so one slow command
 # (e.g. a filesystem-wide find over /mnt on WSL) cannot hold a turn for 10 min.
