@@ -4,7 +4,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
 /** One delivered file, as returned by `GET /v1/agents/sessions/{id}/deliverables`. */
 export interface DeliverableEntry {
-  /** Path as presented: absolute, or relative to the session workspace. */
+  /** Path as presented; the route makes it workspace-relative when it lies inside the workspace, otherwise it stays absolute. */
   path: string
   description?: string
   /** Turn that presented the file, `turn_<seq of its turn/start>`. */

@@ -5,7 +5,7 @@ Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
 ## 2026-11-10 — Session deliverables
 
-- `GET /v1/agents/sessions/{id}/deliverables` lists the files the agent declared with the DSH `present` tool (`path`, optional `description`, `turn_id`, `created_at`), read from the Session log and owner-scoped. `present` and its prompt guidance already come from the web-app bundle's presets, so `cordis.patch.yml` is unchanged. Use it instead of the artifact listing to show only delivered files; bytes still come from the artifacts content route.
+- `GET /v1/agents/sessions/{id}/deliverables` lists the files the agent declared with the DSH `present` tool (`path` made workspace-relative when inside the workspace, optional `description`, `turn_id`, `created_at`), read from the Session log and owner-scoped. `present` and its prompt guidance already come from the web-app bundle's presets, so `cordis.patch.yml` is unchanged. Use it instead of the artifact listing to show only delivered files; bytes still come from the artifacts content route.
 
 ## 2026-11-10 — Workspace and shell guidance
 

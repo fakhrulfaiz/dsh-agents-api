@@ -2651,6 +2651,7 @@ components:
       properties:
         path:
           type: string
+          description: Workspace-relative when the file lies inside the session workspace, otherwise absolute.
         description:
           type: string
         turn_id:

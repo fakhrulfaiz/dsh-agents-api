@@ -1754,7 +1754,11 @@ export class AgentsGateway {
   private async listDeliverables(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
     if (!await this.requireSession(res, owner, sessionId)) return
-    json(res, 200, { object: 'list', data: await this.history.deliverables(sessionId) })
+    const workspace = this.sessionRegistry.get(sessionId)?.workspace ?? await this.history.workspace(sessionId)
+    const root = workspace === undefined ? undefined : `${workspace.replace(/\/+$/, '')}/`
+    const data = (await this.history.deliverables(sessionId)).map(entry =>
+      root !== undefined && entry.path.startsWith(root) ? { ...entry, path: entry.path.slice(root.length) } : entry)
+    json(res, 200, { object: 'list', data })
   }
 
   private async getArtifact(res: ServerResponse, params: Record<string, string>, owner: OwnerId, download: boolean): Promise<void> {
