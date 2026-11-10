@@ -7,7 +7,7 @@ import type { KeycloakAuthConfig } from '../src/auth/keycloak.ts'
 import { firstThen, requireAnyRole, requireRole } from '../src/auth/authenticator.ts'
 import { createKeycloakAuthenticator } from '../src/auth/keycloak.ts'
 import { createStaticKeyAuthenticator } from '../src/auth/static-key.ts'
-import { CodeboxDisabledError, Config, createAuthenticator } from '../src/index.ts'
+import { CodeboxRemovedError, Config, createAuthenticator } from '../src/index.ts'
 
 const servers: Server[] = []
 afterEach(async () => {
@@ -307,9 +307,10 @@ describe('store and backend Config', () => {
     expect(() => Config({ workspaces: '  ', auth, database: { url: 'postgres://db/agentry' } } as never)).toThrow(/workspaces/)
   })
 
-  it('codebox config is rejected', () => {
+  it('codebox config is rejected as removed', () => {
     const codebox = { baseUrl: 'http://codebox', apiKey: 'k' }
-    expect(() => Config({ workspaces, auth, database: { url: 'postgres://db/a' }, codebox } as never)).toThrow(CodeboxDisabledError)
+    expect(() => Config({ workspaces, auth, database: { url: 'postgres://db/a' }, codebox } as never)).toThrow(CodeboxRemovedError)
+    expect(() => Config({ workspaces, auth, database: { url: 'postgres://db/a' }, codebox } as never)).toThrow(/removed/)
   })
 
   it('rejects the removed dataDir and leaves S3 artifacts absent by default', () => {

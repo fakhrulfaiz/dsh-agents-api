@@ -1,9 +1,8 @@
 import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { ownerId } from '../src/auth/authenticator.ts'
-import { CodeboxClient, createCodeboxProvider } from '../src/environment/codebox.ts'
 import { createLocalProvider } from '../src/environment/local.ts'
 import type { EnvironmentRecord } from '../src/environment-types.ts'
 
@@ -62,31 +61,3 @@ describe('local environment provider', () => {
   })
 })
 
-describe('codebox environment provider', () => {
-  it('keeps the Codebox client behind the provider interface', async () => {
-    const calls: string[] = []
-    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      calls.push(`${init?.method ?? 'GET'} ${String(url)}`)
-      return new Response(JSON.stringify({ id: 'box_1', status: 'running', image: 'base' }), { status: 200 })
-    }) as unknown as typeof fetch
-    const provider = createCodeboxProvider(new CodeboxClient({ baseUrl: 'http://codebox', apiKey: 'k' }, fetchImpl), {
-      image: 'base',
-      readyTimeoutSeconds: 1,
-      budgetInstanceId: '',
-    })
-    expect(provider.kind).toBe('codebox')
-    const created = await provider.create(ownerId('A'), 'env_1', {})
-    expect(created).toEqual({ status: 'connected', workspacePath: '/workspace', codeboxId: 'box_1' })
-    const record: EnvironmentRecord = {
-      id: 'env_1',
-      object: 'environment',
-      status: 'connected',
-      provider: 'codebox',
-      provider_metadata: { codebox_id: 'box_1' },
-      created_at: 1,
-    }
-    expect(await provider.status(record)).toBe('connected')
-    await provider.destroy(record)
-    expect(calls).toContain('DELETE http://codebox/codebox/api/codeboxes/box_1')
-  })
-})

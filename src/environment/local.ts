@@ -8,7 +8,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { OwnerId } from '../auth/authenticator.ts'
 import { sanitizeRelativePath } from '../artifacts.ts'
 import type { EnvironmentRecord } from '../environment-types.ts'
-import type { EnvironmentProvider } from './provider.ts'
+import type { SandboxProvider } from '../sandbox/contract.ts'
 
 /** One path segment: no separators, not `.` or `..`. */
 const SEGMENT = /^[A-Za-z0-9_@.-]+$/u
@@ -73,7 +73,7 @@ async function listRegularFiles(root: string): Promise<string[]> {
  * @param workspacesRoot - absolute directory holding `<owner>/<environmentId>/` workspaces.
  * @returns a provider that never touches paths outside `workspacesRoot`.
  */
-export function createLocalProvider(workspacesRoot: string): EnvironmentProvider {
+export function createLocalProvider(workspacesRoot: string): SandboxProvider {
   const root = resolve(workspacesRoot)
 
   /** Workspace directory of `record`, checked to lie below the root. */
@@ -101,9 +101,18 @@ export function createLocalProvider(workspacesRoot: string): EnvironmentProvider
 
   return {
     kind: 'local',
-    async create(owner: OwnerId, environmentId: string) {
+    // The agent's own tools run in the Host against this directory; of the template fields only starter files apply.
+    capabilities: { templateFields: ['starter_files'], files: true, exec: true },
+    async create(owner: OwnerId, environmentId: string, input) {
       const workspacePath = join(root, directorySegment(owner, 'owner'), directorySegment(environmentId, 'environment id'))
       await mkdir(workspacePath, { recursive: true })
+      for (const file of input.template?.starter_files ?? []) {
+        const safe = sanitizeRelativePath(file.path)
+        if (safe === undefined) throw new Error(`starter file path "${file.path}" escapes the environment workspace`)
+        const target = resolve(workspacePath, ...safe.split('/'))
+        await mkdir(dirname(target), { recursive: true })
+        await writeFile(target, file.content)
+      }
       return { status: 'connected', workspacePath }
     },
     async status(record) {

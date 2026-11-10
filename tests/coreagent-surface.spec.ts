@@ -105,13 +105,13 @@ describe('local config', () => {
     expect(() => resolveRuntimeConfig({ workspaces: '  ' }, {})).toThrow(/"workspaces" is required/)
   })
 
-  it('rejects Codebox settings from the environment', () => {
-    expect(() => resolveRuntimeConfig({ workspaces: '/tmp/ws' }, { CODEBOX_BASE_URL: 'http://codebox' })).toThrow(expect.objectContaining({ name: 'CodeboxDisabledError' }))
+  it('rejects the removed Codebox settings from the environment', () => {
+    expect(() => resolveRuntimeConfig({ workspaces: '/tmp/ws' }, { CODEBOX_BASE_URL: 'http://codebox' })).toThrow(expect.objectContaining({ name: 'CodeboxRemovedError' }))
   })
 })
 
 describe('CoreAgent routes on the plugin gateway', () => {
-  it('returns a local environment when Codebox is unset and rejects sandbox sessions', async () => {
+  it('returns a local environment and rejects sandbox sessions', async () => {
     const environments = createLocalProvider(await tempDir())
     const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), testGatewayOptions(environments))
     const root = await listen((req, res) => api.handle(req, res))
@@ -151,8 +151,8 @@ describe('CoreAgent routes on the plugin gateway', () => {
       id: 'env_box',
       object: 'environment',
       status: 'connected',
-      provider: 'codebox',
-      provider_metadata: { codebox_id: 'box_1' },
+      provider: 'local',
+      provider_metadata: {},
       created_at: 1,
     })
     const create = vi.fn(async () => undefined)

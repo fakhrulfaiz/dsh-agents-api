@@ -20,15 +20,15 @@ export interface EnvironmentCreateResult {
   status: EnvironmentStatus
   /** Absolute workspace path inside the environment. */
   workspacePath: string
-  /** Codebox id, set only by the Codebox provider after the box was created. */
-  codeboxId?: string
+  /** Provider handle (container id, remote box id) stored in the record's `provider_metadata`. */
+  handle?: Record<string, string>
   /** Failure detail when `status` is `failed`. */
   error?: string
 }
 
 /** Workspace backend for environments. Methods reject paths that escape the workspace. */
 export interface EnvironmentProvider {
-  readonly kind: 'local' | 'codebox'
+  readonly kind: string
   /**
    * @param owner - owning principal.
    * @param environmentId - new environment id.

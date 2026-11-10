@@ -60,7 +60,9 @@ import { writeEvent, writeSSEHeaders } from './sse.ts'
 import type { ArtifactS3Config } from './artifacts.ts'
 import { artifactContentDisposition, artifactContentType, getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath } from './artifacts.ts'
 import { directorySegment } from './environment/local.ts'
-import type { CreateEnvironmentInput, EnvironmentProvider } from './environment/provider.ts'
+import type { CreateEnvironmentInput } from './environment/provider.ts'
+import type { SandboxProvider } from './sandbox/contract.ts'
+import type { SandboxRegistry } from './sandbox/registry.ts'
 import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, EnvironmentTemplateConfig } from './environment-types.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SubagentState } from './session-registry.ts'
@@ -106,8 +108,8 @@ export interface Route {
 
 /** Backends wired by plugin apply. */
 export interface GatewayOptions {
-  /** Workspace backend for `/agents/environments`. */
-  environments: EnvironmentProvider
+  /** Sandbox providers for `/agents/environments`, by name, with a default. */
+  sandboxes: SandboxRegistry
   /** Root of `<owner>/<session>/` default session workspaces. */
   workspacesRoot: string
   /** Reads items, turns, and wire events from the Session log. */
@@ -158,7 +160,7 @@ export class AgentsGateway {
   private readonly statusWrites = new Map<string, Promise<void>>()
   /** Resumes in flight, so two requests do not resume one session twice. */
   private readonly resuming = new Map<string, Promise<void>>()
-  private readonly environments: EnvironmentProvider
+  private readonly sandboxes: SandboxRegistry
   private readonly workspacesRoot: string
   private readonly history: SessionHistory
   private readonly approvals: ApprovalBridge
@@ -192,7 +194,7 @@ export class AgentsGateway {
     options: GatewayOptions,
   ) {
     if (store !== undefined) this.attachStore(store)
-    this.environments = options.environments
+    this.sandboxes = options.sandboxes
     this.workspacesRoot = options.workspacesRoot
     this.history = options.history
     this.approvals = options.approvals
@@ -1510,7 +1512,7 @@ export class AgentsGateway {
       id: `tpl_${randomUUID().replaceAll('-', '')}`,
       object: 'environment.template',
       name: body.name,
-      provider: 'codebox',
+      provider: this.sandboxes.default().kind,
       config: body.config ?? {},
       created_at: Math.floor(Date.now() / 1000),
     }
@@ -1567,6 +1569,7 @@ export class AgentsGateway {
       ...(typeof body.session_id === 'string' ? { session_id: body.session_id } : {}),
       ...(typeof body.image === 'string' ? { image: body.image } : {}),
     }
+    let templateProvider: string | undefined
     if (input.template_id !== undefined) {
       const template = await this.store.templates.get(owner, input.template_id)
       if (template === undefined) {
@@ -1574,15 +1577,24 @@ export class AgentsGateway {
         return
       }
       input.template = template.config
+      templateProvider = template.provider
     }
     if (input.session_id !== undefined && await this.store.sessions.get(input.session_id, owner) === undefined) {
       badRequest(res, `session not found: ${input.session_id}`)
       return
     }
-    const id = `env_${randomUUID().replaceAll('-', '')}`
-    let created: Awaited<ReturnType<EnvironmentProvider['create']>>
+    // The template's provider, else the default. A provider that is not registered (for example one that was removed) answers 400.
+    let provider: SandboxProvider
     try {
-      created = await this.environments.create(owner, id, input)
+      provider = templateProvider !== undefined ? this.sandboxes.require(templateProvider) : this.sandboxes.default()
+    } catch (error: unknown) {
+      badRequest(res, errorMessage(error))
+      return
+    }
+    const id = `env_${randomUUID().replaceAll('-', '')}`
+    let created: Awaited<ReturnType<SandboxProvider['create']>>
+    try {
+      created = await provider.create(owner, id, input)
     } catch (error: unknown) {
       badRequest(res, errorMessage(error))
       return
@@ -1591,10 +1603,8 @@ export class AgentsGateway {
       id,
       object: 'environment',
       status: created.status,
-      provider: this.environments.kind,
-      provider_metadata: this.environments.kind === 'local'
-        ? { workspace_directory: created.workspacePath }
-        : created.codeboxId === undefined ? {} : { codebox_id: created.codeboxId },
+      provider: provider.kind,
+      provider_metadata: provider.kind === 'local' ? { workspace_directory: created.workspacePath } : { ...created.handle },
       created_at: Math.floor(Date.now() / 1000),
       ...(input.template_id !== undefined ? { template_id: input.template_id } : {}),
       ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
@@ -1603,7 +1613,7 @@ export class AgentsGateway {
     try {
       await this.store.environments.create(owner, record)
     } catch (error: unknown) {
-      await this.environments.destroy(record).catch((destroyError: unknown) => {
+      await provider.destroy(record).catch((destroyError: unknown) => {
         this.ctx.logger.warn(`agents-api: environment ${id} was not recorded and could not be destroyed: ${errorMessage(destroyError)}`)
       })
       throw error
@@ -1625,7 +1635,9 @@ export class AgentsGateway {
     let status: EnvironmentStatus
     let error: string | undefined
     try {
-      status = await this.environments.status(record)
+      const provider = this.sandboxes.get(record.provider)
+      if (provider === undefined) throw new Error(`sandbox provider "${record.provider}" is not available`)
+      status = await provider.status(record)
     } catch (statusError: unknown) {
       status = 'failed'
       error = errorMessage(statusError)
@@ -1651,7 +1663,7 @@ export class AgentsGateway {
       notFound(res, 'environment not found')
       return
     }
-    await this.environments.destroy(record)
+    await this.destroyEnvironment(record)
     await this.store.environments.delete(owner, environmentId)
     json(res, 200, { id: environmentId, object: 'environment.deleted', deleted: true })
   }
@@ -1671,9 +1683,29 @@ export class AgentsGateway {
       after = page.last_id
     }
     for (const env of attached) {
-      await this.environments.destroy(env)
+      await this.destroyEnvironment(env)
       await this.store.environments.delete(owner, env.id)
     }
+  }
+
+  /**
+   * Remove an environment's backend. A record whose provider is not registered (for example a
+   * removed one) has no backend to clean: log it and let the caller drop the record.
+   */
+  private async destroyEnvironment(record: EnvironmentRecord): Promise<void> {
+    const provider = this.sandboxes.get(record.provider)
+    if (provider === undefined) {
+      this.ctx.logger.warn(`agents-api: environment ${record.id} uses sandbox provider "${record.provider}", which is not registered; removing the record without cleaning a backend`)
+      return
+    }
+    await provider.destroy(record)
+  }
+
+  /** The provider behind a record, or a 400 answer when it is not registered. */
+  private providerOr400(res: ServerResponse, record: EnvironmentRecord): SandboxProvider | undefined {
+    const provider = this.sandboxes.get(record.provider)
+    if (provider === undefined) badRequest(res, `sandbox provider "${record.provider}" is not available`)
+    return provider
   }
 
   private async writeEnvironmentFile(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -1696,8 +1728,10 @@ export class AgentsGateway {
       badRequest(res, 'Field "content" or "content_base64" is required')
       return
     }
+    const provider = this.providerOr400(res, record)
+    if (provider === undefined) return
     try {
-      await this.environments.writeFile(record, body.path, content)
+      await provider.writeFile(record, body.path, content)
       json(res, 201, { object: 'environment.file', path: body.path, written: true })
     } catch (error: unknown) {
       badRequest(res, errorMessage(error))
@@ -1710,8 +1744,10 @@ export class AgentsGateway {
       notFound(res, 'environment not found')
       return
     }
+    const provider = this.providerOr400(res, record)
+    if (provider === undefined) return
     try {
-      const files = await this.environments.listFiles(record)
+      const files = await provider.listFiles(record)
       json(res, 200, { object: 'list', data: files.map(path => ({ path })) })
     } catch (error: unknown) {
       badRequest(res, errorMessage(error))
@@ -1729,8 +1765,10 @@ export class AgentsGateway {
       badRequest(res, 'file path is required')
       return
     }
+    const provider = this.providerOr400(res, record)
+    if (provider === undefined) return
     try {
-      const bytes = await this.environments.readFile(record, filePath)
+      const bytes = await provider.readFile(record, filePath)
       res.statusCode = 200
       res.setHeader('Content-Type', 'application/octet-stream')
       res.end(Buffer.from(bytes))

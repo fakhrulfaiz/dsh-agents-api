@@ -10,7 +10,8 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { SessionId, interruptedTurnClosers, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import { SessionQueryError, type SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
-import type { EnvironmentProvider } from '../../src/environment/provider.ts'
+import type { SandboxProvider } from '../../src/sandbox/contract.ts'
+import { SandboxRegistry } from '../../src/sandbox/registry.ts'
 import type { GatewayOptions } from '../../src/gateway.ts'
 import type { ApprovalBridge } from '../../src/approvals/approval-bridge.ts'
 import { createSessionHistory } from '../../src/history/session-history.ts'
@@ -91,14 +92,20 @@ export const inertApprovals: ApprovalBridge = {
 
 /**
  * Gateway options for tests.
- * @param environments - environment provider.
+ * @param sandboxes - one provider (registered as the default) or a ready registry.
  * @param query - fake session log; a new one when omitted.
  * @param approvals - pending approvals; none when omitted.
  * @returns options with a temp workspaces root and history over `query`.
  */
-export function testGatewayOptions(environments: EnvironmentProvider, query: FakeSessionQuery = new FakeSessionQuery(), approvals: ApprovalBridge = inertApprovals): GatewayOptions {
+export function testGatewayOptions(sandboxes: SandboxProvider | SandboxRegistry, query: FakeSessionQuery = new FakeSessionQuery(), approvals: ApprovalBridge = inertApprovals): GatewayOptions {
+  let registry: SandboxRegistry
+  if (sandboxes instanceof SandboxRegistry) registry = sandboxes
+  else {
+    registry = new SandboxRegistry(sandboxes.kind)
+    registry.register(sandboxes)
+  }
   return {
-    environments,
+    sandboxes: registry,
     workspacesRoot: join(tmpdir(), 'agentry-gateway-spec-workspaces'),
     history: createSessionHistory(query),
     approvals,

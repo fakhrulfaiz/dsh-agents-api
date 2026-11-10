@@ -39,6 +39,7 @@ import { createStaticKeyAuthenticator } from './auth/static-key.ts'
 import { installApprovalBridge } from './approvals/approval-bridge.ts'
 import { bridgeChildSessionEvent } from './bridge.ts'
 import { createLocalProvider } from './environment/local.ts'
+import { SandboxRegistry } from './sandbox/registry.ts'
 import { DEFAULT_ALLOWED_MEDIA_TYPES, stagingDirectory, validateUploads, type UploadsConfig } from './files/config.ts'
 import { createFilesystemFileStore, type FileStore } from './files/file-store.ts'
 import { startSweeper } from './files/sweeper.ts'
@@ -47,7 +48,7 @@ import { errorMessage } from './http.ts'
 import { createSessionHistory } from './history/session-history.ts'
 import { recoverSessions, recoveryUnavailable } from './recovery.ts'
 import { installScheduleResolver } from './schedule-resolver.ts'
-import { CodeboxDisabledError, resolveRuntimeConfig, type RuntimeConfigInput } from './runtime-config.ts'
+import { CodeboxRemovedError, resolveRuntimeConfig, type RuntimeConfigInput } from './runtime-config.ts'
 import { SessionRegistry } from './session-registry.ts'
 import { migrate } from './store/migrate.ts'
 import { openPostgresStore } from './store/postgres.ts'
@@ -93,7 +94,8 @@ export { migrate, MigrationError } from './store/migrate.ts'
 export { openPostgresStore } from './store/postgres.ts'
 export * from './environment/provider.ts'
 export { createLocalProvider, directorySegment } from './environment/local.ts'
-export { CodeboxClient, createCodeboxProvider, type CodeboxExecResult, type CodeboxProvisionSettings, type CodeboxSettings } from './environment/codebox.ts'
+export { SandboxRegistry, UnknownSandboxProviderError } from './sandbox/registry.ts'
+export type { SandboxCapabilities, SandboxProvider, TemplateField } from './sandbox/contract.ts'
 export { bearerToken, firstThen, ownerId, requireAnyRole, requireRole, unauthenticated } from './auth/authenticator.ts'
 export type { AuthResult, Authenticator, OwnerId, Principal, Role as AuthRole } from './auth/authenticator.ts'
 export { createKeycloakAuthenticator, type KeycloakAuthConfig } from './auth/keycloak.ts'
@@ -185,7 +187,7 @@ export interface Config extends RuntimeConfigInput {
     /** Connection URL, for example `postgres://agentry:…@postgres:5432/agentry`. */
     url: string
   }
-  /** Rejected with `CodeboxDisabledError`: Codebox environments are parked. */
+  /** Rejected with `CodeboxRemovedError`: Codebox was removed. */
   codebox?: unknown
   /** Rejected: removed when records moved from JSON files to Postgres (`database.url`). */
   dataDir?: unknown
@@ -276,7 +278,7 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
   const commandsTtl = (config.commands as { cacheTtlSeconds: number }).cacheTtlSeconds
   if (!Number.isFinite(commandsTtl) || commandsTtl < 0) throw new Error('agents-api: "commands.cacheTtlSeconds" must be a finite number >= 0')
   validateUploads(config.uploads as UploadsConfig)
-  if (config.codebox !== undefined && config.codebox !== null) throw new CodeboxDisabledError('the "codebox" config block')
+  if (config.codebox !== undefined && config.codebox !== null) throw new CodeboxRemovedError('the "codebox" config block')
   if (config.dataDir !== undefined && config.dataDir !== null) {
     throw new Error('agents-api: "dataDir" was removed; agents, environments, and the session index live in Postgres (database.url)')
   }
@@ -373,8 +375,10 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     claims: agent => sessionRegistry.get(agent.session.id)?.id,
     onChange: (sessionId, actions) => gateway.setInteractionActions(sessionId, actions),
   })
+  const sandboxes = new SandboxRegistry('local')
+  sandboxes.register(createLocalProvider(runtime.workspacesRoot))
   const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth, message => ctx.logger.warn(message)), prefix, undefined, sessionRegistry, {
-    environments: createLocalProvider(runtime.workspacesRoot),
+    sandboxes,
     workspacesRoot: runtime.workspacesRoot,
     history: createSessionHistory(ctx.sessionQuery),
     approvals,

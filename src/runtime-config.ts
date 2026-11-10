@@ -4,7 +4,7 @@
  * The workspaces root comes only from plugin config (`workspaces`). The S3
  * artifact backend takes config, then env vars, and stays off until endpoint
  * and credentials are all set.
- * Codebox is parked: its settings are rejected, never ignored.
+ * Codebox was removed: its settings are rejected by name, never ignored.
  */
 
 import type { ArtifactS3Config } from './artifacts.ts'
@@ -31,15 +31,15 @@ export interface RuntimeConfig {
   artifacts?: ArtifactS3Config
 }
 
-/** Env vars that would configure the parked Codebox backend. */
+/** Env vars that used to configure the removed Codebox backend. */
 const CODEBOX_ENV = ['CODEBOX_BASE_URL', 'CODEBOX_API_KEY'] as const
 
-/** Codebox settings were supplied while Codebox environments are disabled. */
-export class CodeboxDisabledError extends Error {
+/** Codebox settings were supplied, but Codebox was removed. */
+export class CodeboxRemovedError extends Error {
   /** @param source - config field or env var that set them. */
   constructor(source: string) {
-    super(`agents-api: Codebox environments are disabled until per-session execution exists; remove ${source}`)
-    this.name = 'CodeboxDisabledError'
+    super(`agents-api: Codebox was removed; sandboxes are provider plugins (see docs/sandbox.md); remove ${source}`)
+    this.name = 'CodeboxRemovedError'
   }
 }
 
@@ -68,7 +68,7 @@ function normalizePrefix(prefix: string): string {
  * @param config - validated plugin config.
  * @param env - process environment, injectable in tests.
  * @returns the workspaces root and the backends that are actually configured.
- * @throws CodeboxDisabledError when a Codebox env var is set.
+ * @throws CodeboxRemovedError when a Codebox env var is set.
  * @throws Error when `workspaces` is missing or blank.
  */
 export function resolveRuntimeConfig(
@@ -76,7 +76,7 @@ export function resolveRuntimeConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): RuntimeConfig {
   const codeboxVar = CODEBOX_ENV.find(name => text(env[name]) !== undefined)
-  if (codeboxVar !== undefined) throw new CodeboxDisabledError(`env ${codeboxVar}`)
+  if (codeboxVar !== undefined) throw new CodeboxRemovedError(`env ${codeboxVar}`)
   const workspacesRoot = text(config.workspaces)
   if (workspacesRoot === undefined) throw new Error('agents-api: "workspaces" is required (root directory for session workspaces and local environments)')
   const endpoint = text(config.artifacts?.endpoint) ?? text(env['SEAWEEDFS_ENDPOINT'])

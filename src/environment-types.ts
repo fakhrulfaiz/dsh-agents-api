@@ -1,12 +1,12 @@
 /**
- * Environment templates and live Codebox records.
+ * Environment templates and live environment records.
  *
  * These match the CoreAgent JSON layout. Session create still accepts the
  * existing `none`, `self_hosted`, and `openai_hosted` values beside `local`
  * and `sandbox`.
  */
 
-/** Codebox blueprint fields stored on an environment template. */
+/** Blueprint fields stored on an environment template (to be aligned with the OpenAI Agents API template shape). */
 export interface EnvironmentTemplateConfig {
   image?: string
   setup?: string
@@ -20,7 +20,8 @@ export interface EnvironmentTemplate {
   id: string
   object: 'environment.template'
   name: string
-  provider: 'codebox'
+  /** Sandbox provider name (`local`, ...). Templates stored before providers were pluggable may say `codebox`, which no longer exists. */
+  provider: string
   config: EnvironmentTemplateConfig
   created_at: number
   updated_at?: number
@@ -29,15 +30,17 @@ export interface EnvironmentTemplate {
 /** Live environment lifecycle status. */
 export type EnvironmentStatus = 'pending' | 'connected' | 'failed' | 'cleanup' | 'deleted'
 
-/** Live environment (`env_*`). `local` is a host directory. `codebox` is a sandbox when one is configured. */
+/** Live environment (`env_*`). `local` is a host directory; other providers register with the sandbox registry. */
 export interface EnvironmentRecord {
   id: string
   object: 'environment'
   template_id?: string
   session_id?: string
   status: EnvironmentStatus
-  provider: 'codebox' | 'local'
-  provider_metadata: { codebox_id?: string; workspace_directory?: string }
+  /** Name of the provider that backs this environment. */
+  provider: string
+  /** Provider-owned handle: `workspace_directory` for `local`, an id for others. */
+  provider_metadata: Record<string, string>
   error?: string
   created_at: number
   updated_at?: number

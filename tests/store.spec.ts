@@ -99,7 +99,7 @@ function fileRow(id: string, owner: OwnerId, overrides: Partial<FileRow> = {}): 
 }
 
 function template(id: string, name: string): EnvironmentTemplate {
-  return { id, object: 'environment.template', name, provider: 'codebox', config: { image: 'base' }, created_at: 1 }
+  return { id, object: 'environment.template', name, provider: 'local', config: { image: 'base' }, created_at: 1 }
 }
 
 function environment(id: string, status: EnvironmentRecord['status']): EnvironmentRecord {
