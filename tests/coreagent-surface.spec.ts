@@ -326,8 +326,10 @@ describe('environment templates in the OpenAI Agents API shape', () => {
     const created = await post('/agents/environments', { template_id: ok.id })
     expect(created.status).toBe(201)
     const env = await created.json() as { id: string }
-    const files = await (await fetch(`${root}/v1/agents/environments/${env.id}/files`)).json() as { data: Array<{ path: string }> }
-    expect(files.data.map(f => f.path)).toEqual(['notes/a.txt'])
+    const files = await (await fetch(`${root}/v1/agents/environments/${env.id}/files`)).json() as { data: Array<{ path: string; size_bytes: number }> }
+    expect(files.data).toMatchObject([{ object: 'agent.environment.file', environment_id: env.id, path: '/workspace/notes/a.txt', size_bytes: 2 }])
+    const asEnv = await (await fetch(`${root}/v1/agents/environments/${env.id}`)).json() as Record<string, unknown>
+    expect(asEnv).toMatchObject({ object: 'agent.environment', type: 'self_hosted', status: 'connected', files: [{ type: 'inline', path: '/workspace/notes/a.txt', size_bytes: 2 }], skills: [], plugins: [] })
     const restricted = await (await post('/agents/environments/templates', { network: { access: 'restricted', allowed_domains: ['example.com'] } })).json() as { id: string }
     const refused = await post('/agents/environments', { template_id: restricted.id })
     expect(refused.status).toBe(400)

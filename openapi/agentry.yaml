@@ -1099,7 +1099,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/EnvironmentFileWritten"
+                $ref: "#/components/schemas/EnvironmentFile"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1112,8 +1112,33 @@ paths:
           $ref: "#/components/responses/StoreUnavailable"
     get:
       summary: List workspace files
+      description: Lists live files as `agent.environment.file` objects, ordered by case-sensitive path components (descending by default) and paged with an opaque token.
       tags:
         - Environments
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+        - name: page
+          in: query
+          description: Opaque token from the previous page's `next`.
+          schema:
+            type: string
+        - name: path
+          in: query
+          description: Restrict the listing to this absolute workspace directory.
+          schema:
+            type: string
       responses:
         "200":
           description: OK
@@ -1127,10 +1152,15 @@ paths:
                   data:
                     type: array
                     items:
-                      $ref: "#/components/schemas/FileEntry"
+                      $ref: "#/components/schemas/EnvironmentFile"
+                  has_more:
+                    type: boolean
+                  next:
+                    type: string
                 required:
                   - object
                   - data
+                  - has_more
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -2803,36 +2833,104 @@ components:
           description: Extension. Container image for container providers.
     EnvironmentStatus:
       type: string
+      description: The OpenAI Agents API environment statuses. Internally we also track `cleanup` (reported as `disconnected`) and `deleted` (reported as `expired`).
       enum:
         - pending
         - connected
+        - disconnected
+        - expired
         - failed
-        - cleanup
-        - deleted
     Environment:
+      description: An `agent.environment` as the OpenAI Agents API defines it, plus the extension fields `provider`, `provider_metadata`, `template_id`, `session_id`, `error`, `created_at` and `updated_at`.
       type: object
       properties:
         id:
           type: string
         object:
-          const: environment
-        template_id:
+          const: agent.environment
+        type:
           type: string
-        session_id:
-          type: string
+          enum:
+            - openai_hosted
+            - self_hosted
+          description: "`self_hosted` for directories this application hosts (the local provider), `openai_hosted` for a provider-provisioned sandbox."
         status:
           $ref: "#/components/schemas/EnvironmentStatus"
+        files:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum:
+                  - inline
+                  - file_id
+              id:
+                type: string
+              file_id:
+                type: string
+              path:
+                type: string
+              size_bytes:
+                type: integer
+            required:
+              - type
+              - id
+              - path
+              - size_bytes
+        plugins:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                const: inline
+              name:
+                type: string
+              description:
+                type: string
+            required:
+              - type
+              - name
+              - description
+        skills:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum:
+                  - skill_reference
+                  - inline
+              skill_id:
+                type: string
+              name:
+                type: string
+              description:
+                type: string
+              version:
+                type: string
+            required:
+              - type
+              - name
+              - description
         provider:
           type: string
-          description: Name of the sandbox provider that backs the environment, for example `local`.
+          description: Extension. Name of the sandbox provider that backs the environment, for example `local`.
         provider_metadata:
           type: object
-          description: Provider-owned handle; `workspace_directory` for `local`.
+          description: Extension. Provider-owned handle; `workspace_directory` for `local`.
           additionalProperties:
             type: string
           properties:
             workspace_directory:
               type: string
+        template_id:
+          type: string
+        session_id:
+          type: string
         error:
           type: string
         created_at:
@@ -2842,7 +2940,11 @@ components:
       required:
         - id
         - object
+        - type
         - status
+        - files
+        - plugins
+        - skills
         - provider
         - provider_metadata
         - created_at
@@ -2857,31 +2959,64 @@ components:
           type: string
       description: "`template_id` and `session_id` must belong to the caller."
     WriteEnvironmentFileRequest:
-      type: object
-      properties:
-        path:
-          type: string
-        content:
-          type: string
-          description: UTF-8 text.
-        content_base64:
-          type: string
-          description: Base64 bytes, used when `content` is absent.
-      required:
-        - path
-    EnvironmentFileWritten:
+      description: The OpenAI Agents API file create params (`inline` with base64 `data`, or `file_id`), or the earlier `{path, content | content_base64}`. A `file_id` is accepted but answers 400 until Files API copying exists.
+      anyOf:
+        - type: object
+          properties:
+            type:
+              const: inline
+            path:
+              type: string
+              description: Absolute destination path inside `/workspace`.
+            data:
+              type: string
+              description: Standard base64 file contents.
+          required:
+            - type
+            - path
+            - data
+        - type: object
+          properties:
+            type:
+              const: file_id
+            path:
+              type: string
+            file_id:
+              type: string
+          required:
+            - type
+            - path
+            - file_id
+        - type: object
+          properties:
+            path:
+              type: string
+            content:
+              type: string
+              description: UTF-8 text.
+            content_base64:
+              type: string
+              description: Base64 bytes, used when `content` is absent.
+          required:
+            - path
+    EnvironmentFile:
+      description: An `agent.environment.file`.
       type: object
       properties:
         object:
-          const: environment.file
+          const: agent.environment.file
+        environment_id:
+          type: string
         path:
           type: string
-        written:
-          const: true
+          description: Absolute path inside the environment's workspace.
+        size_bytes:
+          type: integer
       required:
         - object
+        - environment_id
         - path
-        - written
+        - size_bytes
     FileEntry:
       type: object
       properties:

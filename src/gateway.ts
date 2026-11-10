@@ -61,6 +61,8 @@ import type { ArtifactS3Config } from './artifacts.ts'
 import { artifactContentDisposition, artifactContentType, getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath } from './artifacts.ts'
 import { directorySegment } from './environment/local.ts'
 import type { CreateEnvironmentInput } from './environment/provider.ts'
+import { toSdkEnvironment, type SdkEnvironment } from './environment/environment-compat.ts'
+import { absoluteFilePath, parseFileListQuery, parseFileWrite, selectFilePage, type SdkEnvironmentFile } from './environment/file-compat.ts'
 import { normalizeTemplateConfig, parseTemplateInput, toSdkTemplate, unsupportedFields } from './environment/template-compat.ts'
 import type { SandboxProvider } from './sandbox/contract.ts'
 import type { SandboxRegistry } from './sandbox/registry.ts'
@@ -252,7 +254,7 @@ export class AgentsGateway {
       { method: 'GET', pattern: '/agents/environments', handler: (_req, res, url, _params, p) => this.listEnvironments(res, url, p.owner) },
       { method: 'POST', pattern: '/agents/environments/:environment_id/files', handler: (req, res, _url, params, p) => this.writeEnvironmentFile(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/:environment_id/files/*path', handler: (_req, res, _url, params, p) => this.readEnvironmentFile(res, params, p.owner) },
-      { method: 'GET', pattern: '/agents/environments/:environment_id/files', handler: (_req, res, _url, params, p) => this.listEnvironmentFiles(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/:environment_id/files', handler: (_req, res, url, params, p) => this.listEnvironmentFiles(res, url, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.getEnvironment(res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.deleteEnvironment(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/sessions', handler: (req, res, url, _params, p) => this.createSession(req, res, url, p.owner) },
@@ -1649,11 +1651,12 @@ export class AgentsGateway {
       })
       throw error
     }
-    json(res, 201, record)
+    json(res, 201, await this.environmentJson(owner, record))
   }
 
   private async listEnvironments(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
-    json(res, 200, await this.store.environments.list(owner, listQuery(url)))
+    const page = await this.store.environments.list(owner, listQuery(url))
+    json(res, 200, { ...page, data: await Promise.all(page.data.map(record => this.environmentJson(owner, record))) })
   }
 
   /** Read the backend status and store it when it changed. */
@@ -1674,7 +1677,7 @@ export class AgentsGateway {
       error = errorMessage(statusError)
     }
     if (status === record.status && error === undefined) {
-      json(res, 200, record)
+      json(res, 200, await this.environmentJson(owner, record))
       return
     }
     const { error: _previous, ...rest } = record
@@ -1684,7 +1687,7 @@ export class AgentsGateway {
       updated_at: Math.floor(Date.now() / 1000),
       ...(error !== undefined ? { error } : status === 'failed' && record.error !== undefined ? { error: record.error } : {}),
     }
-    json(res, 200, await this.store.environments.update(owner, record.id, next) ?? next)
+    json(res, 200, await this.environmentJson(owner, await this.store.environments.update(owner, record.id, next) ?? next))
   }
 
   private async deleteEnvironment(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -1732,6 +1735,12 @@ export class AgentsGateway {
     await provider.destroy(record)
   }
 
+  /** The wire form of an environment: the SDK `agent.environment`, with the resources of its template when it still exists. */
+  private async environmentJson(owner: OwnerId, record: EnvironmentRecord): Promise<SdkEnvironment> {
+    const template = record.template_id === undefined ? undefined : await this.store.templates.get(owner, record.template_id)
+    return toSdkEnvironment(record, template)
+  }
+
   /** The provider behind a record, or a 400 answer when it is not registered. */
   private providerOr400(res: ServerResponse, record: EnvironmentRecord): SandboxProvider | undefined {
     const provider = this.sandboxes.get(record.provider)
@@ -1745,41 +1754,49 @@ export class AgentsGateway {
       notFound(res, 'environment not found')
       return
     }
-    const body = await readBody(req) as { path?: string; content?: string; content_base64?: string }
-    if (typeof body.path !== 'string' || body.path.trim() === '') {
-      badRequest(res, 'Field "path" is required')
+    const write = parseFileWrite(await readBody(req))
+    if ('error' in write) {
+      badRequest(res, write.error)
       return
     }
-    const content = typeof body.content === 'string'
-      ? Buffer.from(body.content, 'utf8')
-      : typeof body.content_base64 === 'string'
-        ? Buffer.from(body.content_base64, 'base64')
-        : undefined
-    if (content === undefined) {
-      badRequest(res, 'Field "content" or "content_base64" is required')
+    if (write.kind === 'file_id') {
+      badRequest(res, 'a file referenced by file_id cannot be copied into a live environment yet; send it inline as {"type":"inline","path","data"}')
       return
     }
     const provider = this.providerOr400(res, record)
     if (provider === undefined) return
     try {
-      await provider.writeFile(record, body.path, content)
-      json(res, 201, { object: 'environment.file', path: body.path, written: true })
+      await provider.writeFile(record, write.path, write.bytes)
+      const file: SdkEnvironmentFile = { object: 'agent.environment.file', environment_id: record.id, path: absoluteFilePath(write.path), size_bytes: write.bytes.length }
+      json(res, 201, file)
     } catch (error: unknown) {
       badRequest(res, errorMessage(error))
     }
   }
 
-  private async listEnvironmentFiles(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+  private async listEnvironmentFiles(res: ServerResponse, url: URL, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
     if (!record) {
       notFound(res, 'environment not found')
       return
     }
+    const query = parseFileListQuery(url)
+    if ('error' in query) {
+      badRequest(res, query.error)
+      return
+    }
     const provider = this.providerOr400(res, record)
     if (provider === undefined) return
     try {
-      const files = await provider.listFiles(record)
-      json(res, 200, { object: 'list', data: files.map(path => ({ path })) })
+      const page = selectFilePage(await provider.listFiles(record), query)
+      // Sizes are read for the page only.
+      const data: SdkEnvironmentFile[] = await Promise.all(page.items.map(async relative => ({
+        object: 'agent.environment.file' as const,
+        environment_id: record.id,
+        path: absoluteFilePath(relative),
+        size_bytes: (await provider.readFile(record, relative)).length,
+      })))
+      json(res, 200, { object: 'list', data, has_more: page.has_more, ...(page.next !== undefined ? { next: page.next } : {}) })
     } catch (error: unknown) {
       badRequest(res, errorMessage(error))
     }

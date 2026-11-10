@@ -123,9 +123,15 @@ describe('OpenAPI responses', () => {
     const env = await call('POST', '/v1/agents/environments', {}, {}, 201)
     await call('GET', '/v1/agents/environments', {}, undefined, 200)
     await call('GET', '/v1/agents/environments/{environment_id}', { environment_id: env.id }, undefined, 200)
+    // The earlier write body and the SDK's inline body both work and answer `agent.environment.file`.
     await call('POST', '/v1/agents/environments/{environment_id}/files', { environment_id: env.id }, { path: 'a/b.txt', content: 'hi' }, 201)
+    await call('POST', '/v1/agents/environments/{environment_id}/files', { environment_id: env.id }, { type: 'inline', path: '/workspace/c.txt', data: Buffer.from('hey').toString('base64') }, 201)
     const files = await call('GET', '/v1/agents/environments/{environment_id}/files', { environment_id: env.id }, undefined, 200)
-    expect(files.data).toEqual([{ path: 'a/b.txt' }])
+    expect(files).toMatchObject({ object: 'list', has_more: false })
+    expect(files.data).toEqual([
+      { object: 'agent.environment.file', environment_id: env.id, path: '/workspace/c.txt', size_bytes: 3 },
+      { object: 'agent.environment.file', environment_id: env.id, path: '/workspace/a/b.txt', size_bytes: 2 },
+    ])
     const raw = await fetch(`${origin}/v1/agents/environments/${String(env.id)}/files/a/b.txt`)
     expect(raw.headers.get('content-type')).toBe('application/octet-stream')
     expect(await raw.text()).toBe('hi')
