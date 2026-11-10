@@ -54,7 +54,7 @@ import { NO_STORED_CONFIG } from './recovery.ts'
 import { applySessionUpdate, baseOf, configOf, sessionFromRow } from './session-resource.ts'
 import { writeEvent, writeSSEHeaders } from './sse.ts'
 import type { ArtifactS3Config } from './artifacts.ts'
-import { getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath } from './artifacts.ts'
+import { artifactContentDisposition, artifactContentType, getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath } from './artifacts.ts'
 import { directorySegment } from './environment/local.ts'
 import type { CreateEnvironmentInput, EnvironmentProvider } from './environment/provider.ts'
 import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, EnvironmentTemplateConfig } from './environment-types.ts'
@@ -227,7 +227,7 @@ export class AgentsGateway {
       { method: 'DELETE', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.deleteEnvironment(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/sessions', handler: (req, res, url, _params, p) => this.createSession(req, res, url, p.owner) },
       { method: 'GET', pattern: '/agents/sessions', handler: (_req, res, url, _params, p) => this.listSessions(res, url, p.owner) },
-      { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts/*path', handler: (_req, res, _url, params, p) => this.getArtifact(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts/*path', handler: (_req, res, url, params, p) => this.getArtifact(res, params, p.owner, url.searchParams.get('download') === '1') },
       { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts', handler: (_req, res, _url, params, p) => this.listArtifacts(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id/items', handler: (_req, res, _url, params, p) => this.listSubagentTurnItems(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id', handler: (_req, res, _url, params, p) => this.getSubagentTurn(res, params, p.owner) },
@@ -1685,7 +1685,7 @@ export class AgentsGateway {
     json(res, 200, { object: 'list', data: await listWorkspaceArtifacts(workspace) })
   }
 
-  private async getArtifact(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+  private async getArtifact(res: ServerResponse, params: Record<string, string>, owner: OwnerId, download: boolean): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
     if (!await this.requireSession(res, owner, sessionId)) return
     const rawPath = params['path'] ?? ''
@@ -1706,7 +1706,9 @@ export class AgentsGateway {
       return
     }
     res.statusCode = 200
-    res.setHeader('Content-Type', 'application/octet-stream')
+    res.setHeader('Content-Type', artifactContentType(rawPath))
+    res.setHeader('Content-Disposition', artifactContentDisposition(rawPath, download))
+    res.setHeader('X-Content-Type-Options', 'nosniff')
     res.end(body)
   }
 

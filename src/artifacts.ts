@@ -233,3 +233,39 @@ async function walkWorkspace(root: string, dir: string, out: ArtifactEntry[]): P
     })
   }
 }
+
+const MIME_TYPES: Record<string, string> = {
+  txt: 'text/plain', md: 'text/markdown', html: 'text/html', htm: 'text/html', css: 'text/css',
+  csv: 'text/csv', js: 'text/javascript', mjs: 'text/javascript', ts: 'text/plain', xml: 'text/xml',
+  json: 'application/json', pdf: 'application/pdf', zip: 'application/zip',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+  svg: 'image/svg+xml', ico: 'image/x-icon',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  mp3: 'audio/mpeg', wav: 'audio/wav', mp4: 'video/mp4', webm: 'video/webm',
+}
+
+/**
+ * Content-Type for an artifact path, from its file extension.
+ * @param path - artifact path.
+ * @returns the MIME type (text types carry `; charset=utf-8`), or `application/octet-stream` for unknown extensions.
+ */
+export function artifactContentType(path: string): string {
+  const name = path.slice(path.lastIndexOf('/') + 1)
+  const dot = name.lastIndexOf('.')
+  const type = dot < 0 ? undefined : MIME_TYPES[name.slice(dot + 1).toLowerCase()]
+  if (type === undefined) return 'application/octet-stream'
+  const text = type.startsWith('text/') || type === 'application/json' || type === 'image/svg+xml'
+  return text ? `${type}; charset=utf-8` : type
+}
+
+/**
+ * Content-Disposition for an artifact download.
+ * @param path - artifact path; only its last segment is used as the filename.
+ * @param download - true for `attachment`, false for `inline`.
+ */
+export function artifactContentDisposition(path: string, download: boolean): string {
+  const name = path.slice(path.lastIndexOf('/') + 1).replace(/[^\x20-\x7e]|["\\]/gu, '_')
+  return `${download ? 'attachment' : 'inline'}; filename="${name}"`
+}

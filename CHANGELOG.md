@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Artifact download headers
+
+- `GET /v1/agents/sessions/{id}/artifacts/{path}` now sends the `Content-Type` for the file extension (`application/octet-stream` for unknown ones, `; charset=utf-8` for text types), `Content-Disposition: inline; filename="..."` (`attachment` with `?download=1`), and `X-Content-Type-Options: nosniff`.
+
 ## 2026-11-10 — Slash commands
 
 - `GET /v1/agents/commands?session_id=` lists Host commands (`name`, `description`, `input_hint`, `accepts_attachments`) for the `/` menu: the live agent's catalog, the default preset's catalog for a session that is not live (no resume), and an empty list without `session_id`. Cached per scope for `commands.cacheTtlSeconds` (default 60), dropped on `commands/change` and `agent-preset/selected`, strong `ETag` with `304`, `503 commands_unavailable` on a failed read. `@deepseek-ai/dsh-commands` is a new optional peer.

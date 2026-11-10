@@ -1425,11 +1425,28 @@ paths:
       summary: Download an artifact
       tags:
         - Sessions
+      parameters:
+        - name: download
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ["1"]
+          description: "`1` sends `Content-Disposition: attachment` instead of `inline`."
       responses:
         "200":
-          description: Artifact bytes
+          description: Artifact bytes. `Content-Type` is derived from the file extension (`application/octet-stream` when unknown; text types add `charset=utf-8`).
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              description: '`inline; filename="..."`, or `attachment` with `?download=1`.'
+            X-Content-Type-Options:
+              schema:
+                type: string
+                enum: [nosniff]
           content:
-            application/octet-stream:
+            "*/*":
               schema:
                 type: string
                 format: binary
