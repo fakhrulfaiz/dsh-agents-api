@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — Session deliverables
+
+- `GET /v1/agents/sessions/{id}/deliverables` lists the files the agent declared with the DSH `present` tool (`path`, optional `description`, `turn_id`, `created_at`), read from the Session log and owner-scoped. `present` and its prompt guidance already come from the web-app bundle's presets, so `cordis.patch.yml` is unchanged. Use it instead of the artifact listing to show only delivered files; bytes still come from the artifacts content route.
+
 ## 2026-11-10 — Workspace and shell guidance
 
 - Every agent session now gets a system-prompt rule: do not search the whole filesystem (`/`, `/mnt`, home-wide `find`), stay in the workspace, and use the matching office skill's own scripts for docx/pptx/xlsx. The shell executor already defaults to a 120s timeout (max 600s) in DSH, so no profile patch was needed.

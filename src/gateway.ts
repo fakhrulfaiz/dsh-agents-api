@@ -255,6 +255,7 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents/sessions', handler: (req, res, url, _params, p) => this.createSession(req, res, url, p.owner) },
       { method: 'GET', pattern: '/agents/sessions', handler: (_req, res, url, _params, p) => this.listSessions(res, url, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts/*path', handler: (_req, res, url, params, p) => this.getArtifact(res, params, p.owner, url.searchParams.get('download') === '1') },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/deliverables', handler: (_req, res, _url, params, p) => this.listDeliverables(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts', handler: (_req, res, _url, params, p) => this.listArtifacts(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id/items', handler: (_req, res, _url, params, p) => this.listSubagentTurnItems(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id', handler: (_req, res, _url, params, p) => this.getSubagentTurn(res, params, p.owner) },
@@ -1748,6 +1749,12 @@ export class AgentsGateway {
     const workspace = await this.workspaceOf(res, sessionId)
     if (workspace === undefined) return
     json(res, 200, { object: 'list', data: await listWorkspaceArtifacts(workspace) })
+  }
+
+  private async listDeliverables(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const sessionId = routeParam(params, 'session_id')
+    if (!await this.requireSession(res, owner, sessionId)) return
+    json(res, 200, { object: 'list', data: await this.history.deliverables(sessionId) })
   }
 
   private async getArtifact(res: ServerResponse, params: Record<string, string>, owner: OwnerId, download: boolean): Promise<void> {

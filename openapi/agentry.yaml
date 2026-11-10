@@ -1554,6 +1554,39 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/deliverables:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      summary: List files the agent delivered with the present tool
+      tags:
+        - Sessions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DeliverableEntry"
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
   /v1/agents/sessions/{session_id}/artifacts:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -2613,6 +2646,21 @@ components:
           type: string
       required:
         - path
+    DeliverableEntry:
+      type: object
+      properties:
+        path:
+          type: string
+        description:
+          type: string
+        turn_id:
+          type: string
+        created_at:
+          type: integer
+      required:
+        - path
+        - turn_id
+        - created_at
     ArtifactEntry:
       type: object
       properties:

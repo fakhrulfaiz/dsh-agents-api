@@ -10,6 +10,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { SessionQueryError, type SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import { paginate, type ListQuery } from '../http.ts'
 import type { OAIListResponse, OAITurn } from '../types.ts'
+import { deliverablesFromEvents, type DeliverableEntry } from './deliverables.ts'
 import { foldSession, type ProjectionBase, type ReplayFrame, type StoredSessionItem, type WireProjector } from './projector.ts'
 
 /** Reads a session's history from the Session log. */
@@ -46,6 +47,11 @@ export interface SessionHistory {
    * @returns a projector positioned after the last logged event.
    */
   fold(base: ProjectionBase): Promise<WireProjector>
+  /**
+   * @param sessionId - session id.
+   * @returns files declared with `present`, oldest first; empty when the log is missing.
+   */
+  deliverables(sessionId: string): Promise<DeliverableEntry[]>
   /**
    * @param sessionId - session id.
    * @returns the working directory in the session header, or `undefined` when the log is missing.
@@ -87,6 +93,9 @@ export function createSessionHistory(sessionQuery: Pick<SessionQueryEngine, 'rea
     },
     async wireEvents(base, afterSeq) {
       return (await fold(base)).frames.filter(frame => frame.id > afterSeq)
+    },
+    async deliverables(sessionId) {
+      return deliverablesFromEvents((await read(sessionId))?.events ?? [])
     },
     async workspace(sessionId) {
       const cwd = (await read(sessionId))?.session.cwd
