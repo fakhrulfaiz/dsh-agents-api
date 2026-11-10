@@ -46,10 +46,10 @@ Read this first in every session. It records decisions already made so they are 
 Mirrored in `~/code/agentry-web/AGENTS.md`.
 
 1. **Skill catalog endpoint (done 2026-11-10: `GET /v1/agents/skills`)** for the frontend's `/` picker. `/name` invocation already works through `dsh-tool-skill` when the profile mounts it; skills load from `<workspace>/.agents/skills`, `$DSH_HOME/skills`, `~/.agents/skills`, a configured directory, and `skill-office`. Per-owner skills could later come from a custom skill provider (the registry accepts any provider).
-2. **Attachment/image endpoint** so clients can display screenshots and other images from tool results (owner-scoped).
+2. **Attachment/image endpoint** so clients can display screenshots and other images from tool results (owner-scoped). Upload and content routes for user attachments landed 2026-11-10 (`/agents/files`, see `docs/changes/2026-11-10-attachments.md`); serving tool-result images is a further `FileSource` on the same route.
 3. **Browser automation in the profile:** mount `browser-use-playwright-mcp` (or Chrome DevTools / Stagehand) in the Agentry profile when Task 8 resumes.
 4. **Vision-capable model route** for sessions that need screenshot review; DSH withholds images from non-vision routes.
-5. **Cowork endpoints** for the frontend's F3 artifacts panel: deliverables, per-turn workspace changes, non-image uploads.
+5. **Cowork endpoints** for the frontend's F3 artifacts panel: deliverables, per-turn workspace changes. Non-image uploads landed 2026-11-10 with the attachment routes.
 6. **Owner-filtered schedule tools:** `schedule_list/view/edit` see every Host task; filter by owner (upstream DSH change or replacement tool) before multi-user containers.
 
 ## Working rules

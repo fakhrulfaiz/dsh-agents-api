@@ -1139,6 +1139,20 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/ServerError"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          description: "`message_too_large`: the files of the message total more than `uploads.maxMessageBytes`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: "`uploads_disabled`: the message carries files but the server has no `uploads.dir`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
       description: "Send `agent` and/or `agent_id`. With `stream: true` the response is a `text/event-stream` of `SessionEvent` frames (see the events operation) instead of JSON."
@@ -1299,6 +1313,18 @@ paths:
           $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/ServerError"
+        "413":
+          description: "`message_too_large`: the files of the message total more than `uploads.maxMessageBytes`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: "`uploads_disabled`: the message carries files but the server has no `uploads.dir`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
       description: Posting to a session that is not live resumes it from its Session log first (409 `session_not_resumable` for sessions created before migration 0002, 500 `session_resume_failed`). Approval answers do not resume.
@@ -1829,7 +1855,7 @@ components:
       description: Ignored by the session list (newest first).
   responses:
     BadRequest:
-      description: Invalid request. `error.code` is `bad_request`, `invalid_request`, `invalid_approval_response`, `decision_not_applicable`, or `unknown_call_id`.
+      description: Invalid request. `error.code` is `bad_request`, `invalid_request`, `invalid_approval_response`, `decision_not_applicable`, `unknown_call_id`, `unsupported_content_part`, `duplicate_file_id`, or `too_many_files`.
       content:
         application/json:
           schema:
@@ -1851,13 +1877,13 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     NotFound:
-      description: Unknown id or another owner's record (`resource_not_found`), or `approval_not_found` for an approval answer.
+      description: Unknown id or another owner's record (`resource_not_found`), `approval_not_found` for an approval answer, or `file_not_found` for a file id in a message.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     Conflict:
-      description: "`session_setting_not_live` (model or effort change not applicable) or `session_not_resumable`."
+      description: "`session_setting_not_live` (model or effort change not applicable), `session_not_resumable`, `file_attached` (delete of an attached file), `file_already_attached`, or `uploads_unsafe` (the workspace `uploads` entry is a symlink or not a directory)."
       content:
         application/json:
           schema:
@@ -2741,6 +2767,9 @@ components:
             - system
         content:
           type: array
+          description: >-
+            `input_text` parts carry `text`. `input_image` and `input_file` parts carry `file_id` of a file uploaded with `POST /v1/agents/files`; a file may be used once. A message with files and no text is valid.
+            `image_url`, `file_data`, and `file_url` are rejected with `400` `unsupported_content_part`. Images reach the model as images only on routes that accept them; on other routes they are sent as files. Every file is also copied to `uploads/` in the session workspace.
           items:
             type: object
             properties:
@@ -2748,6 +2777,15 @@ components:
                 type: string
               text:
                 type: string
+              file_id:
+                type: string
+                description: Required for `input_image` and `input_file`.
+              filename:
+                type: string
+                description: Ignored; the stored name is used.
+              detail:
+                type: string
+                description: Ignored.
             required:
               - type
       required:
@@ -2878,6 +2916,37 @@ components:
         - in_progress
         - completed
         - incomplete
+    InputFilePart:
+      type: object
+      description: >-
+        An image or file the user attached, after the `input_text` part (which is absent when the message had no text). `file_id` is absent when the file was not uploaded through this API; the part then has name and size only and no content link.
+      properties:
+        type:
+          type: string
+          enum:
+            - input_image
+            - input_file
+        file_id:
+          type: string
+          description: Id for `GET /v1/agents/files/{file_id}/content`.
+        filename:
+          type: string
+        bytes:
+          type: integer
+        media_type:
+          type: string
+        width:
+          type: integer
+          description: Pixel width of the stored image (`input_image` only).
+        height:
+          type: integer
+          description: Pixel height of the stored image (`input_image` only).
+      required:
+        - type
+        - filename
+        - bytes
+        - media_type
+      additionalProperties: false
     MessageItem:
       type: object
       properties:
@@ -2893,18 +2962,20 @@ components:
         content:
           type: array
           items:
-            type: object
-            properties:
-              type:
-                type: string
-                enum:
-                  - input_text
-                  - output_text
-              text:
-                type: string
-            required:
-              - type
-              - text
+            oneOf:
+              - type: object
+                properties:
+                  type:
+                    type: string
+                    enum:
+                      - input_text
+                      - output_text
+                  text:
+                    type: string
+                required:
+                  - type
+                  - text
+              - $ref: "#/components/schemas/InputFilePart"
         phase:
           oneOf:
             - type: string

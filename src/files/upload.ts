@@ -90,7 +90,8 @@ export async function handleUpload(req: IncomingMessage, res: ServerResponse, ow
     return
   }
   const staged = await deps.store.files.stagedBytes(owner)
-  if (staged + (declaredLength ?? 0) > limits.maxStagedBytesPerOwner) {
+  // `Content-Length` includes multipart framing, so only what exceeds the framing allowance counts here; the check after storing is exact.
+  if (staged >= limits.maxStagedBytesPerOwner || staged + Math.max(0, (declaredLength ?? 0) - MULTIPART_OVERHEAD_BYTES) > limits.maxStagedBytesPerOwner) {
     reject(req, res, quotaRejection())
     return
   }

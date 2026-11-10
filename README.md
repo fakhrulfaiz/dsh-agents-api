@@ -93,6 +93,10 @@ REST and SSE under the configured prefix (`/v1` by default) for saved agents, se
 | `prefix`                    | `/v1`   | URL prefix for every Agents API route                                                                     |
 | `database.url`              | none    | Required. Postgres connection URL for agents, templates, environments, and the session index. The bundled patch reads it from `AGENTRY_DATABASE_URL` |
 | `workspaces`                | none    | Required. Root of `<owner>/<session>/` session workspaces and `<owner>/<environment>/` local environments. A missing or blank value fails at load. The bundled patch reads it from `AGENTRY_WORKSPACES` |
+| `uploads.dir`               | absent  | Staging directory for uploaded bytes, outside `workspaces`; startup fails when it cannot be written. Without it `POST /agents/files` answers 501. The bundled patch does not set it; add `uploads: { dir: … }` |
+| `uploads.maxFileBytes` / `maxFilesPerMessage` / `maxMessageBytes` / `maxStagedBytesPerOwner` | 25 MiB / 10 / 50 MiB / 500 MiB | Upload limits; each is a positive integer and `maxMessageBytes`, `maxStagedBytesPerOwner` are at least `maxFileBytes` |
+| `uploads.stagedTtlMinutes` / `sweepIntervalMinutes` | `1440` / `15` | A staged file that is not sent is removed after the TTL; the sweeper runs at start and every interval |
+| `uploads.allowedMediaTypes` | PNG, JPEG, GIF, WebP, PDF, plain text, Markdown, CSV, TSV, JSON, ZIP, DOCX, XLSX, PPTX | Media types accepted at upload |
 | `artifacts.*`               | absent  | Optional S3 artifact backend (`endpoint`, `bucket`, `prefix`, `region`, `accessKeyId`, `secretAccessKey`); off unless endpoint and credentials are set |
 | `codebox`                   | —       | Rejected at load with `CodeboxDisabledError`, as are the `CODEBOX_BASE_URL` and `CODEBOX_API_KEY` env vars: Codebox environments are parked |
 | `dataDir`                   | —       | Removed; rejected at load. Records live in Postgres                                                       |

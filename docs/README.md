@@ -12,6 +12,7 @@ Package-local reference and change notes for `@agentry/api`.
 
 | Note | Summary |
 | --- | --- |
+| [2026-11-10-attachments.md](changes/2026-11-10-attachments.md) | Chat file attachments: `/agents/files` upload, content, and delete; `input_image` / `input_file` parts; workspace `uploads/` copy; item parts; TTL sweeper; `FileStore` seam |
 | [2026-11-09-scheduled-tasks.md](changes/2026-11-09-scheduled-tasks.md) | Owner-scoped `/agents/schedules` routes over the Host schedule service; ownership derived from the target session; deliveries resume Agentry sessions; scheduled prompts in the chat history; `this_session` prompt guidance |
 | [2026-11-09-openapi-contract.md](changes/2026-11-09-openapi-contract.md) | OpenAPI 3.1 contract with full schemas, `routeTable()`, and the drift and schema-validation tests |
 | [2026-11-09-approvals.md](changes/2026-11-09-approvals.md) | Approvals and user questions as `approval` required actions with `approval_response` input; live `model` / `reasoning.effort` updates; create passes the effort |

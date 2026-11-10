@@ -3,6 +3,12 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-10 — File attachments (backend)
+
+- `POST /v1/agents/files` (multipart upload, magic-byte sniffing, size and quota limits, traversal-safe names), `GET /v1/agents/files/{file_id}/content` (owner-checked, `nosniff`, sandbox CSP, rasters inline, everything else a download), `DELETE /v1/agents/files/{file_id}` (staged only).
+- Messages on `POST /sessions` and `.../events` accept `input_image` / `input_file` parts with `file_id`. Each file is stored in the DSH attachment store, copied to `<workspace>/uploads/` without overwriting, and logged with a note; images reach the model as images only on routes that accept them. User message items carry the file parts, live and after a restart.
+- Migration `0003-files.sql`; new `uploads` config block (off until `uploads.dir` is set); staged files expire after `uploads.stagedTtlMinutes`; `@deepseek-ai/dsh-attachment` is a new peer and `busboy` a new dependency. Write-up: [docs/changes/2026-11-10-attachments.md](docs/changes/2026-11-10-attachments.md).
+
 ## 2026-11-10 — ask_user_question stays untimed
 
 - Checked live: with the shipped presets (`tool-ask-user` in blocking mode) a session that calls `ask_user_question` reaches `requires_action` with a `user_question` approval, so no bridge or profile change was needed. `tests/ask-user-mode.spec.ts` pins the default `mode: legacy`; a `mode: timed` row would bypass the bridge (`wait.timed` requests are delegated), so `timeout: -1` is not a fix for it.

@@ -17,6 +17,9 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 | `GET` `DELETE` | `/agents/environments/{id}` | Retrieve (status `failed` when the directory is gone) or delete one environment and its directory |
 | `POST` `GET` | `/agents/environments/{id}/files` | Write or list files in the environment workspace |
 | `GET` | `/agents/environments/{id}/files/{path}` | Read one environment file |
+| `POST` | `/agents/files` | Upload one file (`multipart/form-data`, part `file`). See [File attachments](#file-attachments) |
+| `GET` | `/agents/files/{file_id}/content` | Download a staged or attached file of the caller |
+| `DELETE` | `/agents/files/{file_id}` | Remove a staged file that was never sent |
 | `POST` `GET` | `/agents/schedules` | Create or list scheduled tasks. See [Scheduled tasks](#scheduled-tasks) |
 | `GET` `POST` `DELETE` | `/agents/schedules/{schedule_id}` | Retrieve, update, or delete a scheduled task |
 | `POST` | `/agents/schedules/{schedule_id}/pause` `/resume` `/run` | Pause, resume, or run a task now |
@@ -138,6 +141,33 @@ curl -X POST "$AGENTRY/v1/agents/schedules" \
   -d '{"title":"Morning brief","prompt":"Summarize overnight news","agent":{"model":"deepseek-chat"},
        "timing":{"kind":"weekly","weekly":{"time":"08:00","time_zone":"Asia/Kuala_Lumpur","weekdays":[1,2,3,4,5]}}}'
 ```
+
+## File attachments
+
+Upload first, attach on send. `POST /agents/files` stages one file for the caller; the file id goes into the next message as an `input_image` or `input_file` part. This works before a session exists: `POST /agents/sessions` and `POST /agents/sessions/{id}/events` take the same parts.
+
+```
+POST /agents/files            multipart/form-data: file=<bytes>, purpose=user_data (optional)
+201  { "id": "file_…", "object": "file", "bytes": 33, "created_at": 1794260132, "filename": "notes.txt",
+       "purpose": "user_data", "media_type": "text/plain", "status": "staged" }
+
+POST /agents/sessions/{id}/events   (or `input` of POST /agents/sessions)
+{ "type": "agent.session.input.message",
+  "input": [{ "role": "user", "content": [
+    { "type": "input_text",  "text": "What is in these?" },
+    { "type": "input_image", "file_id": "file_…" },
+    { "type": "input_file",  "file_id": "file_…" } ] }] }
+```
+
+- Only `file_id` is accepted. `image_url`, `file_data`, and `file_url` answer `400` `unsupported_content_part`; the server never fetches a URL. A message with files and no text is valid. A file can be sent once; an id in two parts or two events of one request is `400` `duplicate_file_id`.
+- Errors (no side effect: no session is created, nothing is claimed): `404` `file_not_found` (unknown id or another owner's), `409` `file_already_attached`, `400` `too_many_files`, `413` `message_too_large`, `501` `uploads_disabled`, `503` `attachments_unavailable`, `409` `uploads_unsafe` (the session workspace's `uploads` is a symlink or not a directory).
+- Upload errors: `400` `invalid_file` (not multipart, no or several `file` parts, unusable name, empty file, bad `purpose`), `413` `file_too_large`, `415` `unsupported_media_type`, `429` `staging_quota_exceeded`.
+- The server decides the media type: magic bytes for PNG, JPEG, GIF, and WebP; the extension allow-list (`uploads.allowedMediaTypes`) for everything else, with a content check for PDF, ZIP-based Office files, and text. The part's `Content-Type` is advisory; a contradicting raster type or extension is `415`. Names are reduced to a safe leaf.
+- On send, each file is stored in the DSH attachment store and copied to `<workspace>/uploads/<name>` (never overwriting: `name-1.ext`). Rasters are sent to the model as images only when the session's route lists `image` in its input modalities (or lists none); otherwise they are sent as files. The model also receives one text note, `Attached files copied to the workspace: uploads/a.png (image/png, 12 KB); …`, which is in the Session log and hidden from item parts.
+- `GET /agents/files/{file_id}/content` streams the bytes. Another owner's id is `404`. Rasters are `Content-Disposition: inline`; everything else is an `attachment`, and SVG, HTML, and unknown types are `application/octet-stream`. Responses carry `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'`, and `Cache-Control: private, max-age=3600`.
+- `DELETE /agents/files/{file_id}` removes a staged file (`200` `{ id, object: "file.deleted", deleted: true }`); an attached file is `409` `file_attached`. Staged files that are never sent are removed after `uploads.stagedTtlMinutes` (default 1440).
+- Item parts: a user message item lists `input_text` (omitted when the message had no text) and then one part per file: `{ "type": "input_image" | "input_file", "file_id", "filename", "bytes", "media_type", "width"?, "height"? }`. `file_id` is absent for a file that was not uploaded through this API. The same parts appear after a restart, because they are derived from the Session log and the `files` table.
+- Limits and the staging directory come from the `uploads` config ([README](../README.md#configuration)). Without `uploads.dir` the upload route answers `501`.
 
 ## Skill catalog
 

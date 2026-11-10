@@ -1,6 +1,6 @@
 # File attachments in chat: design
 
-Status: approved, 2026-11-10 (open questions resolved in section 10). DSH evidence paths are relative to `~/code/dsh-pinned/packages/`; Agentry paths are relative to `~/code/dsh-agents-api` (API) or `~/code/agentry-web` (web). Covers backlog items 2 (image endpoint, reused here), 4 (vision route) and part of 5 (non-image uploads).
+Status: approved and implemented (backend), 2026-11-10; open questions resolved in section 10. DSH evidence paths are relative to `~/code/dsh-pinned/packages/`; Agentry paths are relative to `~/code/dsh-agents-api` (API) or `~/code/agentry-web` (web). Covers backlog items 2 (image endpoint, reused here), 4 (vision route) and part of 5 (non-image uploads).
 
 ## 1. Goal and v1 recommendation
 
