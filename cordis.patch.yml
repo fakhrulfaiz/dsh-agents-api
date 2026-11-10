@@ -10,6 +10,8 @@
         workspaces: !!js process.env.AGENTRY_WORKSPACES
         database:
           url: !!js process.env.AGENTRY_DATABASE_URL
+        uploads:
+          dir: !!js process.env.AGENTRY_UPLOADS_DIR ?? `${process.env.HOME}/.dsh/agentry-uploads`
         auth:
           mode: development
           devKey:
