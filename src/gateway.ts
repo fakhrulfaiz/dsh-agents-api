@@ -61,9 +61,10 @@ import type { ArtifactS3Config } from './artifacts.ts'
 import { artifactContentDisposition, artifactContentType, getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath } from './artifacts.ts'
 import { directorySegment } from './environment/local.ts'
 import type { CreateEnvironmentInput } from './environment/provider.ts'
+import { normalizeTemplateConfig, parseTemplateInput, toSdkTemplate, unsupportedFields } from './environment/template-compat.ts'
 import type { SandboxProvider } from './sandbox/contract.ts'
 import type { SandboxRegistry } from './sandbox/registry.ts'
-import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, EnvironmentTemplateConfig } from './environment-types.ts'
+import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate } from './environment-types.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SubagentState } from './session-registry.ts'
 import {
@@ -1503,24 +1504,33 @@ export class AgentsGateway {
   }
 
   private async createTemplate(req: IncomingMessage, res: ServerResponse, owner: OwnerId): Promise<void> {
-    const body = await readBody(req) as { name?: string; config?: EnvironmentTemplateConfig }
-    if (typeof body.name !== 'string' || body.name.trim() === '') {
-      badRequest(res, 'Field "name" is required')
+    const parsed = parseTemplateInput(await readBody(req))
+    if ('error' in parsed) {
+      badRequest(res, parsed.error)
+      return
+    }
+    // The template's provider (an extension field), else the default. Unsupported fields are stored, not rejected.
+    let provider: SandboxProvider
+    try {
+      provider = parsed.provider !== undefined ? this.sandboxes.require(parsed.provider) : this.sandboxes.default()
+    } catch (error: unknown) {
+      badRequest(res, errorMessage(error))
       return
     }
     const template: EnvironmentTemplate = {
       id: `tpl_${randomUUID().replaceAll('-', '')}`,
       object: 'environment.template',
-      name: body.name,
-      provider: this.sandboxes.default().kind,
-      config: body.config ?? {},
+      name: parsed.name ?? '',
+      provider: provider.kind,
+      config: parsed.config,
       created_at: Math.floor(Date.now() / 1000),
     }
-    json(res, 201, await this.store.templates.create(owner, template))
+    json(res, 201, toSdkTemplate(await this.store.templates.create(owner, template), provider))
   }
 
   private async listTemplates(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
-    json(res, 200, await this.store.templates.list(owner, listQuery(url)))
+    const page = await this.store.templates.list(owner, listQuery(url))
+    json(res, 200, { ...page, data: page.data.map(template => toSdkTemplate(template, this.sandboxes.get(template.provider))) })
   }
 
   private async getTemplate(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -1529,7 +1539,7 @@ export class AgentsGateway {
       notFound(res, 'template not found')
       return
     }
-    json(res, 200, template)
+    json(res, 200, toSdkTemplate(template, this.sandboxes.get(template.provider)))
   }
 
   private async updateTemplate(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -1539,18 +1549,33 @@ export class AgentsGateway {
       notFound(res, 'template not found')
       return
     }
-    const body = await readBody(req) as { name?: string; config?: EnvironmentTemplateConfig }
+    const parsed = parseTemplateInput(await readBody(req))
+    if ('error' in parsed) {
+      badRequest(res, parsed.error)
+      return
+    }
+    let provider = this.sandboxes.get(existing.provider)
+    if (parsed.provider !== undefined) {
+      try {
+        provider = this.sandboxes.require(parsed.provider)
+      } catch (error: unknown) {
+        badRequest(res, errorMessage(error))
+        return
+      }
+    }
+    // Fields in the body replace the stored ones; the rest stay (an old stored layout is mapped first).
     const updated = await this.store.templates.update(owner, templateId, {
       ...existing,
-      ...(typeof body.name === 'string' ? { name: body.name } : {}),
-      ...(body.config !== undefined ? { config: body.config } : {}),
+      ...(parsed.name !== undefined ? { name: parsed.name ?? '' } : {}),
+      ...(provider !== undefined ? { provider: provider.kind } : {}),
+      config: { ...normalizeTemplateConfig(existing.config), ...parsed.config },
       updated_at: Math.floor(Date.now() / 1000),
     })
     if (!updated) {
       notFound(res, 'template not found')
       return
     }
-    json(res, 200, updated)
+    json(res, 200, toSdkTemplate(updated, provider))
   }
 
   private async deleteTemplate(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -1559,7 +1584,7 @@ export class AgentsGateway {
       notFound(res, 'template not found')
       return
     }
-    json(res, 200, { id: templateId, object: 'environment.template.deleted', deleted: true })
+    json(res, 200, { id: templateId, object: 'agent.environment.template.deleted', deleted: true })
   }
 
   private async createEnvironment(req: IncomingMessage, res: ServerResponse, owner: OwnerId): Promise<void> {
@@ -1589,6 +1614,12 @@ export class AgentsGateway {
       provider = templateProvider !== undefined ? this.sandboxes.require(templateProvider) : this.sandboxes.default()
     } catch (error: unknown) {
       badRequest(res, errorMessage(error))
+      return
+    }
+    // A template the provider cannot fully apply is stored, but nothing is provisioned from it: never ignore fields silently.
+    const unsupported = input.template === undefined ? [] : unsupportedFields(input.template, provider)
+    if (unsupported.length > 0) {
+      writeRequestError(res, new AgentsApiRequestError(`sandbox provider "${provider.kind}" cannot apply template fields: ${unsupported.join(', ')}`, 400, 'sandbox_template_unsupported'))
       return
     }
     const id = `env_${randomUUID().replaceAll('-', '')}`

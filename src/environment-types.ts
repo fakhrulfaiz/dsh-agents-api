@@ -6,12 +6,33 @@
  * and `sandbox`.
  */
 
-/** Blueprint fields stored on an environment template (to be aligned with the OpenAI Agents API template shape). */
+/** A file a template places in the environment: inline base64 data or a Files API reference (the SDK's `HostedEnvironmentFileParam`). */
+export type TemplateFileInput =
+  | { type: 'inline'; path: string; data: string }
+  | { type: 'file_id'; path: string; file_id: string }
+
+/**
+ * Fields stored on an environment template. The first group is the OpenAI Agents API template
+ * shape; `image` is our extension; the last group is the Codebox-era layout, still read from old
+ * stored templates and mapped by `normalizeTemplateConfig`.
+ */
 export interface EnvironmentTemplateConfig {
+  capability_directories?: string[]
+  env?: Record<string, string>
+  files?: TemplateFileInput[]
+  network?: { access: 'enabled' | 'disabled' | 'restricted'; allowed_domains?: string[] }
+  /** The SDK shape, or the legacy flat list of system packages. */
+  packages?: { npm?: string[]; python?: string[]; system?: string[] } | string[]
+  plugins?: Array<Record<string, unknown>>
+  setup_commands?: Array<{ command: string; cwd?: string }>
+  skills?: Array<Record<string, unknown>>
+  /** Extension: a container image for container providers. */
   image?: string
+  /** Legacy. */
   setup?: string
-  packages?: string[]
+  /** Legacy. */
   starter_files?: Array<{ path: string; content: string }>
+  /** Legacy. */
   default_env?: Record<string, string>
 }
 

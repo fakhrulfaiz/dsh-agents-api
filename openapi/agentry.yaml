@@ -941,7 +941,7 @@ paths:
                   id:
                     type: string
                   object:
-                    const: environment.template.deleted
+                    const: agent.environment.template.deleted
                   deleted:
                     const: true
                 required:
@@ -2490,74 +2490,317 @@ components:
         - description
         - parameters
         - source
-    EnvironmentTemplateConfig:
-      type: object
-      properties:
-        image:
-          type: string
-        setup:
-          type: string
-        packages:
-          type: array
-          items:
-            type: string
-        starter_files:
-          type: array
-          items:
-            type: object
-            properties:
-              path:
-                type: string
-              content:
-                type: string
-            required:
-              - path
-              - content
-        default_env:
-          type: object
-          additionalProperties:
-            type: string
+    TemplateFileInput:
+      oneOf:
+        - type: object
+          properties:
+            type:
+              const: inline
+            path:
+              type: string
+            data:
+              type: string
+              description: Standard base64 file contents.
+          required:
+            - type
+            - path
+            - data
+        - type: object
+          properties:
+            type:
+              const: file_id
+            path:
+              type: string
+            file_id:
+              type: string
+          required:
+            - type
+            - path
+            - file_id
     EnvironmentTemplate:
+      description: An `agent.environment.template` as the OpenAI Agents API defines it. Confidential parts (inline file data, `env`, setup commands, archives) are never returned; `provider`, `image` and `unsupported_fields` are extensions.
       type: object
       properties:
         id:
           type: string
         object:
-          const: environment.template
+          const: agent.environment.template
         name:
-          type: string
-        provider:
-          type: string
-          description: Sandbox provider name, for example `local`. Templates stored before providers were pluggable may say `codebox`, which no longer exists.
-        config:
-          $ref: "#/components/schemas/EnvironmentTemplateConfig"
+          type:
+            - string
+            - "null"
         created_at:
           type: integer
         updated_at:
           type: integer
+        capability_directories:
+          type: array
+          items:
+            type: string
+        files:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum:
+                  - inline
+                  - file_id
+              path:
+                type: string
+              file_id:
+                type: string
+              size_bytes:
+                type: integer
+            required:
+              - type
+              - path
+        network:
+          type: object
+          properties:
+            access:
+              type: string
+              enum:
+                - enabled
+                - disabled
+                - restricted
+            allowed_domains:
+              type: array
+              items:
+                type: string
+          required:
+            - access
+            - allowed_domains
+        packages:
+          type: object
+          properties:
+            npm:
+              type: array
+              items:
+                type: string
+            python:
+              type: array
+              items:
+                type: string
+            system:
+              type: array
+              items:
+                type: string
+          required:
+            - npm
+            - python
+            - system
+        plugins:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                const: inline
+              name:
+                type: string
+              description:
+                type: string
+            required:
+              - type
+              - name
+              - description
+        skills:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum:
+                  - skill_reference
+                  - inline
+              skill_id:
+                type: string
+              version:
+                type: string
+              name:
+                type: string
+              description:
+                type: string
+            required:
+              - type
+        provider:
+          type: string
+          description: Extension. Sandbox provider that provisions environments from this template. Templates stored before providers were pluggable may say `codebox`, which no longer exists.
+        image:
+          type: string
+          description: Extension. Container image for container providers.
+        unsupported_fields:
+          type: array
+          description: Extension. Template fields set to something the provider cannot apply; provisioning fails while any remain.
+          items:
+            type: string
       required:
         - id
         - object
         - name
-        - provider
-        - config
         - created_at
+        - updated_at
+        - capability_directories
+        - files
+        - network
+        - packages
+        - plugins
+        - skills
+        - provider
+        - unsupported_fields
     CreateTemplateRequest:
+      description: The OpenAI Agents API template create params, plus the `provider` and `image` extensions. The earlier nested form (`config` with `image`, `setup`, `packages` list, `starter_files`, `default_env`) is still accepted.
       type: object
       properties:
         name:
+          type:
+            - string
+            - "null"
+        capability_directories:
+          type: array
+          items:
+            type: string
+        env:
+          type: object
+          additionalProperties:
+            type: string
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/TemplateFileInput"
+        network:
+          type: object
+          properties:
+            access:
+              type: string
+              enum:
+                - enabled
+                - disabled
+                - restricted
+            allowed_domains:
+              type: array
+              items:
+                type: string
+          required:
+            - access
+        packages:
+          type: object
+          properties:
+            npm:
+              type: array
+              items:
+                type: string
+            python:
+              type: array
+              items:
+                type: string
+            system:
+              type: array
+              items:
+                type: string
+        plugins:
+          type: array
+          items:
+            type: object
+        setup_commands:
+          type: array
+          items:
+            type: object
+            properties:
+              command:
+                type: string
+              cwd:
+                type: string
+            required:
+              - command
+        skills:
+          type: array
+          items:
+            type: object
+        provider:
           type: string
-        config:
-          $ref: "#/components/schemas/EnvironmentTemplateConfig"
-      required:
-        - name
+          description: Extension. Sandbox provider that provisions environments from this template; defaults to the server's default provider.
+        image:
+          type: string
+          description: Extension. Container image for container providers.
     UpdateTemplateRequest:
+      description: Fields to replace on a template; omitted fields keep their values.
       type: object
       properties:
         name:
+          type:
+            - string
+            - "null"
+        capability_directories:
+          type: array
+          items:
+            type: string
+        env:
+          type: object
+          additionalProperties:
+            type: string
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/TemplateFileInput"
+        network:
+          type: object
+          properties:
+            access:
+              type: string
+              enum:
+                - enabled
+                - disabled
+                - restricted
+            allowed_domains:
+              type: array
+              items:
+                type: string
+          required:
+            - access
+        packages:
+          type: object
+          properties:
+            npm:
+              type: array
+              items:
+                type: string
+            python:
+              type: array
+              items:
+                type: string
+            system:
+              type: array
+              items:
+                type: string
+        plugins:
+          type: array
+          items:
+            type: object
+        setup_commands:
+          type: array
+          items:
+            type: object
+            properties:
+              command:
+                type: string
+              cwd:
+                type: string
+            required:
+              - command
+        skills:
+          type: array
+          items:
+            type: object
+        provider:
           type: string
-        config:
-          $ref: "#/components/schemas/EnvironmentTemplateConfig"
+          description: Extension. Sandbox provider that provisions environments from this template; defaults to the server's default provider.
+        image:
+          type: string
+          description: Extension. Container image for container providers.
     EnvironmentStatus:
       type: string
       enum:

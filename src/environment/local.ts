@@ -9,6 +9,7 @@ import type { OwnerId } from '../auth/authenticator.ts'
 import { sanitizeRelativePath } from '../artifacts.ts'
 import type { EnvironmentRecord } from '../environment-types.ts'
 import type { SandboxProvider } from '../sandbox/contract.ts'
+import { normalizeTemplateConfig } from './template-compat.ts'
 
 /** One path segment: no separators, not `.` or `..`. */
 const SEGMENT = /^[A-Za-z0-9_@.-]+$/u
@@ -101,17 +102,23 @@ export function createLocalProvider(workspacesRoot: string): SandboxProvider {
 
   return {
     kind: 'local',
-    // The agent's own tools run in the Host against this directory; of the template fields only starter files apply.
-    capabilities: { templateFields: ['starter_files'], files: true, exec: true },
+    // The agent's own tools run in the Host against this directory; of the template fields only inline files apply.
+    capabilities: { templateFields: ['files'], files: true, exec: true },
     async create(owner: OwnerId, environmentId: string, input) {
+      const files = normalizeTemplateConfig(input.template ?? {}).files ?? []
+      // Refuse before creating anything: a Files API reference needs a store this provider does not have.
+      for (const file of files) {
+        if (file.type === 'file_id') throw new Error(`file "${file.path}" is a Files API reference, which the local provider cannot resolve; use inline data`)
+      }
       const workspacePath = join(root, directorySegment(owner, 'owner'), directorySegment(environmentId, 'environment id'))
       await mkdir(workspacePath, { recursive: true })
-      for (const file of input.template?.starter_files ?? []) {
-        const safe = sanitizeRelativePath(file.path)
-        if (safe === undefined) throw new Error(`starter file path "${file.path}" escapes the environment workspace`)
+      for (const file of files) {
+        if (file.type !== 'inline') continue
+        const safe = sanitizeRelativePath(file.path.startsWith('/workspace') ? file.path.slice('/workspace'.length) : file.path)
+        if (safe === undefined) throw new Error(`file path "${file.path}" escapes the environment workspace`)
         const target = resolve(workspacePath, ...safe.split('/'))
         await mkdir(dirname(target), { recursive: true })
-        await writeFile(target, file.content)
+        await writeFile(target, Buffer.from(file.data, 'base64'))
       }
       return { status: 'connected', workspacePath }
     },

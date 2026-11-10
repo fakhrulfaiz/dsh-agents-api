@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -52,16 +52,34 @@ describe('SandboxRegistry', () => {
 })
 
 describe('local provider as a SandboxProvider', () => {
-  it('declares itself, runs agents, and applies starter files', async () => {
+  it('declares itself, runs agents, and applies inline files (SDK shape and the legacy starter files)', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agentry-sbx-'))
     const local = createLocalProvider(root)
     expect(local.kind).toBe('local')
-    expect(local.capabilities).toEqual({ templateFields: ['starter_files'], files: true, exec: true })
+    expect(local.capabilities).toEqual({ templateFields: ['files'], files: true, exec: true })
     const owner = 'a' as OwnerId
-    const created = await local.create(owner, 'env_1', { template: { starter_files: [{ path: 'notes/readme.md', content: 'hello' }] } })
+    const created = await local.create(owner, 'env_1', {
+      template: { files: [{ type: 'inline', path: '/workspace/notes/readme.md', data: Buffer.from('hello').toString('base64') }], starter_files: [{ path: 'old.txt', content: 'legacy' }] },
+    })
     const record = { id: 'env_1', object: 'environment' as const, status: created.status, provider: 'local', provider_metadata: { workspace_directory: created.workspacePath }, created_at: 1 }
+    // SDK files win over legacy starter files, which are only read when no SDK files are given.
     expect(await local.listFiles(record)).toEqual(['notes/readme.md'])
     expect(new TextDecoder().decode(await local.readFile(record, 'notes/readme.md'))).toBe('hello')
     await local.destroy(record)
+    const legacy = await local.create(owner, 'env_2', { template: { starter_files: [{ path: 'old.txt', content: 'legacy' }] } })
+    expect(await local.listFiles({ ...record, id: 'env_2', provider_metadata: { workspace_directory: legacy.workspacePath } })).toEqual(['old.txt'])
+  })
+
+  it('refuses a Files API reference before creating anything', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentry-sbx-'))
+    const local = createLocalProvider(root)
+    await expect(local.create('a' as OwnerId, 'env_3', { template: { files: [{ type: 'file_id', path: '/workspace/x', file_id: 'file_1' }] } })).rejects.toThrow(/Files API reference/)
+    await expect(stat(join(root, 'a', 'env_3'))).rejects.toThrow()
+  })
+
+  it('refuses a file path that escapes the workspace', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentry-sbx-'))
+    const local = createLocalProvider(root)
+    await expect(local.create('a' as OwnerId, 'env_4', { template: { files: [{ type: 'inline', path: '/workspace/../../x', data: 'eA==' }] } })).rejects.toThrow(/escapes/)
   })
 })

@@ -6,12 +6,21 @@
 
 import type { EnvironmentProvider } from '../environment/provider.ts'
 
-/** Fields of an environment template (`EnvironmentTemplateConfig`) a provider may support. */
-export type TemplateField = 'image' | 'setup' | 'packages' | 'starter_files' | 'default_env'
+/** Fields of an environment template a provider may support: the OpenAI Agents API template fields, plus our `image` extension. */
+export type TemplateField =
+  | 'files'
+  | 'env'
+  | 'network'
+  | 'packages'
+  | 'plugins'
+  | 'skills'
+  | 'capability_directories'
+  | 'setup_commands'
+  | 'image'
 
 /** What a provider supports; clients read this from `GET /agents/environments/providers`. */
 export interface SandboxCapabilities {
-  /** Template fields the provider applies. A template naming any other field is rejected for this provider. */
+  /** Template fields the provider applies. A template asking for any other field is stored, but provisioning it fails. */
   readonly templateFields: readonly TemplateField[]
   /** Whether the provider can list, read and write environment files. */
   readonly files: boolean

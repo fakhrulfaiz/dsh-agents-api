@@ -251,3 +251,86 @@ describe('CoreAgent routes on the plugin gateway', () => {
     expect((await masked.json() as { data: Array<{ name: string }> }).data.map(row => row.name)).toEqual(['web_fetch'])
   })
 })
+
+describe('environment templates in the OpenAI Agents API shape', () => {
+  async function harness() {
+    const store = new MemoryStore()
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', store, new SessionRegistry(), testGatewayOptions(createLocalProvider(await tempDir())))
+    const root = await listen((req, res) => api.handle(req, res))
+    const post = (path: string, body: unknown) => fetch(`${root}/v1${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    return { store, root, post }
+  }
+
+  it('creates a template from the SDK params: SDK object, no confidential data, unsupported fields listed', async () => {
+    const { post, root } = await harness()
+    const res = await post('/agents/environments/templates', {
+      name: 'ci',
+      env: { SECRET: 'x' },
+      network: { access: 'disabled' },
+      skills: [{ type: 'skill_reference', skill_id: 'skill_1' }],
+      files: [{ type: 'inline', path: '/workspace/a.txt', data: Buffer.from('hi').toString('base64') }],
+      setup_commands: [{ command: 'make' }],
+    })
+    expect(res.status).toBe(201)
+    const text = await res.text()
+    const body = JSON.parse(text) as Record<string, unknown>
+    expect(body).toMatchObject({
+      object: 'agent.environment.template',
+      name: 'ci',
+      provider: 'local',
+      network: { access: 'disabled', allowed_domains: [] },
+      packages: { npm: [], python: [], system: [] },
+      files: [{ type: 'inline', path: '/workspace/a.txt', size_bytes: 2 }],
+      skills: [{ type: 'skill_reference', skill_id: 'skill_1' }],
+      unsupported_fields: ['env', 'network', 'skills', 'setup_commands'],
+    })
+    expect(text).not.toContain('SECRET')
+    expect(text).not.toContain('"make"')
+    const list = await (await fetch(`${root}/v1/agents/environments/templates`)).json() as { data: Array<{ object: string }> }
+    expect(list.data.map(t => t.object)).toEqual(['agent.environment.template'])
+    const deleted = await fetch(`${root}/v1/agents/environments/templates/${String(body['id'])}`, { method: 'DELETE' })
+    expect(await deleted.json()).toMatchObject({ object: 'agent.environment.template.deleted', deleted: true })
+  })
+
+  it('still accepts the earlier nested body, rejects an unknown provider, and updates by replacing the given fields', async () => {
+    const { post } = await harness()
+    const created = await post('/agents/environments/templates', { name: 'old', config: { image: 'base', starter_files: [{ path: 'a.txt', content: 'x' }] } })
+    expect(created.status).toBe(201)
+    const body = await created.json() as { id: string; files: unknown[]; image?: string }
+    expect(body.files).toEqual([{ type: 'inline', path: '/workspace/a.txt', size_bytes: 1 }])
+    expect(body.image).toBe('base')
+    const bad = await post('/agents/environments/templates', { name: 'x', provider: 'nope' })
+    expect(bad.status).toBe(400)
+    expect(((await bad.json()) as { error: { message: string } }).error.message).toBe('unknown sandbox provider "nope"; available: local')
+    const updated = await post(`/agents/environments/templates/${body.id}`, { name: 'renamed', network: { access: 'enabled' } })
+    expect(await updated.json()).toMatchObject({ name: 'renamed', image: 'base', files: [{ path: '/workspace/a.txt' }], unsupported_fields: ['image'] })
+  })
+
+  it('reads a template stored in the Codebox-era layout under an unregistered provider', async () => {
+    const { store, root } = await harness()
+    await store.ensureOwner(ownerId('test'))
+    await store.templates.create(ownerId('test'), { id: 'tpl_old', object: 'environment.template', name: 'legacy', provider: 'codebox', config: { image: 'base', setup: 'make', packages: ['git'] }, created_at: 5 })
+    const res = await fetch(`${root}/v1/agents/environments/templates/tpl_old`)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({
+      object: 'agent.environment.template',
+      provider: 'codebox',
+      packages: { system: ['git'] },
+      unsupported_fields: ['packages', 'setup_commands', 'image'],
+    })
+  })
+
+  it('provisions an environment from a supported template and refuses an unsupported one', async () => {
+    const { post, root } = await harness()
+    const ok = await (await post('/agents/environments/templates', { files: [{ type: 'inline', path: '/workspace/notes/a.txt', data: Buffer.from('hi').toString('base64') }] })).json() as { id: string }
+    const created = await post('/agents/environments', { template_id: ok.id })
+    expect(created.status).toBe(201)
+    const env = await created.json() as { id: string }
+    const files = await (await fetch(`${root}/v1/agents/environments/${env.id}/files`)).json() as { data: Array<{ path: string }> }
+    expect(files.data.map(f => f.path)).toEqual(['notes/a.txt'])
+    const restricted = await (await post('/agents/environments/templates', { network: { access: 'restricted', allowed_domains: ['example.com'] } })).json() as { id: string }
+    const refused = await post('/agents/environments', { template_id: restricted.id })
+    expect(refused.status).toBe(400)
+    expect(await refused.json()).toMatchObject({ error: { code: 'sandbox_template_unsupported', message: expect.stringContaining('network') } })
+  })
+})
