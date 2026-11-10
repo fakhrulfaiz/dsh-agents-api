@@ -9,6 +9,8 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { ownerId } from '../src/auth/authenticator.ts'
 import { bridgeChildSessionEvent } from '../src/bridge.ts'
 import { createLocalProvider } from '../src/environment/local.ts'
+import type { SandboxProvider } from '../src/sandbox/contract.ts'
+import { SandboxRegistry } from '../src/sandbox/registry.ts'
 import { AgentsGateway } from '../src/gateway.ts'
 import { openAuthenticator } from './open-auth.ts'
 import { sanitizeRelativePath } from '../src/artifacts.ts'
@@ -111,7 +113,7 @@ describe('local config', () => {
 })
 
 describe('CoreAgent routes on the plugin gateway', () => {
-  it('returns a local environment and rejects sandbox sessions', async () => {
+  it('returns a local environment and attaches it to a session through the sandbox alias', async () => {
     const environments = createLocalProvider(await tempDir())
     const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), testGatewayOptions(environments))
     const root = await listen((req, res) => api.handle(req, res))
@@ -133,7 +135,8 @@ describe('CoreAgent routes on the plugin gateway', () => {
         environment: { type: 'sandbox', environment_id: env.id },
       }),
     })
-    expect(session.status).toBe(400)
+    expect(session.status).toBe(200)
+    expect(await session.json()).toMatchObject({ environment: { type: 'sandbox', environment_id: env.id } })
     const plain = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -249,6 +252,69 @@ describe('CoreAgent routes on the plugin gateway', () => {
     const body = await session.json() as { id: string }
     const masked = await fetch(`${root}/v1/agents/tools?session_id=${body.id}`)
     expect((await masked.json() as { data: Array<{ name: string }> }).data.map(row => row.name)).toEqual(['web_fetch'])
+  })
+})
+
+describe('sessions on hosted environments', () => {
+  async function harness(extraProviders: SandboxProvider[] = []) {
+    const store = new MemoryStore()
+    const registry = new SandboxRegistry('local')
+    registry.register(createLocalProvider(await tempDir()))
+    for (const provider of extraProviders) registry.register(provider)
+    const api = new AgentsGateway(fakeContext(), openAuthenticator, '/v1', store, new SessionRegistry(), testGatewayOptions(registry))
+    const root = await listen((req, res) => api.handle(req, res))
+    const post = (path: string, body: unknown) => fetch(`${root}/v1${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const session = (environment: unknown) => post('/agents/sessions', { agent: { model: 'deepseek-chat' }, environment })
+    return { store, root, post, session }
+  }
+
+  const noExec: SandboxProvider = {
+    kind: 'files-only',
+    capabilities: { templateFields: ['files'], files: true, exec: false },
+    async create() { return { status: 'connected', workspacePath: '/workspace', handle: { box: 'b1' } } },
+    async status() { return 'connected' },
+    async destroy() {},
+    async listFiles() { return [] },
+    async readFile() { return new Uint8Array() },
+    async writeFile() {},
+  }
+
+  it('provisions an environment from a template or inline fields and uses its directory as the session cwd', async () => {
+    const { post, session, root } = await harness()
+    const template = await (await post('/agents/environments/templates', { files: [{ type: 'inline', path: '/workspace/seed.txt', data: Buffer.from('s').toString('base64') }] })).json() as { id: string }
+    const viaTemplate = await session({ type: 'openai_hosted', environment_template_id: template.id })
+    expect(viaTemplate.status).toBe(200)
+    const body = await viaTemplate.json() as { environment: { type: string; environment_id: string } }
+    expect(body.environment).toMatchObject({ type: 'sandbox' })
+    const env = await (await fetch(`${root}/v1/agents/environments/${body.environment.environment_id}`)).json() as { files: Array<{ path: string }>; session_id: string }
+    expect(env.files.map(f => f.path)).toEqual(['/workspace/seed.txt'])
+    const inline = await session({ type: 'openai_hosted', files: [{ type: 'inline', path: '/workspace/x.txt', data: 'eA==' }] })
+    expect(inline.status).toBe(200)
+  })
+
+  it('keeps a bare openai_hosted environment working, and attaches an existing environment through the sandbox alias', async () => {
+    const { post, session } = await harness()
+    expect((await session({ type: 'openai_hosted' })).status).toBe(200)
+    const env = await (await post('/agents/environments', {})).json() as { id: string }
+    const attached = await session({ type: 'sandbox', environment_id: env.id })
+    expect(attached.status).toBe(200)
+    expect(await attached.json()).toMatchObject({ environment: { type: 'sandbox', environment_id: env.id } })
+    const missing = await session({ type: 'sandbox', environment_id: 'env_missing' })
+    expect(missing.status).toBe(404)
+  })
+
+  it('refuses a provider that cannot run commands, a template it cannot apply, and an unknown provider, with specific codes', async () => {
+    const { post, session } = await harness([noExec])
+    const t = await (await post('/agents/environments/templates', { provider: 'files-only' })).json() as { id: string }
+    const noRun = await session({ type: 'openai_hosted', environment_template_id: t.id })
+    expect(noRun.status).toBe(400)
+    expect(await noRun.json()).toMatchObject({ error: { code: 'sandbox_exec_unavailable', message: expect.stringContaining('files-only') } })
+    const restricted = await session({ type: 'openai_hosted', network: { access: 'disabled' } })
+    expect(restricted.status).toBe(400)
+    expect(await restricted.json()).toMatchObject({ error: { code: 'sandbox_template_unsupported', message: expect.stringContaining('network') } })
+    const unknown = await session({ type: 'openai_hosted', provider: 'nope', files: [] })
+    expect(unknown.status).toBe(400)
+    expect(JSON.stringify(await unknown.json())).toContain('unknown sandbox provider')
   })
 })
 

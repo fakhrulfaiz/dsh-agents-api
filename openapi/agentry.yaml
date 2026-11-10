@@ -2251,6 +2251,7 @@ components:
           type: string
         headers:
           type: object
+          description: Request headers sent to the MCP server. Responses return every value masked as `***` (names are kept); a request that sends `***` to update saved-agent `tools` is rejected with 400 `bad_request`.
           additionalProperties:
             type: string
       required:
@@ -2269,6 +2270,7 @@ components:
             type: string
         env:
           type: object
+          description: Environment variables for the MCP server process. Responses return every value masked as `***` (names are kept); a request that sends `***` to update saved-agent `tools` is rejected with 400 `bad_request`.
           additionalProperties:
             type: string
       required:
@@ -3076,10 +3078,20 @@ components:
       required:
         - type
     OpenAIHostedEnvironment:
+      description: A hosted environment. Alone it uses the default workspace; with `environment_template_id` or any inline template field it provisions an environment through a sandbox provider (400 `sandbox_exec_unavailable` when the provider cannot run tools, 400 `sandbox_template_unsupported` when it cannot apply a field).
       type: object
       properties:
         type:
           const: openai_hosted
+        environment_template_id:
+          type: string
+        provider:
+          type: string
+          description: Extension. Sandbox provider name.
+        image:
+          type: string
+          description: Extension.
+      additionalProperties: true
       required:
         - type
     LocalEnvironment:
@@ -3103,7 +3115,7 @@ components:
           type: string
       required:
         - type
-      description: Sandbox sessions are not provisioned by this gateway.
+      description: Alias kept for earlier clients. With `environment_id` it attaches that environment to the session; with `template_id` it provisions one.
     EnvironmentConfig:
       oneOf:
         - $ref: "#/components/schemas/NoneEnvironment"

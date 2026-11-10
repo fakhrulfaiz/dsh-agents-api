@@ -230,11 +230,17 @@ export interface OAINoneEnvironment {
 }
 
 /**
- * OpenAI-hosted sandbox. This gateway cannot provision that sandbox; it uses
- * the session's default workspace under the configured `workspaces` root instead.
+ * A hosted environment, as the OpenAI Agents API defines it: an optional
+ * `environment_template_id` plus inline template fields (`files`, `env`, `network`,
+ * `packages`, `plugins`, `skills`, `setup_commands`, `capability_directories`) and our
+ * `provider` and `image` extensions. With a template id or any inline field the gateway
+ * provisions an environment through a sandbox provider; a bare `{ type: 'openai_hosted' }`
+ * provisions nothing and uses the session's default workspace under the `workspaces` root.
  */
 export interface OAIOpenAIHostedEnvironment {
   type: 'openai_hosted'
+  environment_template_id?: string
+  [field: string]: unknown
 }
 
 /** Environment accepted on session create. */

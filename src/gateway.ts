@@ -66,7 +66,7 @@ import { absoluteFilePath, parseFileListQuery, parseFileWrite, selectFilePage, t
 import { normalizeTemplateConfig, parseTemplateInput, toSdkTemplate, unsupportedFields } from './environment/template-compat.ts'
 import type { SandboxProvider } from './sandbox/contract.ts'
 import type { SandboxRegistry } from './sandbox/registry.ts'
-import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate } from './environment-types.ts'
+import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, OAISandboxEnvironment } from './environment-types.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SubagentState } from './session-registry.ts'
 import {
@@ -85,6 +85,7 @@ import type {
   OAIFunctionTool,
   OAIHostToolsConfig,
   OAIInputEvent,
+  OAIOpenAIHostedEnvironment,
   OAIRequiredAction,
   OAISessionEvent,
   OAIToolResultInputEvent,
@@ -676,6 +677,7 @@ export class AgentsGateway {
       cwd = workspace.cwd
       environment = workspace.environment
     } catch (error: unknown) {
+      if (error instanceof AgentsApiRequestError) throw error
       throw new AgentsApiRequestError(errorMessage(error), 400, 'bad_request')
     }
     const agentOptions = await this.agentOptionsFor(resolved)
@@ -1398,14 +1400,77 @@ export class AgentsGateway {
       }
       return { cwd: environment.workspace_directory, environment }
     }
-    if (environment?.type === 'sandbox') {
-      throw new Error('sandbox environments are not available')
+    if (environment?.type === 'sandbox' || (environment?.type === 'openai_hosted' && wantsHostedEnvironment(environment))) {
+      return this.sandboxWorkspace(owner, sessionId, environment)
     }
     const cwd = await this.defaultWorkspace(owner, sessionId)
     if (environment === undefined || environment.type === 'none') {
       return { cwd, environment: { type: 'local', workspace_directory: cwd } }
     }
     return { cwd, environment }
+  }
+
+  /**
+   * A session on a sandbox environment. `sandbox` with an `environment_id` attaches that environment;
+   * otherwise (`openai_hosted` with a template id or inline fields, or `sandbox` with a `template_id`)
+   * an environment is provisioned through the template's provider, else the default. The provider must
+   * be able to run the agent's tools (`exec`) and apply every requested template field.
+   */
+  private async sandboxWorkspace(
+    owner: OwnerId,
+    sessionId: string,
+    spec: OAISandboxEnvironment | OAIOpenAIHostedEnvironment,
+  ): Promise<{ cwd: string; environment: OAIEnvironmentConfig }> {
+    const bad = (message: string, code: string, status: 400 | 404 = 400) => new AgentsApiRequestError(message, status, code)
+    const needsExec = (provider: SandboxProvider) => {
+      if (!provider.capabilities.exec) throw bad(`sandbox provider "${provider.kind}" cannot run an agent's tools, so it cannot back a session`, 'sandbox_exec_unavailable')
+    }
+    if (spec.type === 'sandbox' && spec.environment_id !== undefined) {
+      const record = await this.store.environments.get(owner, spec.environment_id)
+      if (record === undefined) throw bad(`environment not found: ${spec.environment_id}`, 'resource_not_found', 404)
+      const provider = this.sandboxes.get(record.provider)
+      if (provider === undefined) throw bad(`sandbox provider "${record.provider}" is not available`, 'bad_request')
+      needsExec(provider)
+      const directory = record.provider_metadata['workspace_directory']
+      if (directory === undefined) throw bad(`environment ${record.id} has no host workspace`, 'sandbox_exec_unavailable')
+      return { cwd: directory, environment: { type: 'sandbox', environment_id: record.id } }
+    }
+    const templateId = spec.type === 'sandbox' ? spec.template_id : typeof spec.environment_template_id === 'string' ? spec.environment_template_id : undefined
+    const template = templateId === undefined ? undefined : await this.store.templates.get(owner, templateId)
+    if (templateId !== undefined && template === undefined) throw bad(`template not found: ${templateId}`, 'resource_not_found', 404)
+    const inline = spec.type === 'openai_hosted' ? parseTemplateInput(spec) : { config: {} }
+    if ('error' in inline) throw bad(inline.error, 'bad_request')
+    let provider: SandboxProvider
+    try {
+      const name = ('provider' in inline ? inline.provider : undefined) ?? template?.provider
+      provider = name !== undefined ? this.sandboxes.require(name) : this.sandboxes.default()
+    } catch (error: unknown) {
+      throw bad(errorMessage(error), 'bad_request')
+    }
+    needsExec(provider)
+    const config = { ...normalizeTemplateConfig(template?.config ?? {}), ...inline.config }
+    const unsupported = unsupportedFields(config, provider)
+    if (unsupported.length > 0) throw bad(`sandbox provider "${provider.kind}" cannot apply template fields: ${unsupported.join(', ')}`, 'sandbox_template_unsupported')
+    const id = `env_${randomUUID().replaceAll('-', '')}`
+    let created: Awaited<ReturnType<SandboxProvider['create']>>
+    try {
+      created = await provider.create(owner, id, { session_id: sessionId, template: config })
+    } catch (error: unknown) {
+      throw bad(errorMessage(error), 'bad_request')
+    }
+    const record: EnvironmentRecord = {
+      id,
+      object: 'environment',
+      status: created.status,
+      provider: provider.kind,
+      provider_metadata: provider.kind === 'local' ? { workspace_directory: created.workspacePath } : { ...created.handle },
+      created_at: Math.floor(Date.now() / 1000),
+      ...(templateId !== undefined ? { template_id: templateId } : {}),
+      session_id: sessionId,
+      ...(created.error !== undefined ? { error: created.error } : {}),
+    }
+    await this.store.environments.create(owner, record)
+    return { cwd: created.workspacePath, environment: { type: 'sandbox', environment_id: id } }
   }
 
   private async defaultWorkspace(owner: OwnerId, sessionId: string): Promise<string> {
@@ -2104,6 +2169,14 @@ function inputEventsFromBody(body: Record<string, unknown>): OAIInputEvent[] {
     return [{ type: 'agent.session.input.message', input: body['input'] } as OAIInputEvent]
   }
   return []
+}
+
+/** Keys of a hosted environment that ask for something to be provisioned (a template or inline template fields). */
+const HOSTED_FIELDS = ['environment_template_id', 'files', 'env', 'network', 'packages', 'plugins', 'skills', 'setup_commands', 'capability_directories', 'provider', 'image'] as const
+
+/** Whether an `openai_hosted` environment names a template or inline fields; a bare one provisions nothing. */
+function wantsHostedEnvironment(environment: OAIOpenAIHostedEnvironment): boolean {
+  return HOSTED_FIELDS.some(field => environment[field] !== undefined && environment[field] !== null)
 }
 
 /**
