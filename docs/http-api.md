@@ -15,6 +15,7 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 | `POST` | `/agents/sessions/{id}/commands/{name}` | Run one Host slash command in a session and answer its outcome. See [Slash commands](#slash-commands) |
 | `POST` `GET` | `/agents/environments/templates` | Create or list environment templates |
 | `GET` `POST` `DELETE` | `/agents/environments/templates/{id}` | Retrieve, update, or delete one template |
+| `GET` | `/agents/environments/runtimes` | Extension. The bundled Node, Python and pnpm versions and Python packages shared by every agent, or `available: false` |
 | `GET` | `/agents/environments/providers` | Extension. List sandbox providers with their capabilities and the default |
 | `POST` `GET` | `/agents/environments` | Create or list environments (`agent.environment`). The default `local` provider makes a directory `<workspaces>/<owner>/<environment_id>/`; `template_id` or `provider` selects another. See [sandbox.md](sandbox.md) |
 | `GET` `DELETE` | `/agents/environments/{id}` | Retrieve (status `failed` when the directory is gone) or delete one environment and its directory |

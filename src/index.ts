@@ -380,6 +380,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth, message => ctx.logger.warn(message)), prefix, undefined, sessionRegistry, {
     sandboxes,
     workspacesRoot: runtime.workspacesRoot,
+    runtimeInfoPath: `${process.env['AGENTRY_OFFICE_RUNTIME'] ?? `${process.env['HOME'] ?? ''}/.dsh/office-runtime/primary-runtime`}/runtime.json`,
     history: createSessionHistory(ctx.sessionQuery),
     approvals,
     schedule: () => ctx.get('schedule'),

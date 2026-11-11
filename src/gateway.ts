@@ -61,6 +61,7 @@ import type { ArtifactS3Config } from './artifacts.ts'
 import { artifactContentDisposition, artifactContentType, getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath } from './artifacts.ts'
 import { directorySegment } from './environment/local.ts'
 import type { CreateEnvironmentInput } from './environment/provider.ts'
+import { readRuntimeInfo } from './environment/runtime-info.ts'
 import { toSdkEnvironment, type SdkEnvironment } from './environment/environment-compat.ts'
 import { absoluteFilePath, parseFileListQuery, parseFileWrite, selectFilePage, type SdkEnvironmentFile } from './environment/file-compat.ts'
 import { normalizeTemplateConfig, parseTemplateInput, toSdkTemplate, unsupportedFields } from './environment/template-compat.ts'
@@ -116,6 +117,8 @@ export interface GatewayOptions {
   sandboxes: SandboxRegistry
   /** Root of `<owner>/<session>/` default session workspaces. */
   workspacesRoot: string
+  /** The bundled runtime payload's `runtime.json`, for `GET /agents/environments/runtimes`; absent means none. */
+  runtimeInfoPath?: string
   /** Reads items, turns, and wire events from the Session log. */
   history: SessionHistory
   /** Pending approvals and questions; the gateway answers, cancels, and deletes through it. */
@@ -165,6 +168,7 @@ export class AgentsGateway {
   /** Resumes in flight, so two requests do not resume one session twice. */
   private readonly resuming = new Map<string, Promise<void>>()
   private readonly sandboxes: SandboxRegistry
+  private readonly runtimeInfoPath: string | undefined
   private readonly workspacesRoot: string
   private readonly history: SessionHistory
   private readonly approvals: ApprovalBridge
@@ -199,6 +203,7 @@ export class AgentsGateway {
   ) {
     if (store !== undefined) this.attachStore(store)
     this.sandboxes = options.sandboxes
+    this.runtimeInfoPath = options.runtimeInfoPath
     this.workspacesRoot = options.workspacesRoot
     this.history = options.history
     this.approvals = options.approvals
@@ -251,6 +256,7 @@ export class AgentsGateway {
       { method: 'GET', pattern: '/agents/environments/templates/:template_id', handler: (_req, res, _url, params, p) => this.getTemplate(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/environments/templates/:template_id', handler: (req, res, _url, params, p) => this.updateTemplate(req, res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/environments/templates/:template_id', handler: (_req, res, _url, params, p) => this.deleteTemplate(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/runtimes', handler: async (_req, res) => { json(res, 200, await readRuntimeInfo(this.runtimeInfoPath)) } },
       { method: 'GET', pattern: '/agents/environments/providers', handler: async (_req, res) => { json(res, 200, { object: 'list', data: this.sandboxes.list().map(({ name, ...rest }) => ({ object: 'sandbox.provider', name, ...rest })) }) } },
       { method: 'POST', pattern: '/agents/environments', handler: (req, res, _url, _params, p) => this.createEnvironment(req, res, p.owner) },
       { method: 'GET', pattern: '/agents/environments', handler: (_req, res, url, _params, p) => this.listEnvironments(res, url, p.owner) },

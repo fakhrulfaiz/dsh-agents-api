@@ -21,6 +21,10 @@ A template field the chosen provider cannot apply is **stored and listed** (`uns
 - A session uses a hosted environment with `environment: { "type": "openai_hosted", "environment_template_id": "..." }` or the same type with inline template fields and `provider`. `environment: { "type": "sandbox", "environment_id": "..." }` attaches an existing one. A provider whose `exec` capability is false answers 400 `sandbox_exec_unavailable`.
 - A bare `{ "type": "openai_hosted" }` provisions nothing and uses the session's default workspace.
 
+## Runtimes
+
+Node, Python and pnpm are not chosen per environment. The host bundles one payload (`~/.dsh/office-runtime/primary-runtime`, or `AGENTRY_OFFICE_RUNTIME`) that every session shares; the `workspace-dependencies` tool tells agents where it is, and the Office skills use it. `GET /agents/environments/runtimes` (extension) reports the versions and Python packages from the payload's `runtime.json`, or `available: false` when there is none. Choosing a different runtime per environment needs a container provider with an `image`.
+
 ## Adding a provider
 
 Implement `SandboxProvider` (`src/sandbox/contract.ts`): `kind`, `capabilities`, and the `EnvironmentProvider` methods (`create`, `status`, `destroy`, `listFiles`, `readFile`, `writeFile`). Register it where `src/index.ts` builds the registry. The bundled `local` provider is the reference: `{ templateFields: ['files'], files: true, exec: true }`.

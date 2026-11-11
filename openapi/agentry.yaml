@@ -807,6 +807,43 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/environments/runtimes:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    get:
+      summary: Bundled script runtimes
+      description: Extension. The Node, Python and pnpm versions (and Python packages) the host ships to every agent, read from the runtime payload's `runtime.json`. `available` is false when the host has none.
+      tags:
+        - Environments
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: sandbox.runtimes
+                  available:
+                    type: boolean
+                  node:
+                    type: string
+                  python:
+                    type: string
+                  pnpm:
+                    type: string
+                  platform:
+                    type: string
+                  python_packages:
+                    type: object
+                    additionalProperties:
+                      type: string
+                required:
+                  - object
+                  - available
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
   /v1/agents/environments/providers:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"

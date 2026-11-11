@@ -279,6 +279,11 @@ describe('sessions on hosted environments', () => {
     async writeFile() {},
   }
 
+  it('reports the bundled runtimes, or that there are none', async () => {
+    const { root } = await harness()
+    expect(await (await fetch(`${root}/v1/agents/environments/runtimes`)).json()).toEqual({ object: 'sandbox.runtimes', available: false })
+  })
+
   it('lists the registered providers with their capabilities and the default', async () => {
     const { root } = await harness([noExec])
     const out = await (await fetch(`${root}/v1/agents/environments/providers`)).json() as { object: string; data: unknown[] }
