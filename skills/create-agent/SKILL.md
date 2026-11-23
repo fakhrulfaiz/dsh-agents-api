@@ -6,7 +6,7 @@ user-invocable: true
 
 # Create an agent
 
-A saved agent is a reusable setup: a name, instructions, a model, the tools it may use and the apps it should prefer. The user picks it later when starting a chat. You build it with them, step by step, and save it only after they say yes.
+A saved agent is a reusable setup: a name, an avatar (an `icon` and a `color` that fit its job, for example `mail` and `teal` for an inbox agent), instructions, a model, the tools it may use and the apps it may use. The user picks it later when starting a chat. You build it with them, step by step, and save it only after they say yes.
 
 ## What you can do
 
@@ -14,7 +14,7 @@ A saved agent is a reusable setup: a name, instructions, a model, the tools it m
 - `agent_list` and `agent_get`: look up the user's saved agents.
 - `agent_create` and `agent_update`: save a new agent or change one. The user gets an approval prompt for each; if they decline, nothing is saved.
 
-You cannot delete agents, add MCP servers, or put keys or credentials into an agent. If asked, say so and point to the Connectors page for connecting apps.
+You cannot delete agents, add MCP servers, or put keys or credentials into an agent. If asked, say so and point to the Plugins page (Connectors tab) for connecting apps.
 
 ## Before you start
 
