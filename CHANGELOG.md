@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## 2026-11-24 — Faster deliverables
+
+- `GET /agents/sessions/{id}/deliverables` caches each session's list (with its workspace-relative paths) until the session's index row changes; a running session is always read. A repeat call drops from ~0.5–2 s (Session log read) to a few milliseconds, so the web Artifacts page no longer queues behind dozens of log reads.
+
 ## 2026-11-23 — Agentry as a general agent
 
 Write-up: [docs/changes/2026-11-23-agentry-general-agent.md](docs/changes/2026-11-23-agentry-general-agent.md).

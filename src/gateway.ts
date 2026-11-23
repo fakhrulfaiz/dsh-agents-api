@@ -43,6 +43,8 @@ import { AGENTRY_PRESET_ID } from './preset.ts'
 import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
 import { sweepStaged, type InstallDeps } from './skills/install.ts'
 import { SkillInstallApi } from './skills/routes.ts'
+import { DeliverablesCache } from './history/deliverables-cache.ts'
+import type { DeliverableEntry } from './history/deliverables.ts'
 import { mountSkillTools } from './skills/tools.ts'
 import { effectiveGrants, validateAppGrants } from './composio-grants.ts'
 import { DEFAULT_APPROVAL_VERBS, mountComposio } from './mount-composio.ts'
@@ -203,6 +205,8 @@ export class AgentsGateway {
   /** Installed-skills folder. */
   private readonly skillsRoot: string
   private readonly skillInstallApi: SkillInstallApi
+  /** Deliverables per session, reused until the session changes. */
+  private readonly deliverablesCache = new DeliverablesCache<DeliverableEntry>(500)
   private readonly skillsGithub: GithubDeps | undefined
   private readonly composio: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
   /** Refresh hooks of live sessions' Agentry skill providers, by owner. */
@@ -2080,11 +2084,17 @@ export class AgentsGateway {
 
   private async listDeliverables(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    if (!await this.requireSession(res, owner, sessionId)) return
-    const workspace = this.sessionRegistry.get(sessionId)?.workspace ?? await this.history.workspace(sessionId)
-    const root = workspace === undefined ? undefined : `${workspace.replace(/\/+$/, '')}/`
-    const data = (await this.history.deliverables(sessionId)).map(entry =>
-      root !== undefined && entry.path.startsWith(root) ? { ...entry, path: entry.path.slice(root.length) } : entry)
+    const row = await this.requireSession(res, owner, sessionId)
+    if (!row) return
+    // A running session can present more files at any moment; otherwise the log is fixed until the row changes.
+    const live = this.sessionRegistry.getOAISession(sessionId)?.status
+    const version = live === 'in_progress' || live === 'requires_action' ? undefined : `${String(row.updatedAt.getTime())}:${row.status}`
+    const data = await this.deliverablesCache.get(sessionId, version, async () => {
+      const workspace = this.sessionRegistry.get(sessionId)?.workspace ?? await this.history.workspace(sessionId)
+      const root = workspace === undefined ? undefined : `${workspace.replace(/\/+$/, '')}/`
+      return (await this.history.deliverables(sessionId)).map(entry =>
+        root !== undefined && entry.path.startsWith(root) ? { ...entry, path: entry.path.slice(root.length) } : entry)
+    })
     json(res, 200, { object: 'list', data })
   }
 
