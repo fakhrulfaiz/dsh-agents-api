@@ -8,6 +8,7 @@
  * column is the insertion time and orders `list`.
  */
 
+import { skillCollection } from './postgres-skills.ts'
 import pg from 'pg'
 import type { OwnerId } from '../auth/authenticator.ts'
 import type { EnvironmentRecord, EnvironmentTemplate } from '../environment-types.ts'
@@ -314,6 +315,7 @@ export async function openPostgresStore(url: string, onIdleClientError?: (error:
     templates: ownedCollection(pool, plainTable<EnvironmentTemplate>('environment_templates')),
     environments: ownedCollection(pool, ENVIRONMENTS),
     files: fileCollection(pool),
+    skills: skillCollection(pool),
     sessions: {
       async insert(row) {
         await pool.query(

@@ -47,3 +47,26 @@ describe('mountAgentInstructions', () => {
     expect(() => mountAgentInstructions(agentCtx, 'be brief')).toThrow(/systemPrompt/)
   })
 })
+
+describe('saved agent identity line', () => {
+  const capture = () => {
+    const sections: Array<{ name: string; order: number; text: string }> = []
+    const agentCtx = {
+      get: (name: string) => name === 'systemPrompt' ? {} : undefined,
+      systemPrompt: { section: (section: { name: string; order: number; text: string }) => { sections.push(section) } },
+    } as unknown as Context
+    return { sections, agentCtx }
+  }
+
+  it('registers the saved agent identity line', () => {
+    const { sections, agentCtx } = capture()
+    mountAgentInstructions(agentCtx, 'Be brief.', 'Research Assistant')
+    expect(sections).toContainEqual({ name: 'agents-api:identity', order: 9, text: 'You are Research Assistant, an agent built on Agentry. When asked who or what you are, introduce yourself as Research Assistant, an agent built on Agentry.' })
+  })
+
+  it('adds no identity section without a name', () => {
+    const { sections, agentCtx } = capture()
+    mountAgentInstructions(agentCtx, 'Be brief.', null)
+    expect(sections.map(s => s.name)).not.toContain('agents-api:identity')
+  })
+})

@@ -13,6 +13,8 @@ import type {
   OAISandboxSessionEnvironment,
 } from './environment-types.ts'
 
+import type { ConnectRequest } from './connect-request.ts'
+
 /** Conversation roles accepted on input messages. */
 export type Role = 'user' | 'assistant' | 'system'
 /** Session lifecycle reported on `agent.session` resources. */
@@ -156,7 +158,31 @@ export interface OAIHostToolCatalogEntry {
 export interface AgentSkill {
   name: string
   description?: string
+  /** Where the skill came from: `builtin`, an install source (`upload`, `github`, `editor`, `chat`), or a Host discovery source such as `bundled`. */
   source?: string
+  /** `builtin` (Agentry's own), `library` (the owner's), `private` (this agent's), or `bundled` (always on, such as `office-*`). */
+  kind: 'builtin' | 'library' | 'private' | 'bundled'
+  /** Installed skill id (`library` and `private` only). */
+  id?: string
+  /** Whether an installed skill includes executable files. */
+  has_scripts?: boolean
+  /** Whether the session's agent (or the default chat, without `session_id`) uses the skill. */
+  enabled: boolean
+}
+
+/** Agentry extension: Composio app grants, toolkit slug to `'all'` or exact tool slugs. */
+export type AgentAppGrants = Record<string, 'all' | string[]>
+
+/**
+ * Agentry extension: which skills a saved agent uses. Absent or `null` uses
+ * every built-in; an explicit selection uses exactly the listed built-ins and
+ * library skills. The agent's private skills always apply.
+ */
+export interface AgentSkillSelection {
+  /** Built-in skill names. */
+  builtin: string[]
+  /** Library skill ids (`skill_…`). */
+  library: string[]
 }
 
 /** One entry of `GET /agents/commands`. */
@@ -180,6 +206,12 @@ export interface OAIAgent {
   metadata: Record<string, string>
   tools: OAIToolConfig[]
   /** DSH extension: Host profile tool allow/deny mask. */
+  /** Agentry extension: Composio app grants; absent or `null` is unrestricted (legacy `metadata.connectors` still read). */
+  apps?: AgentAppGrants | null
+  /** Agentry extension: `ask` (default) approves each write on the user's behalf; `auto` does not ask. */
+  send_policy?: 'ask' | 'auto' | null
+  /** Agentry extension: skill selection; see `AgentSkillSelection`. */
+  skills?: AgentSkillSelection | null
   host_tools?: OAIHostToolsConfig | null
   multi_agent?: OAIMultiAgentConfig | null
   reasoning?: OAIReasoningConfig | null
@@ -194,6 +226,12 @@ export interface CreateAgentParams {
   instructions?: string | null
   metadata?: Record<string, string> | null
   tools?: OAIToolConfig[] | null
+  /** Agentry extension: Composio app grants; absent or `null` is unrestricted (legacy `metadata.connectors` still read). */
+  apps?: AgentAppGrants | null
+  /** Agentry extension: `ask` (default) approves each write on the user's behalf; `auto` does not ask. */
+  send_policy?: 'ask' | 'auto' | null
+  /** Agentry extension: skill selection; see `AgentSkillSelection`. */
+  skills?: AgentSkillSelection | null
   host_tools?: OAIHostToolsConfig | null
   multi_agent?: OAIMultiAgentConfig | null
   reasoning?: OAIReasoningConfig | null
@@ -208,6 +246,12 @@ export interface UpdateAgentParams {
   instructions?: string | null
   metadata?: Record<string, string> | null
   tools?: OAIToolConfig[] | null
+  /** Agentry extension: Composio app grants; absent or `null` is unrestricted (legacy `metadata.connectors` still read). */
+  apps?: AgentAppGrants | null
+  /** Agentry extension: `ask` (default) approves each write on the user's behalf; `auto` does not ask. */
+  send_policy?: 'ask' | 'auto' | null
+  /** Agentry extension: skill selection; see `AgentSkillSelection`. */
+  skills?: AgentSkillSelection | null
   host_tools?: OAIHostToolsConfig | null
   multi_agent?: OAIMultiAgentConfig | null
   reasoning?: OAIReasoningConfig | null
@@ -417,6 +461,8 @@ export interface OAIFunctionCallOutputItem {
   error?: string | null
   status: ToolCallStatus
   turn_id: string
+  /** Agentry extension: a sign-in link for a connected app found in the output; clients show a Connect button. */
+  connect_request?: ConnectRequest
 }
 
 /** Saved MCP tool call. */

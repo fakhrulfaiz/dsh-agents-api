@@ -207,6 +207,63 @@ export interface FileCollection {
 }
 
 /** Agentry's durable storage. Rejections mean the backing database failed, except `InvalidCursorError`. */
+/** Where an installed skill applies: the owner's library, or one saved agent. */
+export type SkillScope = 'library' | 'agent'
+/** How a skill was installed. */
+export type SkillSource = 'upload' | 'github' | 'editor' | 'chat'
+/** GitHub provenance of an imported skill. */
+export interface SkillOrigin {
+  repo: string
+  path: string
+  ref: string
+  /** Resolved commit sha the files came from. */
+  commit: string
+}
+
+/** One installed skill; its files live on disk under the plugin's `skills.dir`. */
+export interface SkillRow {
+  /** `skill_` plus 32 hex characters. */
+  id: string
+  owner: OwnerId
+  scope: SkillScope
+  /** Saved agent id when `scope` is `agent`; otherwise null. */
+  agent_id: string | null
+  name: string
+  description: string
+  source: SkillSource
+  origin: SkillOrigin | null
+  content_hash: string
+  has_scripts: boolean
+  status: 'pending_review' | 'active'
+  /** Epoch seconds. */
+  created_at: number
+  /** Epoch seconds. */
+  updated_at: number
+}
+
+/** A second skill with the same (owner, name). */
+export class SkillNameTakenError extends Error {
+  constructor(name: string) {
+    super(`a skill named "${name}" already exists`)
+    this.name = 'SkillNameTakenError'
+  }
+}
+
+/** Installed skills, owner-scoped. */
+export interface SkillCollection {
+  /** @throws SkillNameTakenError when the owner already has a skill with that name. */
+  insert(row: SkillRow): Promise<void>
+  get(id: string, owner: OwnerId): Promise<SkillRow | undefined>
+  /** @returns the owner's rows matching every given filter, oldest first. */
+  list(owner: OwnerId, filter?: { scope?: SkillScope; agentId?: string; status?: SkillRow['status'] }): Promise<SkillRow[]>
+  /** @returns the updated row, or `undefined` when missing or foreign. */
+  update(id: string, owner: OwnerId, patch: Partial<Pick<SkillRow, 'description' | 'content_hash' | 'has_scripts' | 'status' | 'origin' | 'updated_at'>>): Promise<SkillRow | undefined>
+  /** @returns the removed row, or `undefined` when missing or foreign. */
+  delete(id: string, owner: OwnerId): Promise<SkillRow | undefined>
+  /** Remove every owner's `pending_review` rows last updated before `cutoff` (epoch seconds). */
+  deleteStagedBefore(cutoff: number): Promise<SkillRow[]>
+}
+
 export interface Store {
   /**
    * Record an owner. Idempotent.
@@ -217,6 +274,7 @@ export interface Store {
   templates: OwnedCollection<EnvironmentTemplate>
   environments: OwnedCollection<EnvironmentRecord>
   files: FileCollection
+  skills: SkillCollection
   sessions: {
     /**
      * @param row - new index row; its owner must exist.
@@ -325,7 +383,7 @@ function guard<A extends unknown[], R>(call: (...args: A) => Promise<R>): (...ar
     try {
       return await call(...args)
     } catch (error: unknown) {
-      if (error instanceof InvalidCursorError || error instanceof StoreUnavailableError) throw error
+      if (error instanceof InvalidCursorError || error instanceof StoreUnavailableError || error instanceof SkillNameTakenError) throw error
       throw new StoreUnavailableError(error)
     }
   }
@@ -369,6 +427,22 @@ function guardFiles(files: FileCollection): FileCollection {
 }
 
 /**
+ * Guard every method of the skill collection; `SkillNameTakenError` passes through.
+ * @param skills - skill collection.
+ * @returns the same collection with outage rejections normalized.
+ */
+function guardSkills(skills: SkillCollection): SkillCollection {
+  return {
+    insert: guard(skills.insert.bind(skills)),
+    get: guard(skills.get.bind(skills)),
+    list: guard(skills.list.bind(skills)),
+    update: guard(skills.update.bind(skills)),
+    delete: guard(skills.delete.bind(skills)),
+    deleteStagedBefore: guard(skills.deleteStagedBefore.bind(skills)),
+  }
+}
+
+/**
  * View of `store` whose rejections are `StoreUnavailableError` (or
  * `InvalidCursorError`), so a route handler can answer 503 without knowing
  * the implementation's error types.
@@ -392,6 +466,7 @@ export function guardStore(store: Store): Store {
       ownersOf: guard(sessions.ownersOf.bind(sessions)),
     },
     files: guardFiles(store.files),
+    skills: guardSkills(store.skills),
     audit: guard(store.audit.bind(store)),
     close: () => store.close(),
   }

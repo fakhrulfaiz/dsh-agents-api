@@ -14,6 +14,23 @@ export const AGENTS_API_INSTRUCTIONS_SECTION = 'agents-api:instructions'
  */
 export const AGENTS_API_INSTRUCTIONS_ORDER = 10
 
+/** Section name for a saved agent's self-introduction. */
+export const AGENTS_API_IDENTITY_SECTION = 'agents-api:identity'
+
+/** Orders the identity line just before the wire instructions. */
+export const AGENTS_API_IDENTITY_ORDER = 9
+
+/**
+ * @param name - saved agent name.
+ * @returns the line a saved agent introduces itself with, or `undefined` for no name.
+ */
+export function agentIdentityLine(name: string | null | undefined): string | undefined {
+  const trimmed = name?.trim() ?? ''
+  return trimmed.length > 0
+    ? `You are ${trimmed}, an agent built on Agentry. When asked who or what you are, introduce yourself as ${trimmed}, an agent built on Agentry.`
+    : undefined
+}
+
 /** Section name for the always-on workspace and shell guidance. */
 export const AGENTS_API_GUIDANCE_SECTION = 'agents-api:workspace-guidance'
 
@@ -30,10 +47,12 @@ export const AGENTS_API_GUIDANCE_TEXT = [
  * Register non-empty wire instructions as an agent-scoped system-prompt section.
  * @param agentCtx - agent-scoped Cordis context from `agents.create` setup.
  * @param instructions - Agents API `agent.instructions` value.
+ * @param name - saved agent name; a non-empty name adds the identity line.
  */
 export function mountAgentInstructions(
   agentCtx: Context,
   instructions: string | null | undefined,
+  name?: string | null,
 ): void {
   const text = instructions?.trim() ?? ''
   if (agentCtx.get('systemPrompt') === undefined) {
@@ -41,6 +60,10 @@ export function mountAgentInstructions(
     throw new Error(
       'agent.instructions requires Host ctx.systemPrompt; use a base-backed agents profile',
     )
+  }
+  const identity = agentIdentityLine(name)
+  if (identity !== undefined) {
+    agentCtx.systemPrompt.section({ name: AGENTS_API_IDENTITY_SECTION, order: AGENTS_API_IDENTITY_ORDER, text: identity })
   }
   if (text.length > 0) {
     agentCtx.systemPrompt.section({

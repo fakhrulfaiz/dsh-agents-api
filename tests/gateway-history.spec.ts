@@ -21,6 +21,11 @@ import { MemoryStore } from './support/memory-store.ts'
 import { FakeSessionQuery, logEvent, testGatewayOptions } from './support/fake-session-query.ts'
 import { openAuthenticator } from './open-auth.ts'
 
+vi.mock('@deepseek-ai/dsh-mcp-client', () => ({
+  Config: (input: Record<string, unknown>) => ({ ...input }),
+  name: 'mcp-client',
+}))
+
 const OWNER = ownerId('test')
 const environments = createLocalProvider(join(tmpdir(), 'agentry-gateway-history-spec'))
 const servers: Server[] = []
@@ -40,6 +45,8 @@ interface Process {
   origin: string
   resume: ReturnType<typeof vi.fn<(options: ResumeAgentOptions) => Promise<unknown>>>
   agents: Map<string, { followup: ReturnType<typeof vi.fn>; steer: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn> }>
+  /** Configs passed to `agentCtx.plugin`, in call order. */
+  plugins: unknown[]
   tools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }>
   logger: { warn: ReturnType<typeof vi.fn> }
   /** Called inside `agents.create`, after the agent exists and before it returns. */
@@ -61,6 +68,7 @@ interface Process {
 async function startProcess(store: MemoryStore, query: FakeSessionQuery, failResume?: string, failFollowup = false): Promise<Process> {
   const agents: Process['agents'] = new Map()
   const tools: Process['tools'] = []
+  const plugins: unknown[] = []
   const logger = { warn: vi.fn() }
   const hooks: Process['hooks'] = {}
   const disposers: Process['disposers'] = []
@@ -78,8 +86,8 @@ async function startProcess(store: MemoryStore, query: FakeSessionQuery, failRes
     await setup?.({
       get: (name: string) => name === 'systemPrompt' ? systemPrompt : undefined,
       systemPrompt,
-      plugin: () => Promise.resolve(),
-      tools: { register: (definition: Process['tools'][number]) => { tools.push(definition); return () => undefined }, restrict: () => () => undefined, guard: () => () => undefined },
+      plugin: (_plugin: unknown, config: unknown) => { plugins.push(config); return Promise.resolve() },
+      tools: { register: (definition: Process['tools'][number]) => { if (!definition.name.startsWith('agent_')) tools.push(definition); return () => undefined }, restrict: () => () => undefined, guard: () => () => undefined },
     })
     hooks.duringCreate?.(sessionId)
     const dispose = vi.fn(() => Promise.resolve())
@@ -117,6 +125,7 @@ async function startProcess(store: MemoryStore, query: FakeSessionQuery, failRes
     origin: `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`,
     resume,
     agents,
+    plugins,
     tools,
     logger,
     hooks,
@@ -532,7 +541,7 @@ describe('resume', () => {
     ])
     expect(posted.map(response => response.status)).toEqual([200, 200])
     expect(second.resume).toHaveBeenCalledOnce()
-    expect(second.tools.map(tool => tool.name)).toEqual(['get_weather'])
+    expect(second.tools.map(tool => tool.name).filter(name => !name.startsWith('skill_'))).toEqual(['get_weather'])
     expect(second.agents.get(id)!.followup).toHaveBeenCalledOnce()
 
     // The call parked before the restart was closed by the Session layer; a late result for it is refused.
@@ -599,5 +608,26 @@ describe('session settings', () => {
       metadata: { n: '1' },
     })
     expect((await fetch(`${second.origin}/v1/agents/sessions/${id}`, { method: 'POST', body: JSON.stringify({ agent: { model: '' } }) })).status).toBe(400)
+  })
+})
+
+describe('MCP secrets across restart', () => {
+  it('shows masked values after resume while the resumed agent mounts the real header', async () => {
+    const secret = 'ck_test_secret'
+    const store = new MemoryStore()
+    const query = new FakeSessionQuery()
+    const first = await startProcess(store, query)
+    const tool = { type: 'mcp', server_label: 'composio', transport: { type: 'http', server_url: 'https://example.com/mcp', headers: { 'x-consumer-api-key': secret } } }
+    const id = await createSession(first.origin, { agent: { model: 'deepseek-chat', tools: [tool] } })
+    first.feed(id, logEvent('turn/start', { turn: 1 }, 1))
+
+    const second = await startProcess(store, query)
+    const cold = await (await fetch(`${second.origin}/v1/agents/sessions/${id}`)).text()
+    expect(cold).not.toContain(secret)
+    await second.api.resumeSession((await store.sessions.get(id, 'any'))!)
+    expect(second.plugins[0]).toMatchObject({ serverName: 'composio', headers: { 'x-consumer-api-key': secret } })
+    expect(await (await fetch(`${second.origin}/v1/agents/sessions/${id}`)).text()).not.toContain(secret)
+    const replay = await readStream(await fetch(`${second.origin}/v1/agents/sessions/${id}/events`, { headers: { 'last-event-id': '0' } }), text => frameIds(text).length >= 1)
+    expect(replay).not.toContain(secret)
   })
 })

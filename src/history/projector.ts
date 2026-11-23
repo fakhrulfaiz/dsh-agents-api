@@ -12,6 +12,7 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import { textFromContent, toOAIUsage, parseToolArguments } from '../input.ts'
+import { redactAgentSecrets } from '../redact.ts'
 import { itemsFromEvent, slashCommandItem, type CommandRun } from '../items.ts'
 import type {
   OAIAgent,
@@ -128,7 +129,7 @@ export class WireProjector {
       error: this.error,
       metadata: this.base.metadata,
       vault_ids: this.base.vaultIds,
-      agent: this.base.agent,
+      agent: redactAgentSecrets(this.base.agent),
       environment: this.base.environment,
       required_actions: [...this.#required, ...this.#interaction],
       usage: this.usage,

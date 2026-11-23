@@ -51,6 +51,9 @@ interface FakeAgent {
   model: FakeModel
 }
 
+/** Names of the agent management tools the last fake context saw mounted. */
+const mountedAgentTools: string[] = []
+
 function fakeContext(options?: {
   failCreate?: boolean
   failFollowup?: boolean
@@ -64,6 +67,7 @@ function fakeContext(options?: {
   promptSections: Array<{ name: string; order: number; text: string }>
   pluginCalls: Array<Record<string, unknown>>
 } {
+  mountedAgentTools.length = 0
   const agents = new Map<string, FakeAgent>()
   const sessions = new Map<string, { id: string }>()
   const registeredTools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }> = []
@@ -117,7 +121,9 @@ function fakeContext(options?: {
             },
             tools: {
               register: (definition) => {
-                registeredTools.push(definition)
+                // The agent management tools are mounted on every session; these tests are about wire tools.
+                if (definition.name.startsWith('agent_')) mountedAgentTools.push(definition.name)
+                else registeredTools.push(definition)
                 return () => undefined
               },
               restrict: (filter) => {
@@ -717,6 +723,16 @@ describe('AgentsGateway', () => {
     })).status).toBe(200)
   })
 
+  it('mounts the agent management tools on a new session', async () => {
+    const { base } = gateway()
+    const root = await base
+    expect((await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({ agent: { model: 'deepseek-chat' }, input: 'hi' }),
+    })).status).toBe(200)
+    expect([...mountedAgentTools].sort()).toEqual(['agent_create', 'agent_get', 'agent_list', 'agent_tools', 'agent_update'])
+  })
+
   it('mounts wire function tools and completes them via tool_result', async () => {
     const { base, registry, registeredTools, feed } = gateway()
     const root = await base
@@ -748,7 +764,7 @@ describe('AgentsGateway', () => {
         },
       }),
     })).json() as { id: string }
-    expect(registeredTools.map(tool => tool.name)).toEqual(['get_weather'])
+    expect(registeredTools.map(tool => tool.name).filter(name => !name.startsWith('skill_'))).toEqual(['get_weather'])
 
     feed(created.id, logEvent('turn/start', { turn: 1 }, 1))
     const events: unknown[] = []
@@ -757,7 +773,7 @@ describe('AgentsGateway', () => {
     })
 
     const controller = new AbortController()
-    const wait = registeredTools[0]!.execute(
+    const wait = registeredTools.find(tool => tool.name === 'get_weather')!.execute(
       { city: 'SF' },
       { callId: 'call_weather', signal: controller.signal },
     )
@@ -801,7 +817,7 @@ describe('AgentsGateway', () => {
         },
       }),
     })).json() as { id: string }
-    const wait = registeredTools[0]!.execute({}, {
+    const wait = registeredTools.find(tool => tool.name === 'ping')!.execute({}, {
       callId: 'call_ping',
       signal: new AbortController().signal,
     })
@@ -853,7 +869,7 @@ describe('AgentsGateway', () => {
         environment: { type: 'none' },
       }),
     })).status).toBe(200)
-    expect(restrictCalls).toEqual([{ deny: ['web_search'] }])
+    expect(restrictCalls).toEqual([{ deny: ['web_search', 'plugin_manager'] }])
 
     expect((await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -865,7 +881,7 @@ describe('AgentsGateway', () => {
         environment: { type: 'none' },
       }),
     })).status).toBe(200)
-    expect(restrictCalls.at(-1)).toEqual({ allow: ['web_fetch'], deny: ['web_search'] })
+    expect(restrictCalls.at(-1)).toEqual({ allow: ['web_fetch'], deny: ['web_search', 'plugin_manager'] })
 
     const unknown = await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
@@ -920,6 +936,76 @@ describe('AgentsGateway', () => {
     expect(response.status).toBe(500)
     expect(await response.json()).toMatchObject({
       error: { code: 'agent_create_failed', message: 'The session could not be created' },
+    })
+  })
+
+  describe('MCP secret redaction', () => {
+    const SECRET = 'ck_test_secret'
+    const tools = [
+      { type: 'mcp', server_label: 'composio', transport: { type: 'http', server_url: 'https://example.com/mcp', headers: { 'x-consumer-api-key': SECRET } } },
+      { type: 'mcp', server_label: 'local', required: false, transport: { type: 'stdio', command: 'echo', args: ['hi'], env: { API_KEY: SECRET } } },
+    ]
+
+    it('never returns header or env values from session create, get, list, update, or SSE', async () => {
+      const { base, store, pluginCalls } = gateway()
+      const root = await base
+      const createdResponse = await fetch(`${root}/v1/agents/sessions`, {
+        method: 'POST',
+        body: JSON.stringify({ agent: { model: 'deepseek-chat', tools } }),
+      })
+      const createdText = await createdResponse.text()
+      expect(createdText).not.toContain(SECRET)
+      const created = JSON.parse(createdText) as { id: string; agent: { tools: Array<{ transport: Record<string, unknown> }> } }
+      expect(created.agent.tools[0]?.transport.headers).toEqual({ 'x-consumer-api-key': '***' })
+      expect(created.agent.tools[1]?.transport).toMatchObject({ command: 'echo', args: ['hi'], env: { API_KEY: '***' } })
+
+      expect(await (await fetch(`${root}/v1/agents/sessions/${created.id}`)).text()).not.toContain(SECRET)
+      expect(await (await fetch(`${root}/v1/agents/sessions`)).text()).not.toContain(SECRET)
+      const updated = await fetch(`${root}/v1/agents/sessions/${created.id}`, { method: 'POST', body: JSON.stringify({ metadata: { a: 'b' } }) })
+      expect(await updated.text()).not.toContain(SECRET)
+
+      // Stored config and the mounted client still hold the real values.
+      expect(JSON.stringify((await store.sessions.get(created.id, TEST_OWNER))?.body)).toContain(SECRET)
+      expect(pluginCalls[0]).toMatchObject({ headers: { 'x-consumer-api-key': SECRET } })
+      expect(pluginCalls[1]).toMatchObject({ env: { API_KEY: SECRET } })
+
+      const stream = await fetch(`${root}/v1/agents/sessions`, {
+        method: 'POST',
+        headers: { accept: 'text/event-stream' },
+        body: JSON.stringify({ agent: { model: 'deepseek-chat', tools }, stream: true }),
+      })
+      const reader = stream.body!.getReader()
+      const first = new TextDecoder().decode((await reader.read()).value)
+      await reader.cancel()
+      expect(first).toContain('agent.session.created')
+      expect(first).not.toContain(SECRET)
+    })
+
+    it('masks saved agents on create, get, list, and update and refuses a masked update', async () => {
+      const { base, store } = gateway()
+      const root = await base
+      const created = await (await fetch(`${root}/v1/agents`, {
+        method: 'POST',
+        body: JSON.stringify({ model: 'deepseek-chat', tools }),
+      })).json() as { id: string }
+      const responses = [
+        JSON.stringify(created),
+        await (await fetch(`${root}/v1/agents/${created.id}`)).text(),
+        await (await fetch(`${root}/v1/agents`)).text(),
+        await (await fetch(`${root}/v1/agents/${created.id}`, { method: 'POST', body: JSON.stringify({ name: 'renamed' }) })).text(),
+      ]
+      for (const text of responses) {
+        expect(text).not.toContain(SECRET)
+        expect(text).toContain('***')
+      }
+
+      const echoed = await fetch(`${root}/v1/agents/${created.id}`, {
+        method: 'POST',
+        body: JSON.stringify({ tools: JSON.parse(responses[1]!).tools }),
+      })
+      expect(echoed.status).toBe(400)
+      expect(await echoed.json()).toMatchObject({ error: { code: 'bad_request' } })
+      expect(JSON.stringify(await store.agents.get(TEST_OWNER, created.id))).toContain(SECRET)
     })
   })
 

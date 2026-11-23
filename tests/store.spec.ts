@@ -12,7 +12,7 @@ import type { SessionConfig } from '../src/types.ts'
 import { materializeAgent } from '../src/agent-records.ts'
 import { migrate } from '../src/store/migrate.ts'
 import { openPostgresStore } from '../src/store/postgres.ts'
-import { guardStore, InvalidCursorError, StoreUnavailableError, type FileRow, type SessionIndexRow, type Store } from '../src/store/store.ts'
+import { guardStore, InvalidCursorError, SkillNameTakenError, StoreUnavailableError, type FileRow, type SessionIndexRow, type SkillRow, type Store } from '../src/store/store.ts'
 import { MemoryStore } from './support/memory-store.ts'
 import { startPostgres, type TestPostgres } from './support/postgres.ts'
 
@@ -46,7 +46,7 @@ const harnesses: Array<[string, Harness]> = [
       const client = new pg.Client({ connectionString: await contractUrl() })
       await client.connect()
       try {
-        await client.query('truncate admin_audit, files, sessions, environments, environment_templates, agents, owners')
+        await client.query('truncate admin_audit, skills, files, sessions, environments, environment_templates, agents, owners')
       } finally {
         await client.end()
       }
@@ -372,19 +372,19 @@ describe.each(harnesses)('Store contract (%s)', (_name, harness) => {
 describe('Postgres migrations', () => {
   it('migrations apply from empty', async () => {
     const url = await postgres!.createDatabase('empty')
-    expect(await migrate(url)).toEqual({ applied: ['0001-initial.sql', '0002-session-config.sql', '0003-files.sql'] })
+    expect(await migrate(url)).toEqual({ applied: ['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql'] })
     expect(await migrate(url)).toEqual({ applied: [] })
   })
 
   it('migrations are idempotent under concurrent start', async () => {
     const url = await postgres!.createDatabase('concurrent')
     const results = await Promise.all([migrate(url), migrate(url)])
-    expect(results.flatMap(result => result.applied)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql'])
+    expect(results.flatMap(result => result.applied)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql'])
     const client = new pg.Client({ connectionString: url })
     await client.connect()
     try {
       const rows = await client.query<{ name: string }>('select name from schema_migrations')
-      expect(rows.rows.map(row => row.name)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql'])
+      expect(rows.rows.map(row => row.name)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql'])
     } finally {
       await client.end()
     }
@@ -398,7 +398,7 @@ describe('Postgres migrations', () => {
         "select table_name from information_schema.tables where table_schema = 'public' order by table_name",
       )
       expect(tables.rows.map(row => row.table_name)).toEqual([
-        'admin_audit', 'agents', 'environment_templates', 'environments', 'files', 'owners', 'schema_migrations', 'sessions',
+        'admin_audit', 'agents', 'environment_templates', 'environments', 'files', 'owners', 'schema_migrations', 'sessions', 'skills',
       ])
       const indexes = await client.query<{ indexdef: string }>(
         "select indexdef from pg_indexes where schemaname = 'public' and indexname like '%\\_idx' order by indexname",
@@ -411,6 +411,8 @@ describe('Postgres migrations', () => {
         '(owner_id, status, created_at)',
         '(owner_id, created_at DESC)',
         '(status)',
+        '(owner_id, scope, agent_id)',
+        '(status, updated_at)',
       ])
     } finally {
       await client.end()
@@ -431,5 +433,84 @@ describe('guardStore', () => {
     const store = new MemoryStore()
     store.sessions.ownersOf = () => Promise.reject(new Error('connection refused'))
     await expect(guardStore(store).sessions.ownersOf(['sess_1'])).rejects.toBeInstanceOf(StoreUnavailableError)
+  })
+})
+
+/** A skill row for owner `owner`; `name` must be unique per owner. */
+function skillRow(owner: OwnerId, name: string, extra: Partial<SkillRow> = {}): SkillRow {
+  return {
+    id: `skill_${name.replaceAll('-', '').padEnd(32, '0').slice(0, 32)}`,
+    owner, scope: 'library', agent_id: null, name, description: `${name} skill`, source: 'upload', origin: null,
+    content_hash: 'h', has_scripts: false, status: 'active', created_at: 1_000, updated_at: 1_000, ...extra,
+  }
+}
+
+describe.each(harnesses)('Skill store (%s)', (_name, harness) => {
+  it('insert then get round-trips every field', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    const row = skillRow(A, 'alpha', { scope: 'agent', agent_id: 'agent_x', source: 'github', origin: { repo: 'o/r', path: 'skills/alpha', ref: 'main', commit: 'abc' }, has_scripts: true, status: 'pending_review' })
+    await store.skills.insert(row)
+    expect(await store.skills.get(row.id, A)).toEqual(row)
+  })
+
+  it('owner isolation', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    await store.ensureOwner(B)
+    const row = skillRow(A, 'beta')
+    await store.skills.insert(row)
+    expect(await store.skills.get(row.id, B)).toBeUndefined()
+    expect(await store.skills.list(B)).toEqual([])
+    expect(await store.skills.update(row.id, B, { description: 'x' })).toBeUndefined()
+    expect(await store.skills.delete(row.id, B)).toBeUndefined()
+  })
+
+  it('list filters by scope, agent and status', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    await store.skills.insert(skillRow(A, 'lib-one'))
+    await store.skills.insert(skillRow(A, 'priv-one', { scope: 'agent', agent_id: 'agent_1' }))
+    await store.skills.insert(skillRow(A, 'priv-two', { scope: 'agent', agent_id: 'agent_2', status: 'pending_review' }))
+    expect((await store.skills.list(A, { scope: 'library' })).map(r => r.name)).toEqual(['lib-one'])
+    expect((await store.skills.list(A, { agentId: 'agent_1' })).map(r => r.name)).toEqual(['priv-one'])
+    expect((await store.skills.list(A, { status: 'pending_review' })).map(r => r.name)).toEqual(['priv-two'])
+    expect((await store.skills.list(A)).map(r => r.name).sort()).toEqual(['lib-one', 'priv-one', 'priv-two'])
+  })
+
+  it('update patches fields; delete returns the row', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    const row = skillRow(A, 'gamma', { status: 'pending_review' })
+    await store.skills.insert(row)
+    const updated = await store.skills.update(row.id, A, { status: 'active', description: 'new', updated_at: 2_000 })
+    expect(updated).toEqual({ ...row, status: 'active', description: 'new', updated_at: 2_000 })
+    expect(await store.skills.delete(row.id, A)).toEqual(updated)
+    expect(await store.skills.get(row.id, A)).toBeUndefined()
+  })
+
+  it('a concurrent duplicate name: one insert wins, the other is SkillNameTakenError', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    const results = await Promise.allSettled([
+      store.skills.insert(skillRow(A, 'dup', { id: 'skill_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1' })),
+      store.skills.insert(skillRow(A, 'dup', { id: 'skill_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2' })),
+    ])
+    expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1)
+    const rejected = results.find(r => r.status === 'rejected')
+    expect(rejected?.status === 'rejected' && rejected.reason).toBeInstanceOf(SkillNameTakenError)
+  })
+
+  it('deleteStagedBefore removes only old pending rows, across owners', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    await store.ensureOwner(B)
+    await store.skills.insert(skillRow(A, 'old-pending', { status: 'pending_review', updated_at: 100 }))
+    await store.skills.insert(skillRow(B, 'old-pending-b', { status: 'pending_review', updated_at: 100 }))
+    await store.skills.insert(skillRow(A, 'new-pending', { status: 'pending_review', updated_at: 5_000 }))
+    await store.skills.insert(skillRow(A, 'old-active', { status: 'active', updated_at: 100 }))
+    const removed = await store.skills.deleteStagedBefore(1_000)
+    expect(removed.map(r => r.name).sort()).toEqual(['old-pending', 'old-pending-b'])
+    expect((await store.skills.list(A)).map(r => r.name).sort()).toEqual(['new-pending', 'old-active'])
   })
 })

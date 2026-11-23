@@ -13,7 +13,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type { ScheduleService } from '@deepseek-ai/dsh-schedule'
-import type { SkillSummary, SkillViewOptions } from '@deepseek-ai/dsh-skill'
+import type { SkillProvider, SkillProviderControl, SkillSummary, SkillViewOptions } from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-tools'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
@@ -39,6 +39,16 @@ import {
 import { fileIdsFromInput, overlayAgent, parseApprovalResponse, userTextFromInput } from './input.ts'
 import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
 import { mountAgentInstructions } from './mount-instructions.ts'
+import { AGENTRY_PRESET_ID } from './preset.ts'
+import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
+import { sweepStaged, type InstallDeps } from './skills/install.ts'
+import { SkillInstallApi } from './skills/routes.ts'
+import { mountSkillTools } from './skills/tools.ts'
+import { effectiveGrants, validateAppGrants } from './composio-grants.ts'
+import { DEFAULT_APPROVAL_VERBS, mountComposio } from './mount-composio.ts'
+import type { GithubDeps } from './skills/github.ts'
+import { resolveAgentSkills, validateSkillSelection, type BuiltinSkill } from './skills/resolve.ts'
+import { mountAgentTools } from './mount-agent-tools.ts'
 import { mountScheduleGuidance } from './mount-schedule-guidance.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
@@ -55,6 +65,7 @@ import { SessionRegistry } from './session-registry.ts'
 import { WireProjector, type ProjectionBase } from './history/projector.ts'
 import type { SessionHistory } from './history/session-history.ts'
 import { NO_STORED_CONFIG } from './recovery.ts'
+import { findMaskedSecret, MASKED_SECRET, redactAgentSecrets } from './redact.ts'
 import { applySessionUpdate, baseOf, configOf, sessionFromRow } from './session-resource.ts'
 import { writeEvent, writeSSEHeaders } from './sse.ts'
 import type { ArtifactS3Config } from './artifacts.ts'
@@ -133,6 +144,18 @@ export interface GatewayOptions {
   commands: () => CommandService | undefined
   /** Milliseconds the command catalog is cached (`commands.cacheTtlSeconds` * 1000). */
   commandsTtlMs: number
+  /** Slash commands Agentry exposes (`commands.allow`); `undefined` exposes every Host command. */
+  commandsAllow?: readonly string[]
+  /** Agentry's built-in skills, loaded at plugin start; absent means none. */
+  builtinSkills?: () => readonly BuiltinSkill[]
+  /** Folder of installed skills (`skills.dir`); absent disables the Agentry skill provider's installed skills. */
+  skillsRoot?: string
+  /** Composio grant enforcement and send approvals (`composio` config). */
+  composio?: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
+  /** GitHub endpoints for skill imports (tests point it at a fake). */
+  skillsGithub?: GithubDeps
+  /** Host skill discovery sources hidden from the catalog (developer folders). */
+  skillsHiddenSources?: readonly string[]
   artifacts?: ArtifactS3Config
   /** Staging bytes and limits for `/agents/files`; absent when `uploads.dir` is not configured (uploads answer 501). */
   files?: FilesRuntime
@@ -175,6 +198,17 @@ export class AgentsGateway {
   private readonly schedule: () => ScheduleService | undefined
   private readonly artifacts: ArtifactS3Config | undefined
   private readonly routes: Route[]
+  /** Agentry built-in skills. */
+  private readonly builtinSkills: () => readonly BuiltinSkill[]
+  /** Installed-skills folder. */
+  private readonly skillsRoot: string
+  private readonly skillInstallApi: SkillInstallApi
+  private readonly skillsGithub: GithubDeps | undefined
+  private readonly composio: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
+  /** Refresh hooks of live sessions' Agentry skill providers, by owner. */
+  readonly skillInvalidations = new SkillInvalidations()
+  /** Commands Agentry exposes; `undefined` exposes all. */
+  private readonly commandsAllow: ReadonlySet<string> | undefined
   private readonly commandsApi: CommandsApi
   private readonly ingest: AttachmentIngest
   private readonly commands: () => CommandService | undefined
@@ -216,17 +250,33 @@ export class AgentsGateway {
       discardSession: (owner, sessionId) => this.discardSession(owner, sessionId),
       warn: message => this.ctx.logger.warn(message),
     })
+    this.builtinSkills = options.builtinSkills ?? (() => [])
+    this.skillsRoot = options.skillsRoot ?? ''
+    this.skillsGithub = options.skillsGithub
+    this.composio = options.composio ?? { serverLabel: 'composio', approvalVerbs: DEFAULT_APPROVAL_VERBS, approvalSlugs: [] }
+    this.skillInstallApi = new SkillInstallApi(this.installDeps(), options.skillsGithub)
     const skillsApi = new SkillsApi({
       skills: options.skills,
       resolveTarget: (owner, sessionId) => this.resolveSkillTarget(owner, sessionId),
       ttlMs: options.skillsTtlMs,
       warn: message => this.ctx.logger.warn(message),
+      ...(options.skillsHiddenSources ? { hiddenSources: new Set(options.skillsHiddenSources) } : {}),
+      installed: owner => this.store.skills.list(owner, { status: 'active' }),
+      defaultChat: async (owner) => {
+        const resolved = await resolveAgentSkills({ agent: undefined, owner, store: this.store, builtins: this.builtinSkills() })
+        return [
+          ...resolved.builtins.map(b => ({ name: b.name, description: b.description, source: 'builtin', kind: 'builtin' as const, enabled: true })),
+          ...resolved.installed.map(r => ({ name: r.name, description: r.description, source: r.source, kind: 'library' as const, id: r.id, has_scripts: r.has_scripts, enabled: true })),
+        ]
+      },
     })
     this.commands = options.commands
+    this.commandsAllow = options.commandsAllow ? new Set(options.commandsAllow) : undefined
     this.commandsApi = new CommandsApi({
       commands: options.commands,
       resolveTarget: (owner, sessionId) => this.resolveCommandTarget(owner, sessionId),
       ttlMs: options.commandsTtlMs,
+      ...(this.commandsAllow ? { allow: this.commandsAllow } : {}),
       warn: message => this.ctx.logger.warn(message),
     })
     const attachments = options.attachments ?? (() => undefined)
@@ -286,6 +336,7 @@ export class AgentsGateway {
       { method: 'GET', pattern: '/agents/sessions/:session_id', handler: (_req, res, _url, params, p) => this.getSession(res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/sessions/:session_id', handler: (_req, res, _url, params, p) => this.deleteSession(res, params, p.owner) },
       ...scheduleApi.routes(),
+      ...this.skillInstallApi.routes(),
       ...skillsApi.routes(),
       ...this.commandsApi.routes(),
       ...filesApi.routes(),
@@ -419,11 +470,17 @@ export class AgentsGateway {
       badRequest(res, hostToolsError)
       return
     }
-    json(res, 200, await this.store.agents.create(owner, materializeAgent(body)))
+    const skillsError = this.validateAgentExtensions(body)
+    if (skillsError) {
+      badRequest(res, skillsError)
+      return
+    }
+    json(res, 200, redactAgentSecrets(await this.store.agents.create(owner, materializeAgent(body))))
   }
 
   private async listAgents(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
-    json(res, 200, await this.store.agents.list(owner, listQuery(url)))
+    const page = await this.store.agents.list(owner, listQuery(url))
+    json(res, 200, { ...page, data: page.data.map(redactAgentSecrets) })
   }
 
   private async listHostTools(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
@@ -458,7 +515,7 @@ export class AgentsGateway {
           acquireScope?: (id?: string) => Promise<{ key: Parameters<Context['tools']['schemas']>[0] } & AsyncDisposable>
         } | undefined
         if (presets !== undefined && typeof presets.acquireScope === 'function') {
-          const lease = await presets.acquireScope()
+          const lease = await presets.acquireScope(AGENTRY_PRESET_ID)
           try {
             return this.ctx.tools.schemas(lease.key)
           } finally {
@@ -496,7 +553,7 @@ export class AgentsGateway {
       acquireScope?: (id?: string) => Promise<{ key: SkillViewOptions['scope'] } & AsyncDisposable>
     } | undefined
     if (typeof presets?.acquireScope !== 'function') return { scope: undefined, cwd }
-    const lease = await presets.acquireScope()
+    const lease = await presets.acquireScope(AGENTRY_PRESET_ID)
     return { scope: lease.key, cwd, release: () => lease[Symbol.asyncDispose]() }
   }
 
@@ -516,7 +573,7 @@ export class AgentsGateway {
       acquireScope?: (id?: string) => Promise<{ key: object } & AsyncDisposable>
     } | undefined
     if (typeof presets?.acquireScope !== 'function') return { scope: undefined }
-    const lease = await presets.acquireScope()
+    const lease = await presets.acquireScope(AGENTRY_PRESET_ID)
     return { scope: lease.key, release: () => lease[Symbol.asyncDispose]() }
   }
 
@@ -532,7 +589,7 @@ export class AgentsGateway {
       notFound(res, `Agent "${agentId}" not found`)
       return
     }
-    json(res, 200, agent)
+    json(res, 200, redactAgentSecrets(agent))
   }
 
   private async updateAgent(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -544,6 +601,11 @@ export class AgentsGateway {
         badRequest(res, toolError)
         return
       }
+      const masked = findMaskedSecret(body.tools)
+      if (masked !== undefined) {
+        badRequest(res, `${masked} is the redacted placeholder "${MASKED_SECRET}"; send the real value or omit "tools" to keep the stored ones`)
+        return
+      }
     }
     if (body.host_tools !== undefined) {
       const hostToolsError = validateHostTools(body.host_tools)
@@ -552,13 +614,19 @@ export class AgentsGateway {
         return
       }
     }
+    const skillsError = this.validateAgentExtensions(body)
+    if (skillsError) {
+      badRequest(res, skillsError)
+      return
+    }
     const existing = await this.store.agents.get(owner, agentId)
     const updated = existing === undefined ? undefined : await this.store.agents.update(owner, agentId, updatedAgent(existing, body))
+    if (updated !== undefined) this.skillInvalidations.invalidate(owner)
     if (!updated) {
       notFound(res, `Agent "${agentId}" not found`)
       return
     }
-    json(res, 200, updated)
+    json(res, 200, redactAgentSecrets(updated))
   }
 
   private async deleteAgent(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -720,7 +788,7 @@ export class AgentsGateway {
         sessionId,
         meta: { cwd },
         agentOptions,
-        setup: this.buildAgentSetup(resolved, pending, cwd),
+        setup: this.buildAgentSetup(resolved, pending, cwd, owner),
       })
       this.handles.set(sessionId, handle)
       this.pendingBySession.set(sessionId, pending)
@@ -983,7 +1051,7 @@ export class AgentsGateway {
       return
     }
     const commands = this.commands()
-    if (commands === undefined || !COMMAND_NAME.test(name)) {
+    if (commands === undefined || !COMMAND_NAME.test(name) || (this.commandsAllow !== undefined && !this.commandsAllow.has(name))) {
       commandNotFound(res, name)
       return
     }
@@ -1245,6 +1313,68 @@ export class AgentsGateway {
     }
   }
 
+  /** @returns what skill installs need; the store is read at call time (it opens after the gateway). */
+  installDeps(): InstallDeps {
+    const gateway = this
+    return {
+      get store() { return gateway.store },
+      root: this.skillsRoot,
+      reserved: () => new Set(this.builtinSkills().map(b => b.name)),
+      invalidate: owner => { this.skillInvalidations.invalidate(owner) },
+    }
+  }
+
+  /** Delete skills left in review for more than a day. */
+  async sweepSkills(): Promise<void> {
+    try {
+      await sweepStaged(this.installDeps(), Math.floor(Date.now() / 1000))
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`agents-api: skill sweep failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * @param value - a request's `skills` field.
+   * @returns an error message, or `undefined` when valid.
+   */
+  validateSkills(value: unknown): string | undefined {
+    return validateSkillSelection(value, new Set(this.builtinSkills().map(b => b.name)))
+  }
+
+  /**
+   * @param body - agent create or update body.
+   * @returns an error message for Agentry's extension fields (`skills`, `apps`, `send_policy`), or `undefined`.
+   */
+  validateAgentExtensions(body: { skills?: unknown; apps?: unknown; send_policy?: unknown }): string | undefined {
+    const policy = body.send_policy
+    if (policy !== undefined && policy !== null && policy !== 'ask' && policy !== 'auto') return 'send_policy must be "ask", "auto", or null'
+    return this.validateSkills(body.skills) ?? validateAppGrants(body.apps)
+  }
+
+  /**
+   * Register the agent-scoped `agentry` skill provider. It re-reads the saved
+   * agent's selection on every catalog read, so edits apply to live sessions;
+   * an agent that is not saved (the default chat) gets the default-chat set.
+   * @param agentCtx - agent-scoped context.
+   * @param agentId - session agent id.
+   * @param owner - session owner.
+   */
+  private mountAgentrySkills(agentCtx: Context, agentId: string, owner: OwnerId): void {
+    const registry = (agentCtx as { get?: (name: string) => unknown }).get?.call(agentCtx, 'skills') as
+      { registerProvider?: (create: (control: SkillProviderControl) => SkillProvider) => () => void } | undefined
+    if (typeof registry?.registerProvider !== 'function') return
+    const create = createAgentrySkillProvider({
+      root: this.skillsRoot,
+      resolve: async () => resolveAgentSkills({ agent: await this.store.agents.get(owner, agentId), owner, store: this.store, builtins: this.builtinSkills() }),
+    })
+    const unregister = registry.registerProvider((control) => {
+      const forget = this.skillInvalidations.add(owner, control.invalidate)
+      control.signal.addEventListener('abort', forget, { once: true })
+      return create(control)
+    })
+    ;(agentCtx as { effect?: (fn: () => () => void) => void }).effect?.(() => unregister)
+  }
+
   /**
    * Agent composition shared by create and resume.
    * @param resolved - session agent.
@@ -1252,17 +1382,56 @@ export class AgentsGateway {
    * @param cwd - session working directory.
    * @returns the `agents.create` / `agents.resume` setup callback.
    */
-  private buildAgentSetup(resolved: OAIAgent, pending: PendingFunctionCalls, cwd: string): AgentSetup {
+  private buildAgentSetup(resolved: OAIAgent, pending: PendingFunctionCalls, cwd: string, owner: OwnerId): AgentSetup {
     const functionTools = resolved.tools.filter(
       (tool): tool is OAIFunctionTool => tool.type === 'function',
     )
     return async (agentCtx) => {
       await mountDefaultPreset(agentCtx)
-      mountAgentInstructions(agentCtx, resolved.instructions)
+      this.mountAgentrySkills(agentCtx, resolved.id, owner)
+      mountAgentInstructions(agentCtx, resolved.instructions, resolved.name)
+      // Mounted before the mask so an agent's `host_tools` can hide the agent tools.
+      mountAgentTools(agentCtx, {
+        owner,
+        store: this.store,
+        defaultModel: resolved.model,
+        // What the agent can really call: its own scope (preset tools plus this session's MCP and wire tools).
+        // Without the agent, the default preset's catalog (the model-facing tools are not in the global registry).
+        listTools: async (agent) => maskHostCatalog(
+          (agent !== undefined
+            ? this.ctx.tools.schemas(agent as Parameters<Context['tools']['schemas']>[0])
+            : await this.hostToolSchemas()
+          ).map(schema => ({ name: schema.name, description: schema.description })),
+          resolved.host_tools,
+        ),
+        callerGrants: effectiveGrants(resolved),
+        builtinSkills: () => new Set(this.builtinSkills().map(b => b.name)),
+        checkModel: async (model) => {
+          try {
+            await this.ctx.llm.resolveCallConfig({ ...(await this.agentOptionsFor({ ...resolved, model })) })
+            return undefined
+          } catch {
+            return `model "${model}" is not available`
+          }
+        },
+      })
+      mountSkillTools(agentCtx, {
+        owner,
+        deps: this.installDeps(),
+        agentId: async () => (await this.store.agents.get(owner, resolved.id))?.id,
+        ...(this.skillsGithub ? { github: this.skillsGithub } : {}),
+      })
       applyHostToolsRestrict(agentCtx, resolved.host_tools)
       mountScheduleGuidance(agentCtx)
       mountFunctionTools(agentCtx, functionTools, pending)
       await mountMcpTools(agentCtx, mcpToolsFrom(resolved.tools), cwd)
+      mountComposio(agentCtx, {
+        grants: effectiveGrants(resolved),
+        approvalVerbs: new Set(this.composio.approvalVerbs),
+        approvalSlugs: new Set(this.composio.approvalSlugs),
+        sendPolicy: resolved.send_policy ?? 'ask',
+        serverLabel: this.composio.serverLabel,
+      })
     }
   }
 
@@ -1285,7 +1454,7 @@ export class AgentsGateway {
       const handle = await this.ctx.agents.resume({
         resumeSessionId: SessionId(row.id),
         agentOptions: await this.agentOptionsFor(config.agent),
-        setup: this.buildAgentSetup(config.agent, pending, cwd),
+        setup: this.buildAgentSetup(config.agent, pending, cwd, row.ownerId),
       })
       if (await this.store.sessions.get(row.id, 'any') === undefined) {
         // Deleted while the resume was in flight: undo it.
@@ -2149,17 +2318,17 @@ async function providerForModel(ctx: Context, model: string, fallback: string): 
  * A profile without `agentPresets` keeps the global tool layer.
  * @param agentCtx - agent-scoped context from `agents.create` setup.
  */
-async function mountDefaultPreset(agentCtx: Context): Promise<void> {
+async function mountDefaultPreset(agentCtx: Context, id: string = AGENTRY_PRESET_ID): Promise<void> {
   const get = (agentCtx as { get?: (name: string) => unknown }).get
   if (typeof get !== 'function') return
-  let presets: { mount?: (ctx: Context) => Promise<unknown> } | undefined
+  let presets: { mount?: (ctx: Context, id?: string) => Promise<unknown> } | undefined
   try {
     presets = get.call(agentCtx, 'agentPresets') as typeof presets
   } catch {
     return
   }
   if (presets === undefined || typeof presets.mount !== 'function') return
-  await presets.mount(agentCtx)
+  await presets.mount(agentCtx, id)
 }
 
 /**

@@ -244,11 +244,13 @@ A turn that was open when the server stopped is closed after the restart: its `f
 
 Known gap: the `session` objects inside replayed events show the session's current configuration, not the configuration at the time of the event, because configuration changes are not in the Session log. Subagent turns and items are in memory only and are lost on restart.
 
-MCP tool `headers` supplied in `agent.tools` (which may carry credentials) are stored as part of the agent and session configuration in Postgres (`agents.body`, `sessions.body`) at rest.
+MCP tool `headers` and stdio `env` values supplied in `agent.tools` (which may carry credentials) are returned masked as `***` by all session and saved-agent responses and SSE events, and are stored as part of the agent and session configuration in Postgres (`agents.body`, `sessions.body`) at rest.
 
 A session that is not live after a restart is resumed from its Session log when an input event is posted to it. A session created before migration 0002 has no stored setup and answers 409 `session_not_resumable`; a resume failure answers 500 `session_resume_failed`.
 
 `GET /agents/tools` returns the live Host profile catalog from `ctx.tools.schemas()` (not wire function tools). The DSH extension field `host_tools: { allow?: string[], deny?: string[] }` on create/update agent or session `agent` overlays maps to `agentCtx.tools.restrict()` at session create: omit or `null` keeps every Host tool; `deny` hides named Host tools; `allow` keeps only those names; both may combine under Host intersect rules. Empty `host_tools: {}` is rejected. Unknown names fail when restrict runs. Wire `agent.tools` stay additive and are not removed by `host_tools`.
+
+Every session also mounts five owner-scoped agent management tools. They are agent-scoped, so like wire function tools they do not appear in `GET /agents/tools`, but an agent's `host_tools` mask can hide them: `agent_tools` (tools visible to the session plus the MCP servers behind them), `agent_list`, `agent_get`, `agent_create` and `agent_update`. The two write tools ask the user for approval (a normal `approval` required action). A model cannot pass wire tools, credentials or URLs to them; `tools_allow` must name Host tools the session can see and never an `agent_*` tool; created or updated agents always get `host_tools.deny` containing `agent_create` and `agent_update` unless the owner's agent already allowed them; an owner may have at most 100 saved agents. The `create-agent` skill (`skills/create-agent/SKILL.md`, mounted through a second filesystem skill provider named `agentry`) guides a model through them. Design: `docs/superpowers/specs/2026-11-10-agent-management-tools-design.md`.
 
 ### Host scheduler key (`prepare` failures)
 

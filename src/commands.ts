@@ -58,6 +58,8 @@ export interface CommandsApiDeps {
   resolveTarget: (owner: OwnerId, sessionId: string) => Promise<CommandTarget | undefined>
   /** Milliseconds a loaded catalog is served without calling `list()` again; 0 disables the cache. */
   ttlMs: number
+  /** Command names the catalog may list; `undefined` lists every command. */
+  allow?: ReadonlySet<string>
   /** Report a failed `list()`; the response carries a generic message. */
   warn: (message: string) => void
   /** Clock in epoch milliseconds, injectable in tests. */
@@ -186,7 +188,7 @@ export class CommandsApi {
     const generation = this.#generation
     const flight = Promise.resolve()
       .then(() => {
-        const loaded = serialize(service.list(target.scope as Agent).map(toWireCommand))
+        const loaded = serialize(service.list(target.scope as Agent).filter(c => this.deps.allow?.has(c.name) ?? true).map(toWireCommand))
         if (this.deps.ttlMs > 0) this.#loaded.set(key, { ...loaded, expiresAt: now() + this.deps.ttlMs, generation })
         return loaded
       })

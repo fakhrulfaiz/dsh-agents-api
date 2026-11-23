@@ -14,7 +14,7 @@ describe('dsh-agents-api bundle', () => {
       dsh?: { bundle?: { patch?: string } }
     }
     expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
-    expect(manifest.dependencies).toEqual({ busboy: expect.any(String), jose: expect.any(String), pg: expect.any(String) })
+    expect(manifest.dependencies).toEqual({ busboy: expect.any(String), fflate: expect.any(String), jose: expect.any(String), pg: expect.any(String), yaml: expect.any(String) })
     const patch = readFileSync(resolve(root, 'cordis.patch.yml'), 'utf8')
     expect(patch).not.toContain('- id: webserver')
     expect(patch).toContain('id: agents-api')

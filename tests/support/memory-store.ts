@@ -8,6 +8,9 @@ import type { EnvironmentRecord, EnvironmentTemplate } from '../../src/environme
 import type { ListQuery } from '../../src/http.ts'
 import {
   RESUMABLE_STATUSES,
+  SkillNameTakenError,
+  type SkillCollection,
+  type SkillRow,
   type FileCollection,
   type FileRow,
   decodeSessionCursor,
@@ -55,6 +58,43 @@ export class MemoryStore implements Store {
   readonly agents: OwnedCollection<OAIAgent> = this.#collection<OAIAgent>()
   readonly templates: OwnedCollection<EnvironmentTemplate> = this.#collection<EnvironmentTemplate>()
   readonly environments: OwnedCollection<EnvironmentRecord> = this.#collection<EnvironmentRecord>()
+
+  readonly #skills = new Map<string, SkillRow>()
+
+  readonly skills: SkillCollection = {
+    insert: (row) => {
+      if (this.#skills.has(row.id)) return Promise.reject(new Error(`duplicate skill ${row.id}`))
+      for (const other of this.#skills.values()) if (other.owner === row.owner && other.name === row.name) return Promise.reject(new SkillNameTakenError(row.name))
+      this.#skills.set(row.id, structuredClone(row))
+      return Promise.resolve()
+    },
+    get: (id, owner) => {
+      const row = this.#skills.get(id)
+      return Promise.resolve(row !== undefined && row.owner === owner ? structuredClone(row) : undefined)
+    },
+    list: (owner, filter = {}) => Promise.resolve([...this.#skills.values()]
+      .filter(r => r.owner === owner && (filter.scope === undefined || r.scope === filter.scope) && (filter.agentId === undefined || r.agent_id === filter.agentId) && (filter.status === undefined || r.status === filter.status))
+      .sort((a, b) => a.created_at - b.created_at || (a.id < b.id ? -1 : 1))
+      .map(r => structuredClone(r))),
+    update: (id, owner, patch) => {
+      const row = this.#skills.get(id)
+      if (row === undefined || row.owner !== owner) return Promise.resolve(undefined)
+      const next = { ...row, ...structuredClone(patch) }
+      this.#skills.set(id, next)
+      return Promise.resolve(structuredClone(next))
+    },
+    delete: (id, owner) => {
+      const row = this.#skills.get(id)
+      if (row === undefined || row.owner !== owner) return Promise.resolve(undefined)
+      this.#skills.delete(id)
+      return Promise.resolve(row)
+    },
+    deleteStagedBefore: (cutoff) => {
+      const removed = [...this.#skills.values()].filter(r => r.status === 'pending_review' && r.updated_at < cutoff)
+      for (const r of removed) this.#skills.delete(r.id)
+      return Promise.resolve(removed)
+    },
+  }
 
   readonly #files = new Map<string, FileRow>()
 

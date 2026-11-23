@@ -3,6 +3,7 @@
  */
 
 import type { ProjectionBase } from './history/projector.ts'
+import { redactAgentSecrets } from './redact.ts'
 import type { SessionIndexRow } from './store/store.ts'
 import type { OAIAgentSession, ReasoningEffort, SessionConfig, UpdateSessionParams } from './types.ts'
 
@@ -68,7 +69,7 @@ export function sessionFromRow(row: SessionIndexRow): OAIAgentSession {
     error: row.lastError,
     metadata: config.metadata,
     vault_ids: config.vault_ids,
-    agent: config.agent,
+    agent: redactAgentSecrets(config.agent),
     environment: config.environment,
     required_actions: [],
     usage: null,

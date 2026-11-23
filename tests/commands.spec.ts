@@ -51,7 +51,7 @@ type List = (agent: unknown) => readonly CommandDescriptor[]
 type Execute = (agent: unknown, line: string, attachments: readonly unknown[], signal: AbortSignal) => Promise<CommandExecution | undefined>
 
 /** A gateway over a command service stub; `list` is the stub's single method. */
-async function start(list: List | undefined, ttlMs = 60_000, execute: Execute = () => Promise.resolve(undefined)) {
+async function start(list: List | undefined, ttlMs = 60_000, execute: Execute = () => Promise.resolve(undefined), commandsAllow?: readonly string[]) {
   const warn = vi.fn()
   const released = vi.fn()
   const store = new MemoryStore()
@@ -65,7 +65,7 @@ async function start(list: List | undefined, ttlMs = 60_000, execute: Execute = 
     agents: { get: (id: string) => id === 'sess_live' ? LIVE_AGENT : undefined },
   } as unknown as Context
   const base = testGatewayOptions(environments, new FakeSessionQuery())
-  const options = { ...base, commands: () => list === undefined ? undefined : { list, execute: execute as never }, commandsTtlMs: ttlMs }
+  const options = { ...base, commands: () => list === undefined ? undefined : { list, execute: execute as never }, commandsTtlMs: ttlMs, ...(commandsAllow ? { commandsAllow } : {}) }
   const registry = new SessionRegistry()
   const api = new AgentsGateway(ctx, openAuthenticator, '/v1', store, registry, options)
   const server = createServer((req, res) => {
@@ -352,7 +352,29 @@ describe('POST /v1/agents/sessions/{id}/commands/{name}', () => {
   })
 })
 
+describe('command allow-list', () => {
+  it('lists only allowed commands', async () => {
+    const { url } = await start(() => ['goal', 'permission', 'feedback', 'export'].map(n => descriptor(n)), 60_000, undefined, ['goal', 'plan', 'compact', 'export'])
+    const body = (await (await fetch(url)).json()) as { data: { name: string }[] }
+    expect(body.data.map(c => c.name)).toEqual(['export', 'goal'])
+  })
+
+  it('executing a hidden command answers 404', async () => {
+    const execute = vi.fn(() => Promise.resolve(undefined))
+    const { run } = await start(() => [descriptor('permission')], 60_000, execute, ['goal'])
+    const res = await run('sess_live', 'permission')
+    expect(res.status).toBe(404)
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('command_not_found')
+    expect(execute).not.toHaveBeenCalled()
+  })
+})
+
 describe('commands config', () => {
+  it('defaults the allow-list to goal, plan, compact, export', () => {
+    const base = { auth: { mode: 'development', devKey: { key: 'k', owner: 'o' } }, database: { url: 'postgres://x' }, workspaces: '/w' }
+    expect(Config(base as never).commands.allow).toEqual(['goal', 'plan', 'compact', 'export'])
+  })
+
   const base = { auth: { mode: 'development', devKey: { key: 'k', owner: 'o' } }, database: { url: 'postgres://x' }, workspaces: '/w' }
   it('defaults the TTL to 60 seconds', () => {
     expect(Config(base as never).commands.cacheTtlSeconds).toBe(60)

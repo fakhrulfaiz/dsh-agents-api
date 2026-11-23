@@ -130,6 +130,242 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/skills/import:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    post:
+      summary: Import a skill from GitHub
+      description: Resolves `ref` (default branch when absent) to a commit, keeps only the folder at `path`, validates it like an upload, and stages it for review with its pinned origin. Public repositories only.
+      tags:
+        - Agents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                repo:
+                  type: string
+                  description: "`owner/name`."
+                path:
+                  type: string
+                ref:
+                  type: string
+                scope:
+                  type: string
+                  enum: [library, agent]
+                agent_id:
+                  type: string
+              required: [repo, path]
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstalledSkill"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          description: "`skill_import_failed`: GitHub could not be reached, or has no such repository or ref."
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/agents/skills/{skill_id}/update:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: skill_id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: Update a GitHub skill
+      description: Re-imports the skill's `origin.ref`. Unchanged content answers the skill as it is; changed content replaces the files and returns the skill to `pending_review`.
+      tags:
+        - Agents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstalledSkill"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          description: "`skill_import_failed`: GitHub could not be reached, or has no such repository or ref."
+  /v1/agents/skills/installed:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    get:
+      summary: List installed skills
+      description: The caller's library and agent-private skills, oldest first, including ones still in review.
+      tags:
+        - Agents
+      parameters:
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [library, agent]
+        - name: agent_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/InstalledSkill"
+                required: [object, data]
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/agents/skills/{skill_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: skill_id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: Review an installed skill
+      description: The skill, its files with sizes, and its full `SKILL.md`.
+      tags:
+        - Agents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  skill:
+                    $ref: "#/components/schemas/InstalledSkill"
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        path:
+                          type: string
+                        bytes:
+                          type: integer
+                      required: [path, bytes]
+                  skill_md:
+                    type: string
+                required: [skill, files, skill_md]
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      summary: Edit a skill
+      description: Changes the description and body of a skill written in Agentry (`editor` or `chat` source); other sources answer `400 skill_invalid`.
+      tags:
+        - Agents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                description:
+                  type: string
+                body:
+                  type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstalledSkill"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Delete a skill
+      description: Removes the skill and its files. Agents that selected it keep a dangling id, which is ignored.
+      tags:
+        - Agents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  object:
+                    const: agent.skill.deleted
+                  deleted:
+                    const: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/agents/skills/{skill_id}/activate:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: skill_id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: Activate a reviewed skill
+      description: A skill in review is invisible to every model until activated.
+      tags:
+        - Agents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstalledSkill"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /v1/agents/skills:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -193,6 +429,63 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+    post:
+      summary: Install a skill
+      description: >-
+        `multipart/form-data` with a `.zip` in `file` (and `scope`, `agent_id`) stages the skill for review (`pending_review`).
+        JSON `{ name, description, body, scope, agent_id }` writes a one-file skill that is active at once.
+        At most 5 MB and 200 files; one `SKILL.md` at the root with `name` and `description` frontmatter; no symlinks, hidden or parent paths.
+      tags:
+        - Agents
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                scope:
+                  type: string
+                  enum: [library, agent]
+                agent_id:
+                  type: string
+              required: [file]
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                body:
+                  type: string
+                scope:
+                  type: string
+                  enum: [library, agent]
+                agent_id:
+                  type: string
+              required: [name, description, body]
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstalledSkill"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          description: "`skill_too_large`: over 5 MB or 200 files, or an archive that expands too far."
   /v1/agents/commands:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -2153,9 +2446,24 @@ components:
           type: string
         source:
           type: string
-          description: Discovery source, for example `project-agents`, `user-dsh`, or `bundled`.
+          description: "`builtin`, an install source (`upload`, `github`, `editor`, `chat`), or a Host discovery source such as `bundled`."
+        kind:
+          type: string
+          enum: [builtin, library, private, bundled]
+          description: "`builtin` is Agentry's own; `library` the owner's; `private` this agent's; `bundled` is always on (such as `office-*`)."
+        id:
+          type: string
+          description: Installed skill id (`library` and `private` only).
+        has_scripts:
+          type: boolean
+          description: Whether an installed skill includes executable files.
+        enabled:
+          type: boolean
+          description: Whether the session's agent, or the default chat without `session_id`, uses the skill.
       required:
         - name
+        - kind
+        - enabled
     FileObject:
       type: object
       description: An uploaded file. `status` is `staged` until a message carrying it is sent, then `attached`.
@@ -2408,6 +2716,73 @@ components:
       oneOf:
         - $ref: "#/components/schemas/FunctionTool"
         - $ref: "#/components/schemas/McpTool"
+    InstalledSkill:
+      type: object
+      description: A library or agent-private skill.
+      properties:
+        id:
+          type: string
+        object:
+          const: agent.skill
+        scope:
+          type: string
+          enum: [library, agent]
+        agent_id:
+          type: [string, "null"]
+        name:
+          type: string
+        description:
+          type: string
+        source:
+          type: string
+          enum: [upload, github, editor, chat]
+        origin:
+          oneOf:
+            - type: object
+              properties:
+                repo:
+                  type: string
+                path:
+                  type: string
+                ref:
+                  type: string
+                commit:
+                  type: string
+              required: [repo, path, ref, commit]
+            - type: "null"
+        content_hash:
+          type: string
+        has_scripts:
+          type: boolean
+        status:
+          type: string
+          enum: [pending_review, active]
+        created_at:
+          type: integer
+        updated_at:
+          type: integer
+        used_by:
+          type: array
+          description: Ids of the caller's agents that use the skill.
+          items:
+            type: string
+      required: [id, object, scope, agent_id, name, description, source, origin, content_hash, has_scripts, status, created_at, updated_at, used_by]
+    AgentSkillSelection:
+      type: object
+      properties:
+        builtin:
+          type: array
+          description: Built-in skill names.
+          items:
+            type: string
+        library:
+          type: array
+          description: Library skill ids (`skill_` plus 32 hex characters).
+          items:
+            type: string
+      required:
+        - builtin
+        - library
     HostToolsConfig:
       type: object
       properties:
@@ -2509,6 +2884,28 @@ components:
           oneOf:
             - $ref: "#/components/schemas/HostToolsConfig"
             - type: "null"
+        apps:
+          description: "Agentry extension: Composio app grants, app slug to `all` or exact tool slugs. Absent or null is unrestricted; the legacy `metadata.connectors` list still means `all` per app. Every Composio call, including each call in a multi-execute batch, is checked."
+          oneOf:
+            - type: object
+              additionalProperties:
+                oneOf:
+                  - const: all
+                  - type: array
+                    items:
+                      type: string
+            - type: "null"
+        send_policy:
+          description: "Agentry extension: `ask` (default) asks before each app call whose tool slug is a write (send, create, update, delete, …); `auto` does not ask."
+          oneOf:
+            - type: string
+              enum: [ask, auto]
+            - type: "null"
+        skills:
+          description: "Agentry extension: skill selection. Absent or null uses every built-in skill; an explicit selection uses exactly the listed built-ins and library skills. The agent's private skills always apply."
+          oneOf:
+            - $ref: "#/components/schemas/AgentSkillSelection"
+            - type: "null"
         multi_agent:
           oneOf:
             - $ref: "#/components/schemas/MultiAgentConfig"
@@ -2561,6 +2958,28 @@ components:
         host_tools:
           oneOf:
             - $ref: "#/components/schemas/HostToolsConfig"
+            - type: "null"
+        apps:
+          description: "Agentry extension: Composio app grants, app slug to `all` or exact tool slugs. Absent or null is unrestricted; the legacy `metadata.connectors` list still means `all` per app. Every Composio call, including each call in a multi-execute batch, is checked."
+          oneOf:
+            - type: object
+              additionalProperties:
+                oneOf:
+                  - const: all
+                  - type: array
+                    items:
+                      type: string
+            - type: "null"
+        send_policy:
+          description: "Agentry extension: `ask` (default) asks before each app call whose tool slug is a write (send, create, update, delete, …); `auto` does not ask."
+          oneOf:
+            - type: string
+              enum: [ask, auto]
+            - type: "null"
+        skills:
+          description: "Agentry extension: skill selection. Absent or null uses every built-in skill; an explicit selection uses exactly the listed built-ins and library skills. The agent's private skills always apply."
+          oneOf:
+            - $ref: "#/components/schemas/AgentSkillSelection"
             - type: "null"
         multi_agent:
           oneOf:
@@ -3687,6 +4106,18 @@ components:
           type: string
         subagent_id:
           type: string
+        connect_request:
+          description: "Agentry extension: a connected-app sign-in link found in the output; clients show a Connect button."
+          type: object
+          properties:
+            toolkit:
+              type: [string, "null"]
+            url:
+              type: string
+            status:
+              type: string
+              enum: [initiated, active, unknown]
+          required: [toolkit, url, status]
       required:
         - id
         - type

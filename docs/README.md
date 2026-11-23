@@ -12,6 +12,8 @@ Package-local reference and change notes for `@agentry/api`.
 
 | Note | Summary |
 | --- | --- |
+| [2026-11-23-agentry-general-agent.md](changes/2026-11-23-agentry-general-agent.md) | Agentry identity preset, per-agent skills and installs, command allow-list, Composio grants and connect requests |
+| [2026-11-10-redact-mcp-secrets.md](changes/2026-11-10-redact-mcp-secrets.md) | MCP `headers` and `env` values returned masked as `***` by every session and saved-agent response and SSE event; storage and recovery keep real values |
 | [2026-11-10-attachments.md](changes/2026-11-10-attachments.md) | Chat file attachments: `/agents/files` upload, content, and delete; `input_image` / `input_file` parts; workspace `uploads/` copy; item parts; TTL sweeper; `FileStore` seam |
 | [2026-11-10-slash-commands.md](changes/2026-11-10-slash-commands.md) | `GET /agents/commands` catalog, `POST /agents/sessions/{id}/commands/{name}` with a 409 `session_busy` gate, and the `slash_command` item projected from `command/run` and `command/done` |
 | [2026-11-09-scheduled-tasks.md](changes/2026-11-09-scheduled-tasks.md) | Owner-scoped `/agents/schedules` routes over the Host schedule service; ownership derived from the target session; deliveries resume Agentry sessions; scheduled prompts in the chat history; `this_session` prompt guidance |

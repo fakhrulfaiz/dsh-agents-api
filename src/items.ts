@@ -2,6 +2,7 @@
  * Project one Session event into saved Agents API items.
  */
 
+import { connectRequestFrom } from './connect-request.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { ATTACHMENT_NOTE_PREFIX } from './files/note.ts'
 import { typeFromExtension } from './files/sniff.ts'
@@ -284,6 +285,8 @@ export function itemsFromEvent(event: SessionEvent, turnId: string): OAISessionI
       turn_id: turnId,
       ...(isError ? { error: output || 'tool failed' } : {}),
     }
+    const connect = isError ? undefined : connectRequestFrom(output)
+    if (connect !== undefined) fnOutItem.connect_request = connect
     return [fnOutItem]
   }
 

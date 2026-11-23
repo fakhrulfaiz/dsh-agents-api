@@ -19,6 +19,9 @@
  * @module @agentry/api
  */
 
+import { fileURLToPath } from 'node:url'
+import { loadBuiltins, type BuiltinSkill } from './skills/resolve.ts'
+import { DEFAULT_APPROVAL_VERBS } from './mount-composio.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -169,11 +172,28 @@ export interface Config extends RuntimeConfigInput {
   skills?: {
     /** Seconds the catalog is cached in memory; 0 disables caching (default 60). Finite and non-negative. */
     cacheTtlSeconds?: number
+    /** Folder of installed (library and private) skills (default `~/.dsh/agentry-skills`). */
+    dir?: string
+    /** Folder of Agentry's built-in skills (default this package's `skills/`). */
+    builtinDir?: string
+    /** Show skills from session workspaces' `.agents/skills` folders (default false). */
+    workspaceSkills?: boolean
+  }
+  /** Composio connected apps: grant enforcement and approvals for writes on the user's behalf. */
+  composio?: {
+    /** MCP server label of the Composio tools (default `composio`). */
+    serverLabel?: string
+    /** Tool-slug words that mean a write; such calls ask first under `send_policy: ask` (default: send, create, update, delete and similar). */
+    approvalVerbs?: string[]
+    /** Extra tool slugs that always ask first (default none). */
+    approvalSlugs?: string[]
   }
   /** Slash-command catalog served by `GET /agents/commands`. */
   commands?: {
     /** Seconds a catalog is cached in memory; 0 disables caching (default 60). Finite and non-negative. */
     cacheTtlSeconds?: number
+    /** Command names Agentry lists and runs; others answer 404 (default `goal`, `plan`, `compact`, `export`). */
+    allow?: string[]
   }
   /**
    * File uploads for chat attachments. Without `dir`, `POST /agents/files` answers 501 `uploads_disabled`.
@@ -194,14 +214,27 @@ export interface Config extends RuntimeConfigInput {
 }
 
 /** `Config` after validation: `auth`, `prefix`, `database`, and `workspaces` are always present; `codebox` and `dataDir` never are. */
-export type ResolvedConfig = Omit<Config, 'auth' | 'prefix' | 'database' | 'codebox' | 'dataDir' | 'skills' | 'commands' | 'uploads'> & {
+export type ResolvedConfig = Omit<Config, 'auth' | 'prefix' | 'database' | 'codebox' | 'dataDir' | 'skills' | 'commands' | 'uploads' | 'composio'> & {
   auth: ResolvedAuthConfig
-  skills: { cacheTtlSeconds: number }
-  commands: { cacheTtlSeconds: number }
+  skills: { cacheTtlSeconds: number; dir: string; builtinDir: string; workspaceSkills: boolean }
+  commands: { cacheTtlSeconds: number; allow: string[] }
+  composio: { serverLabel: string; approvalVerbs: string[]; approvalSlugs: string[] }
   uploads: UploadsConfig
   prefix: string
   database: { url: string }
 }
+
+/** Installed skills folder when `skills.dir` is not set. */
+export const DEFAULT_SKILLS_DIR = `${process.env['HOME'] ?? ''}/.dsh/agentry-skills`
+
+/** This package's `skills/` folder, beside `lib/` in a build and beside `src/` in a checkout. */
+export const DEFAULT_BUILTIN_SKILLS_DIR = fileURLToPath(new URL('../skills/', import.meta.url))
+
+/** Host skill sources hidden from Agentry: developer skill folders. `project-*` returns with `skills.workspaceSkills`. */
+export const DEVELOPER_SKILL_SOURCES: readonly string[] = ['user-dsh', 'user-agents', 'project-dsh', 'project-agents']
+
+/** Slash commands Agentry exposes by default; DSH's `/permission` and `/feedback` stay hidden. */
+export const DEFAULT_COMMANDS_ALLOW: readonly string[] = ['goal', 'plan', 'compact', 'export']
 
 /** Schemastery types `.default` as the object's value; `null` is how an optional nested object is left absent at runtime. */
 const ABSENT = null as never
@@ -232,10 +265,19 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
   }).default(ABSENT),
   skills: z.object({
     cacheTtlSeconds: z.number().default(60),
-  }).default({ cacheTtlSeconds: 60 }),
+    dir: z.string().default(DEFAULT_SKILLS_DIR),
+    builtinDir: z.string().default(DEFAULT_BUILTIN_SKILLS_DIR),
+    workspaceSkills: z.boolean().default(false),
+  }).default({ cacheTtlSeconds: 60, dir: DEFAULT_SKILLS_DIR, builtinDir: DEFAULT_BUILTIN_SKILLS_DIR, workspaceSkills: false }),
   commands: z.object({
     cacheTtlSeconds: z.number().default(60),
-  }).default({ cacheTtlSeconds: 60 }),
+    allow: z.array(z.string()).default([...DEFAULT_COMMANDS_ALLOW]),
+  }).default({ cacheTtlSeconds: 60, allow: [...DEFAULT_COMMANDS_ALLOW] }),
+  composio: z.object({
+    serverLabel: z.string().default('composio'),
+    approvalVerbs: z.array(z.string()).default([...DEFAULT_APPROVAL_VERBS]),
+    approvalSlugs: z.array(z.string()).default([]),
+  }).default({ serverLabel: 'composio', approvalVerbs: [...DEFAULT_APPROVAL_VERBS], approvalSlugs: [] }),
   uploads: z.object({
     dir: z.string(),
     maxFileBytes: z.number().default(25 * 1024 * 1024),
@@ -375,6 +417,11 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     claims: agent => sessionRegistry.get(agent.session.id)?.id,
     onChange: (sessionId, actions) => gateway.setInteractionActions(sessionId, actions),
   })
+  let builtinSkills: readonly BuiltinSkill[] = []
+  void loadBuiltins(config.skills.builtinDir).then((loaded) => {
+    builtinSkills = loaded
+    if (loaded.length === 0) ctx.logger.warn(`agents-api: no built-in skills under ${config.skills.builtinDir}`)
+  })
   const sandboxes = new SandboxRegistry('local')
   sandboxes.register(createLocalProvider(runtime.workspacesRoot))
   const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth, message => ctx.logger.warn(message)), prefix, undefined, sessionRegistry, {
@@ -388,6 +435,11 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     skillsTtlMs: config.skills.cacheTtlSeconds * 1000,
     commands: () => ctx.get('commands'),
     commandsTtlMs: config.commands.cacheTtlSeconds * 1000,
+    commandsAllow: config.commands.allow,
+    builtinSkills: () => builtinSkills,
+    skillsRoot: config.skills.dir,
+    composio: config.composio,
+    skillsHiddenSources: DEVELOPER_SKILL_SOURCES.filter(source => !(config.skills.workspaceSkills && source.startsWith('project-'))),
     ...(runtime.artifacts === undefined ? {} : { artifacts: runtime.artifacts }),
     ...(staging === undefined ? {} : { files: { staging, limits: config.uploads } }),
     attachments: () => ctx.get('attachments'),
@@ -399,6 +451,16 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     ? undefined
     : { staging, ttlMs: config.uploads.stagedTtlMinutes * 60_000, intervalMs: config.uploads.sweepIntervalMinutes * 60_000 }
   ctx.effect(() => openStore(ctx, config.database.url, gateway, sweep), 'agents-api: postgres store')
+
+  ctx.effect(() => {
+    // Staged skills not reviewed within a day are deleted; the first sweep waits for the store to open.
+    const first = setTimeout(() => { void gateway.sweepSkills() }, 60_000)
+    const timer = setInterval(() => { void gateway.sweepSkills() }, 3_600_000)
+    return () => {
+      clearTimeout(first)
+      clearInterval(timer)
+    }
+  }, 'agents-api: staged skill sweep')
 
   installScheduleResolver(ctx, sessionId => gateway.agentFor(sessionId))
 
@@ -515,3 +577,5 @@ async function openStore(
     await store.close()
   }
 }
+export * from './preset.ts'
+export { loadBuiltins, resolveAgentSkills, type BuiltinSkill } from './skills/resolve.ts'

@@ -31,17 +31,22 @@ export function validateHostTools(hostTools: OAIHostToolsConfig | null | undefin
  * @param agentCtx - agent-scoped Cordis context from `agents.create` setup.
  * @param hostTools - validated mask; no-op when absent.
  */
+/**
+ * Host tools no Agentry session may use. `plugin_manager` installs plugins
+ * host-wide into the server process for every user; operators install plugins
+ * from the DSH GUI or `dsh plugin add` instead.
+ */
+export const ALWAYS_DENIED_HOST_TOOLS: readonly string[] = ['plugin_manager']
+
 export function applyHostToolsRestrict(
   agentCtx: Context,
   hostTools: OAIHostToolsConfig | null | undefined,
 ): void {
-  if (hostTools === undefined || hostTools === null) return
-  const allow = hostTools.allow
-  const deny = hostTools.deny
-  if (allow == null && deny == null) return
+  const allow = hostTools?.allow
+  const deny = [...new Set([...(hostTools?.deny ?? []), ...ALWAYS_DENIED_HOST_TOOLS])]
   agentCtx.tools.restrict({
     ...(allow != null ? { allow } : {}),
-    ...(deny != null ? { deny } : {}),
+    deny,
   })
 }
 

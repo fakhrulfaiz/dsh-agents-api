@@ -15,6 +15,8 @@ import type { SkillSummary, SkillViewOptions } from '@deepseek-ai/dsh-skill'
 import type { OwnerId } from './auth/authenticator.ts'
 import type { Route } from './gateway.ts'
 import { errorMessage, json, notFound } from './http.ts'
+import { AGENTRY_SKILL_PROVIDER, AGENTRY_SOURCES } from './skills/provider.ts'
+import type { SkillRow } from './store/store.ts'
 import type { AgentSkill } from './types.ts'
 
 /** The registry view one catalog request reads. */
@@ -44,15 +46,20 @@ export interface SkillsApiDeps {
   warn: (message: string) => void
   /** Clock in epoch milliseconds, injectable in tests. */
   now?: () => number
+  /** Host discovery sources left out of the catalog (developer skill folders). */
+  hiddenSources?: ReadonlySet<string>
+  /** The owner's active installed skills, for ids and script flags. */
+  installed?: (owner: OwnerId) => Promise<readonly SkillRow[]>
+  /** Entries the default chat uses, added when there is no `session_id` (the preset scope has no Agentry provider). */
+  defaultChat?: (owner: OwnerId) => Promise<AgentSkill[]>
 }
 
 /** `Cache-Control` of every catalog response: clients always revalidate with `If-None-Match`. */
 const CACHE_CONTROL = 'private, max-age=0, must-revalidate'
 
-/** A serialized catalog and its validator. */
+/** A loaded catalog: base entries before owner-specific enrichment. */
 interface Loaded {
-  body: string
-  etag: string
+  entries: AgentSkill[]
 }
 
 /**
@@ -61,7 +68,11 @@ interface Loaded {
  * @returns the catalog entry.
  */
 export function toWireSkill(skill: SkillSummary): AgentSkill {
-  return { name: skill.name, description: skill.description, source: skill.source }
+  if (skill.provider === AGENTRY_SKILL_PROVIDER) {
+    const kind = skill.source === AGENTRY_SOURCES.builtin ? 'builtin' : skill.source === AGENTRY_SOURCES.private ? 'private' : 'library'
+    return { name: skill.name, description: skill.description, source: kind === 'builtin' ? 'builtin' : skill.source, kind, enabled: true }
+  }
+  return { name: skill.name, description: skill.description, source: skill.source, kind: 'bundled', enabled: true }
 }
 
 /**
@@ -106,38 +117,59 @@ export class SkillsApi {
    * @param ifNoneMatch - request `If-None-Match` value.
    */
   private async list(res: ServerResponse, owner: OwnerId, sessionId: string | undefined, ifNoneMatch: string | undefined): Promise<void> {
-    let loaded: Loaded
+    let body: { body: string; etag: string }
     try {
       const target = await this.deps.resolveTarget(owner, sessionId)
       if (target === undefined) {
         notFound(res, `Session "${sessionId ?? ''}" not found`)
         return
       }
+      let loaded: Loaded
       try {
         loaded = await this.load(target)
       } finally {
         await target.release?.()
       }
+      body = serialize(await this.compose(owner, sessionId, loaded.entries))
     } catch (error: unknown) {
       this.deps.warn(`agents-api: skill catalog failed to load: ${errorMessage(error)}`)
       json(res, 503, { error: { type: 'server_error', message: 'The skill catalog could not be loaded', code: 'skills_unavailable' } })
       return
     }
-    const headers = { ETag: loaded.etag, 'Cache-Control': CACHE_CONTROL }
-    if (matchesEtag(ifNoneMatch, loaded.etag)) {
+    const headers = { ETag: body.etag, 'Cache-Control': CACHE_CONTROL }
+    if (matchesEtag(ifNoneMatch, body.etag)) {
       res.writeHead(304, headers)
       res.end()
       return
     }
-    res.writeHead(200, { ...headers, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(loaded.body) })
-    res.end(loaded.body)
+    res.writeHead(200, { ...headers, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body.body) })
+    res.end(body.body)
+  }
+
+  /**
+   * Owner-specific view of a cached catalog: installed skills gain their id and
+   * script flag, and without a session the default chat's Agentry skills are added.
+   * @param owner - authenticated caller.
+   * @param sessionId - `session_id` query value.
+   * @param entries - cached base entries.
+   * @returns the entries to serve.
+   */
+  private async compose(owner: OwnerId, sessionId: string | undefined, entries: readonly AgentSkill[]): Promise<AgentSkill[]> {
+    const extra = sessionId === undefined ? await this.deps.defaultChat?.(owner) ?? [] : []
+    const names = new Set(extra.map(e => e.name))
+    const merged = [...extra, ...entries.filter(e => !names.has(e.name))]
+    const rows = new Map((await this.deps.installed?.(owner) ?? []).map(r => [r.name, r]))
+    return merged.map((entry) => {
+      const row = entry.kind === 'library' || entry.kind === 'private' ? rows.get(entry.name) : undefined
+      return row === undefined ? entry : { ...entry, source: row.source, id: row.id, has_scripts: row.has_scripts }
+    })
   }
 
   /**
    * The serialized catalog of one target: cached while fresh, otherwise one shared `list()` call per (scope, cwd).
    * Failures are not cached.
    * @param target - registry view to read.
-   * @returns the body and its entity tag.
+   * @returns the base entries.
    */
   private load(target: SkillTarget): Promise<Loaded> {
     const now = this.deps.now ?? Date.now
@@ -145,14 +177,15 @@ export class SkillsApi {
     const cached = this.#loaded.get(target.scope)?.get(cwdKey)
     if (cached !== undefined && now() < cached.expiresAt) return Promise.resolve(cached)
     const service = this.deps.skills()
-    if (service === undefined) return Promise.resolve(serialize([]))
+    if (service === undefined) return Promise.resolve({ entries: [] })
     const flights = this.#inflight.get(target.scope) ?? new Map<string, Promise<Loaded>>()
     this.#inflight.set(target.scope, flights)
     const shared = flights.get(cwdKey)
     if (shared !== undefined) return shared
     const flight = service.list({ scope: target.scope, cwd: target.cwd })
       .then((summaries) => {
-        const loaded = serialize(summaries.map(toWireSkill))
+        const hidden = this.deps.hiddenSources
+        const loaded: Loaded = { entries: summaries.filter(sk => !(hidden?.has(sk.source) ?? false)).map(toWireSkill) }
         if (this.deps.ttlMs > 0) this.store(target.scope, cwdKey, { ...loaded, expiresAt: now() + this.deps.ttlMs })
         return loaded
       })
@@ -187,7 +220,7 @@ export class SkillsApi {
  * @param entries - catalog entries.
  * @returns the JSON body and `"sha256-<hex>"` tag.
  */
-function serialize(entries: AgentSkill[]): Loaded {
+function serialize(entries: AgentSkill[]): { body: string; etag: string } {
   const data = [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   const body = JSON.stringify({ object: 'list', data })
   return { body, etag: `"${createHash('sha256').update(body).digest('hex')}"` }
