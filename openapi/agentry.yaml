@@ -203,6 +203,97 @@ paths:
           $ref: "#/components/responses/NotFound"
         "502":
           description: "`skill_import_failed`: GitHub could not be reached, or has no such repository or ref."
+  /v1/agents/skills/view/{name}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: View a skill's files
+      description: One of the caller's installed skills (by name), else an Agentry built-in. Bundled Host skills answer 404.
+      tags:
+        - Agents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  description:
+                    type: string
+                  kind:
+                    type: string
+                    enum: [builtin, library, private]
+                  id:
+                    type: string
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        path:
+                          type: string
+                        bytes:
+                          type: integer
+                      required: [path, bytes]
+                  skill_md:
+                    type: string
+                required: [name, description, kind, files, skill_md]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/agents/skills/view/{name}/files/{path}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: path
+        in: path
+        required: true
+        description: File path inside the skill folder; may contain `/`.
+        schema:
+          type: string
+    get:
+      summary: Read one skill file as text
+      description: Text files up to 256 KB. A path leaving the folder answers 400, a larger file 413, a binary file 415.
+      tags:
+        - Agents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  path:
+                    type: string
+                  bytes:
+                    type: integer
+                  content:
+                    type: string
+                required: [path, bytes, content]
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: "`file_too_large`."
+        "415":
+          description: "`not_text`."
   /v1/agents/skills/installed:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"

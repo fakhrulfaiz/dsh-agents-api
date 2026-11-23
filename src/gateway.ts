@@ -1325,6 +1325,7 @@ export class AgentsGateway {
       root: this.skillsRoot,
       reserved: () => new Set(this.builtinSkills().map(b => b.name)),
       invalidate: owner => { this.skillInvalidations.invalidate(owner) },
+      builtins: () => this.builtinSkills(),
     }
   }
 

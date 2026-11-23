@@ -21,6 +21,8 @@ export interface InstallDeps {
   reserved: () => ReadonlySet<string>
   /** Refresh every live session of the owner. */
   invalidate: (owner: OwnerId) => void
+  /** Agentry's built-in skills (for viewing their files). */
+  builtins?: () => readonly { name: string; description: string; dir: string }[]
 }
 
 /** Where a new skill goes. */
@@ -178,8 +180,11 @@ export async function usedBy(store: Store, owner: OwnerId, row: SkillRow): Promi
 /**
  * The review manifest: the skill, its files with sizes, and its `SKILL.md`.
  */
-export async function skillManifest(deps: InstallDeps, row: SkillRow): Promise<{ skill: WireInstalledSkill; files: { path: string; bytes: number }[]; skill_md: string }> {
-  const dir = skillDir(deps.root, row)
+/**
+ * Files under a skill folder, with sizes, sorted by path.
+ * @param dir - skill folder.
+ */
+export async function listFolder(dir: string): Promise<{ path: string; bytes: number }[]> {
   const files: { path: string; bytes: number }[] = []
   const walk = async (rel: string): Promise<void> => {
     for (const entry of await readdir(join(dir, rel), { withFileTypes: true }).catch(() => [])) {
@@ -189,8 +194,15 @@ export async function skillManifest(deps: InstallDeps, row: SkillRow): Promise<{
     }
   }
   await walk('')
-  files.sort((a, b) => (a.path < b.path ? -1 : 1))
-  return { skill: toWireInstalled(row, await usedBy(deps.store, row.owner, row)), files, skill_md: await readFile(join(dir, 'SKILL.md'), 'utf8').catch(() => '') }
+  return files.sort((a, b) => (a.path < b.path ? -1 : 1))
+}
+
+/**
+ * The review manifest: the skill, its files with sizes, and its `SKILL.md`.
+ */
+export async function skillManifest(deps: InstallDeps, row: SkillRow): Promise<{ skill: WireInstalledSkill; files: { path: string; bytes: number }[]; skill_md: string }> {
+  const dir = skillDir(deps.root, row)
+  return { skill: toWireInstalled(row, await usedBy(deps.store, row.owner, row)), files: await listFolder(dir), skill_md: await readFile(join(dir, 'SKILL.md'), 'utf8').catch(() => '') }
 }
 
 /** Re-exported so callers validate file lists the same way. */
