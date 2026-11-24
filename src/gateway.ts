@@ -40,6 +40,8 @@ import { fileIdsFromInput, overlayAgent, parseApprovalResponse, userTextFromInpu
 import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
 import { mountAgentInstructions } from './mount-instructions.ts'
 import { AGENTRY_PRESET_ID } from './preset.ts'
+import { providerRows, type AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
+import { SandboxApiError } from '@agentry/sandbox/client'
 import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
 import { sweepStaged, type InstallDeps } from './skills/install.ts'
 import { SkillInstallApi } from './skills/routes.ts'
@@ -311,12 +313,15 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents/environments/templates/:template_id', handler: (req, res, _url, params, p) => this.updateTemplate(req, res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/environments/templates/:template_id', handler: (_req, res, _url, params, p) => this.deleteTemplate(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/runtimes', handler: async (_req, res) => { json(res, 200, await readRuntimeInfo(this.runtimeInfoPath)) } },
-      { method: 'GET', pattern: '/agents/environments/providers', handler: async (_req, res) => { json(res, 200, { object: 'list', data: this.sandboxes.list().map(({ name, ...rest }) => ({ object: 'sandbox.provider', name, ...rest })) }) } },
+      { method: 'GET', pattern: '/agents/environments/providers', handler: async (_req, res) => { json(res, 200, { object: 'list', data: await providerRows(this.sandboxes) }) } },
       { method: 'POST', pattern: '/agents/environments', handler: (req, res, _url, _params, p) => this.createEnvironment(req, res, p.owner) },
       { method: 'GET', pattern: '/agents/environments', handler: (_req, res, url, _params, p) => this.listEnvironments(res, url, p.owner) },
       { method: 'POST', pattern: '/agents/environments/:environment_id/files', handler: (req, res, _url, params, p) => this.writeEnvironmentFile(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/:environment_id/files/*path', handler: (_req, res, _url, params, p) => this.readEnvironmentFile(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/:environment_id/files', handler: (_req, res, url, params, p) => this.listEnvironmentFiles(res, url, params, p.owner) },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/start', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'start') },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/stop', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'stop') },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/reset', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'reset') },
       { method: 'GET', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.getEnvironment(res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.deleteEnvironment(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/sessions', handler: (req, res, url, _params, p) => this.createSession(req, res, url, p.owner) },
@@ -1836,7 +1841,7 @@ export class AgentsGateway {
   }
 
   private async createEnvironment(req: IncomingMessage, res: ServerResponse, owner: OwnerId): Promise<void> {
-    const body = await readBody(req) as { template_id?: string; session_id?: string; image?: string }
+    const body = await readBody(req) as { template_id?: string; session_id?: string; image?: string; provider?: string }
     const input: CreateEnvironmentInput = {
       ...(typeof body.template_id === 'string' ? { template_id: body.template_id } : {}),
       ...(typeof body.session_id === 'string' ? { session_id: body.session_id } : {}),
@@ -1856,10 +1861,11 @@ export class AgentsGateway {
       badRequest(res, `session not found: ${input.session_id}`)
       return
     }
-    // The template's provider, else the default. A provider that is not registered (for example one that was removed) answers 400.
+    // The requested provider, else the template's, else the default. A provider that is not registered (for example one that was removed) answers 400.
     let provider: SandboxProvider
     try {
-      provider = templateProvider !== undefined ? this.sandboxes.require(templateProvider) : this.sandboxes.default()
+      const requested = typeof body.provider === 'string' && body.provider.trim() !== '' ? body.provider.trim() : templateProvider
+      provider = requested !== undefined ? this.sandboxes.require(requested) : this.sandboxes.default()
     } catch (error: unknown) {
       badRequest(res, errorMessage(error))
       return
@@ -1934,6 +1940,36 @@ export class AgentsGateway {
       ...(error !== undefined ? { error } : status === 'failed' && record.error !== undefined ? { error: record.error } : {}),
     }
     json(res, 200, await this.environmentJson(owner, await this.store.environments.update(owner, record.id, next) ?? next))
+  }
+
+  /**
+   * Start, stop or reset an environment's sandbox (Agentry Sandbox only; `local` has no lifecycle).
+   * Answers the environment as `GET` would, or the service's refusal with its status (429 quota, 503 down).
+   */
+  private async environmentAction(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId, action: 'start' | 'stop' | 'reset'): Promise<void> {
+    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!record) {
+      notFound(res, 'environment not found')
+      return
+    }
+    const provider = this.sandboxes.get(record.provider) as Partial<AgentrySandboxProvider> | undefined
+    const sandboxId = record.provider_metadata['sandbox_id']
+    if (provider?.api === undefined || sandboxId === undefined) {
+      json(res, 409, { error: { type: 'invalid_request_error', code: 'environment_not_startable', message: 'This environment does not start or stop.' } })
+      return
+    }
+    const body = action === 'reset' ? await readBody(req).catch(() => ({})) : {}
+    const api = provider.api(owner)
+    try {
+      if (action === 'start') await api.start(sandboxId)
+      else if (action === 'stop') await api.stop(sandboxId)
+      else await api.reset(sandboxId, { keepWorkspace: (body as { keep_workspace?: unknown }).keep_workspace !== false })
+    } catch (e: unknown) {
+      const status = e instanceof SandboxApiError && e.status >= 400 ? e.status : 502
+      json(res, status, { error: { type: 'invalid_request_error', code: e instanceof SandboxApiError ? e.code : 'sandbox_error', message: errorMessage(e) } })
+      return
+    }
+    await this.getEnvironment(res, params, owner)
   }
 
   private async deleteEnvironment(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {

@@ -42,6 +42,7 @@ import { createStaticKeyAuthenticator } from './auth/static-key.ts'
 import { installApprovalBridge } from './approvals/approval-bridge.ts'
 import { bridgeChildSessionEvent } from './bridge.ts'
 import { createLocalProvider } from './environment/local.ts'
+import { createAgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
 import { SandboxRegistry } from './sandbox/registry.ts'
 import { DEFAULT_ALLOWED_MEDIA_TYPES, stagingDirectory, validateUploads, type UploadsConfig } from './files/config.ts'
 import { createFilesystemFileStore, type FileStore } from './files/file-store.ts'
@@ -428,6 +429,9 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   })
   const sandboxes = new SandboxRegistry('local')
   sandboxes.register(createLocalProvider(runtime.workspacesRoot))
+  if (runtime.sandbox !== undefined) {
+    sandboxes.register(createAgentrySandboxProvider({ ...runtime.sandbox, workspacesRoot: runtime.workspacesRoot }))
+  }
   const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth, message => ctx.logger.warn(message)), prefix, undefined, sessionRegistry, {
     sandboxes,
     workspacesRoot: runtime.workspacesRoot,

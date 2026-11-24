@@ -5,6 +5,7 @@ Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
 ## Unreleased — Agentry Sandbox provider
 
+- The `sandbox` environment provider (registered when `sandbox.url`/`sandbox.key` are set): environments live in Agentry Sandbox; each gets an empty host placeholder `<workspaces>/<owner>/sandbox-<envId>` and the sandbox mounts its workspace at that same path, so paths match on both sides. Files are read and written through envd as `agent`; quota refusals come back with the service's message. `POST /agents/environments` accepts `provider`; new `POST /agents/environments/{id}/start|stop|reset` (`keep_workspace`, default true; 409 `environment_not_startable` for `local`, 429 for a sandbox limit); `GET /agents/environments/providers` adds `available`, `reason` and `version` per provider. The service key never appears in responses.
 - `sandbox.url` / `sandbox.key` (or `AGENTRY_SANDBOX_URL` / `AGENTRY_SANDBOX_KEY`) configure the Agentry Sandbox service; one without the other, or a non-http(s) URL, fails startup by name. `@agentry/sandbox` (linked, bundled into `lib/index.js`) provides the service client.
 
 ## 2026-11-25 — Item timing for the trajectory

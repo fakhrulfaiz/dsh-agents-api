@@ -142,3 +142,12 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
     },
   }
 }
+
+/** Rows for `GET /agents/environments/providers`: every provider, with availability where it can tell. */
+export async function providerRows(registry: { list(): { name: string; capabilities: unknown; default: boolean }[]; get(kind: string): unknown }) {
+  return Promise.all(registry.list().map(async ({ name, ...rest }) => {
+    const p = registry.get(name) as Partial<AgentrySandboxProvider> | undefined
+    const a = typeof p?.availability === 'function' ? await p.availability() : { available: true as const }
+    return { object: 'sandbox.provider', name, ...rest, ...a }
+  }))
+}

@@ -1207,3 +1207,36 @@ describe('AgentsGateway.createIdleSession', () => {
     expect((await store.sessions.list({ owner: TEST_OWNER, limit: 10 })).data).toEqual([])
   })
 })
+
+describe('sandbox environments through the gateway', () => {
+  it('creates on the sandbox provider, lists providers with availability, starts, stops, resets; local refuses lifecycle', async () => {
+    const { startTestService } = await import('@agentry/sandbox/testing')
+    const { createAgentrySandboxProvider } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const svc = await startTestService({ AGENTRY_SANDBOX_MAX_PER_OWNER: '1' })
+    try {
+      const registry = new SandboxRegistry('local')
+      registry.register(createLocalProvider(join(tmpdir(), 'agentry-gateway-spec-sbx')))
+      registry.register(createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: join(tmpdir(), 'agentry-gateway-spec-sbx') }))
+      const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), testGatewayOptions(registry))
+      const base = await listen((req, res) => api.handle(req, res))
+      const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+      const providers = (await (await call('/agents/environments/providers')).json()) as { data: { name: string; available: boolean }[] }
+      expect(providers.data.map((p) => [p.name, p.available])).toEqual(expect.arrayContaining([['local', true], ['sandbox', true]]))
+      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string; provider: string; status: string }
+      expect(env).toMatchObject({ provider: 'sandbox', status: 'connected' })
+      expect((await call(`/agents/environments/${env.id}/stop`, { method: 'POST' })).status).toBe(200)
+      expect((await call(`/agents/environments/${env.id}/start`, { method: 'POST' })).status).toBe(200)
+      expect((await call(`/agents/environments/${env.id}/reset`, { method: 'POST', body: JSON.stringify({ keep_workspace: false }) })).status).toBe(200)
+      expect(svc.backend.calls.some((c) => c.endsWith('keep=false'))).toBe(true)
+      const second = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { status: string; error?: string }
+      expect(second).toMatchObject({ status: 'failed', error: expect.stringContaining('limit 1') })
+      const local = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({}) })).json()) as { id: string }
+      const refused = await call(`/agents/environments/${local.id}/start`, { method: 'POST' })
+      expect(refused.status).toBe(409)
+      expect(JSON.stringify(await refused.json())).not.toContain(svc.key)
+    } finally {
+      await svc.close()
+    }
+  })
+})

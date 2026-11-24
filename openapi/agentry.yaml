@@ -1554,6 +1554,73 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/environments/{environment_id}/start:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: startEnvironment
+      summary: "Start an Agentry Sandbox environment"
+      responses:
+        "200":
+          description: The environment, as `GET` answers it.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { description: Environment not found. }
+        "409": { description: "The environment's provider has no lifecycle (`local`): `environment_not_startable`." }
+        "429": { description: "An Agentry Sandbox limit was reached (`quota_exceeded`); the message says which." }
+        "503": { description: The sandbox backend is not reachable. }
+  /v1/agents/environments/{environment_id}/stop:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: stopEnvironment
+      summary: "Stop an Agentry Sandbox environment (installed software and files are kept)"
+      responses:
+        "200":
+          description: The environment, as `GET` answers it.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { description: Environment not found. }
+        "409": { description: "The environment's provider has no lifecycle (`local`): `environment_not_startable`." }
+        "429": { description: "An Agentry Sandbox limit was reached (`quota_exceeded`); the message says which." }
+        "503": { description: The sandbox backend is not reachable. }
+  /v1/agents/environments/{environment_id}/reset:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: resetEnvironment
+      summary: "Rebuild an Agentry Sandbox environment from its template"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                keep_workspace: { type: boolean, default: true, description: Keep the workspace files when rebuilding. }
+      responses:
+        "200":
+          description: The environment, as `GET` answers it.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { description: Environment not found. }
+        "409": { description: "The environment's provider has no lifecycle (`local`): `environment_not_startable`." }
+        "429": { description: "An Agentry Sandbox limit was reached (`quota_exceeded`); the message says which." }
+        "503": { description: The sandbox backend is not reachable. }
   /v1/agents/environments/{environment_id}/files:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
