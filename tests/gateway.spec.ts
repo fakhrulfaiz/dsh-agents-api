@@ -1281,3 +1281,70 @@ describe('sessions on Agentry Sandbox environments', () => {
     }
   })
 })
+
+describe('workspace data of sandbox sessions', () => {
+  it('artifacts list and read come from the sandbox; a local session still reads host disk', async () => {
+    const { startTestService } = await import('@agentry/sandbox/testing')
+    const { createAgentrySandboxProvider } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const { createSandboxPresets } = await import('../src/sandbox/presets.ts')
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const svc = await startTestService()
+    const files = new Map<string, string>()
+    const envd = createServer((req, res) => {
+      const url = new URL(req.url ?? '/', 'http://x')
+      const chunks: Buffer[] = []
+      req.on('data', (c: Buffer) => chunks.push(c))
+      req.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString() || '{}') as { path?: string }
+        if (url.pathname === '/files') {
+          const v = files.get(url.searchParams.get('path') ?? '')
+          return void (v === undefined ? res.writeHead(404).end('{}') : res.end(v))
+        }
+        if (url.pathname === '/filesystem.Filesystem/ListDir') {
+          const entries = [...files.keys()].filter((p) => p.startsWith(`${body.path ?? ''}/`)).map((p) => ({ name: p.split('/').pop(), type: 'FILE_TYPE_FILE', path: p, size: String(files.get(p)!.length), modifiedTime: '2026-11-24T00:00:00Z' }))
+          return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ entries }))
+        }
+        if (url.pathname === '/filesystem.Filesystem/Stat') {
+          if (!files.has(body.path ?? '')) return void res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ code: 'not_found', message: 'no such file' }))
+          return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ entry: { name: 'x', type: 'FILE_TYPE_FILE', path: body.path } }))
+        }
+        res.writeHead(404).end('{}')
+      })
+    })
+    await new Promise<void>((r) => envd.listen(0, '127.0.0.1', r))
+    svc.backend.setEndpoint(`http://127.0.0.1:${String((envd.address() as AddressInfo).port)}`)
+    try {
+      const root = join(tmpdir(), `agentry-gateway-spec-sbx-data-${String(Date.now())}`)
+      const registry = new SandboxRegistry('local')
+      registry.register(createLocalProvider(root))
+      registry.register(createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root }))
+      const sandboxPresets = createSandboxPresets({ presets: () => ({ register: async () => async () => {} }), rows: () => [] })
+      const store = new MemoryStore()
+      const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), { ...testGatewayOptions(registry), sandboxPresets })
+      const base = await listen((req, res) => api.handle(req, res))
+      const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string }
+      const sbx = (await (await call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment: { type: 'sandbox', environment_id: env.id } }) })).json()) as { id: string }
+      const workspace = (await Promise.all([...svc.ownersSeen].map((o) => svc.service.list(o)))).flat()[0]!.template.workspacePath!
+      files.set(`${workspace}/report.md`, '# from the sandbox')
+      const listed = (await (await call(`/agents/sessions/${sbx.id}/artifacts`)).json()) as { data: { path: string }[] }
+      expect(listed.data.map((e) => e.path)).toEqual(['report.md'])
+      const read = await call(`/agents/sessions/${sbx.id}/artifacts/report.md`)
+      expect(read.status).toBe(200)
+      expect(await read.text()).toBe('# from the sandbox')
+      expect((await call(`/agents/sessions/${sbx.id}/artifacts/missing.md`)).status).toBe(404)
+
+      const localDir = join(root, 'local-ws')
+      await mkdir(localDir, { recursive: true })
+      await writeFile(join(localDir, 'host.md'), 'on host')
+      const local = (await (await call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment: { type: 'self_hosted', workspace_directory: localDir } }) })).json()) as { id: string }
+      const localListed = (await (await call(`/agents/sessions/${local.id}/artifacts`)).json()) as { data: { path: string }[] }
+      expect(localListed.data.map((e) => e.path)).toEqual(['host.md'])
+    } finally {
+      await svc.close()
+      envd.closeAllConnections()
+      await new Promise<void>((r) => envd.close(() => r()))
+    }
+  })
+})

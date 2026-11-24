@@ -28,6 +28,49 @@ export interface AgentrySandboxProvider extends SandboxProvider {
   availability(): Promise<{ available: true; version: string } | { available: false; reason: string }>
   /** The service client for one owner (start, stop, reset, envd). */
   api(owner: string): SandboxApi
+  /** Workspace files with size and modification time, skipping `.git` and `node_modules` (at most 5000). */
+  listEntries(record: EnvironmentRecord): Promise<WorkspaceEntry[]>
+  /** Whether a workspace-relative path exists in the sandbox. */
+  exists(record: EnvironmentRecord, path: string): Promise<boolean>
+  /** Remove a workspace-relative file in the sandbox (missing is not an error). */
+  remove(record: EnvironmentRecord, path: string): Promise<void>
+  /** The absolute path of a workspace-relative path in the sandbox. */
+  absolute(record: EnvironmentRecord, path: string): string
+}
+
+export interface WorkspaceEntry {
+  path: string
+  size: number
+  last_modified: string
+}
+
+const SKIP_DIRS = new Set(['.git', 'node_modules'])
+const MAX_ENTRIES = 5000
+const UPLOADS = 'uploads'
+
+/** `name-N.ext` for the Nth retry. */
+function numbered(name: string, n: number): string {
+  const dot = name.lastIndexOf('.')
+  return dot > 0 ? `${name.slice(0, dot)}-${String(n)}${name.slice(dot)}` : `${name}-${String(n)}`
+}
+
+/**
+ * Write an upload to `uploads/<name>` in a sandbox workspace, never overwriting
+ * (`name-1.ext`, `name-2.ext`, ...), like the host's copyIntoUploads.
+ */
+export async function copyIntoSandboxUploads(
+  provider: AgentrySandboxProvider, record: EnvironmentRecord, name: string, source: AsyncIterable<Uint8Array>,
+): Promise<{ relative: string; absolute: string; remove?: () => Promise<void> }> {
+  const parts: Uint8Array[] = []
+  for await (const chunk of source) parts.push(chunk)
+  const bytes = Buffer.concat(parts)
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    const relative = `${UPLOADS}/${attempt === 0 ? name : numbered(name, attempt)}`
+    if (await provider.exists(record, relative)) continue
+    await provider.writeFile(record, relative, bytes)
+    return { relative, absolute: provider.absolute(record, relative), remove: () => provider.remove(record, relative) }
+  }
+  throw new Error(`Could not find a free name for "${name}" in uploads/`)
 }
 
 const AGENT = 'agent'
@@ -129,6 +172,52 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
         .map((e) => posix.relative(dir, e.path))
         .filter((p) => p && !p.startsWith('..'))
         .sort()
+    },
+
+    async listEntries(record) {
+      const { id, dir } = meta(record)
+      const envd = api(ownerOf(record)).envd(id)
+      const out: WorkspaceEntry[] = []
+      const queue = [dir]
+      while (queue.length > 0 && out.length < MAX_ENTRIES) {
+        const at = queue.shift()!
+        const res = await envd.filesystem.listDir({ path: at, depth: 1 }, { headers: envd.userHeaders(AGENT) }).catch(() => undefined)
+        for (const e of res?.entries ?? []) {
+          const type = String(e.type)
+          if (type === '2' || type === 'FILE_TYPE_DIRECTORY') {
+            if (!SKIP_DIRS.has(e.name)) queue.push(e.path)
+          } else if (type === '1' || type === 'FILE_TYPE_FILE') {
+            const rel = posix.relative(dir, e.path)
+            if (!rel || rel.startsWith('..')) continue
+            const seconds = e.modifiedTime?.seconds
+            out.push({ path: rel, size: Number(e.size), last_modified: new Date(seconds === undefined ? 0 : Number(seconds) * 1000).toISOString() })
+            if (out.length >= MAX_ENTRIES) break
+          }
+        }
+      }
+      return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    },
+
+    async exists(record, path) {
+      const { id, dir } = meta(record)
+      const envd = api(ownerOf(record)).envd(id)
+      try {
+        await envd.filesystem.stat({ path: inside(dir, path) }, { headers: envd.userHeaders(AGENT) })
+        return true
+      } catch (e) {
+        if ((e as { code?: unknown }).code === 5 || /not[_ ]found|no such file/i.test((e as Error).message)) return false
+        throw e
+      }
+    },
+
+    async remove(record, path) {
+      const { id, dir } = meta(record)
+      const envd = api(ownerOf(record)).envd(id)
+      await envd.filesystem.remove({ path: inside(dir, path) }, { headers: envd.userHeaders(AGENT) }).catch(() => {})
+    },
+
+    absolute(record, path) {
+      return inside(meta(record).dir, path)
     },
 
     async readFile(record, path) {

@@ -26,6 +26,8 @@ export interface WorkspaceCopy {
   relative: string
   /** Absolute path of the new file. */
   absolute: string
+  /** Removes the copy where it is not a host file (a sandbox); host copies are removed by path. */
+  remove?: () => Promise<void>
 }
 
 /** The workspace cannot safely receive the file. Maps to 409 `uploads_unsafe`. */

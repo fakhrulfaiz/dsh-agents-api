@@ -33,6 +33,7 @@ let ctx: Context
 let workspace: string
 let services: Context
 let fiber: { dispose(): unknown } | undefined
+let sandboxId: string
 
 const ready = (c: Context, names: string[]) => new Promise<Context>((resolve) => { c.inject(names, (inner) => { resolve(inner) }) })
 
@@ -41,6 +42,7 @@ describe.skipIf(!haveImages())('DSH remote providers over Agentry Sandbox', () =
     svc = await startDockerTestService()
     workspace = await mkdtemp(join(tmpdir(), 'agentry-remote-'))
     const sbx = await svc.service.create(OWNER, { name: 'remote-spec', template: { workspacePath: workspace } } as never)
+    sandboxId = sbx.id
     ctx = new Context()
     await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SandboxPolicyService, { mode: (process.env['REMOTE_SPEC_MODE'] ?? 'danger-full-access') as 'danger-full-access', workspaceRoot: workspace })
@@ -162,6 +164,25 @@ describe.skipIf(!haveImages())('DSH remote providers over Agentry Sandbox', () =
     const out = h.collected.stdout!.readFrom(0).text
     expect(out).toContain('in-ok')
     expect(out).not.toContain('out-ok')
+  }, 60_000)
+
+  it('the environment provider lists, stats, reads and copies uploads in the live sandbox (as the web app sees them)', async () => {
+    const { createAgentrySandboxProvider, copyIntoSandboxUploads } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const provider = createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: tmpdir() })
+    const record = { id: 'env_live', object: 'environment', status: 'connected', provider: 'sandbox', provider_metadata: { sandbox_id: sandboxId, workspace_directory: workspace, owner: OWNER }, created_at: 1 } as never
+    await services.fs.writeText(await services.fs.resolve('out/report.md', { cwd: workspace }), '# live')
+    const entries = await provider.listEntries(record)
+    const report = entries.find((e) => e.path === 'out/report.md')
+    expect(report).toMatchObject({ size: 6 })
+    expect(Date.parse(report!.last_modified)).toBeGreaterThan(Date.now() - 600_000)
+    expect(await provider.exists(record, 'out/report.md')).toBe(true)
+    expect(await provider.exists(record, 'out/none.md')).toBe(false)
+    expect(new TextDecoder().decode(await provider.readFile(record, 'out/report.md'))).toBe('# live')
+    const copy = await copyIntoSandboxUploads(provider, record, 'a.txt', (async function* () { yield new TextEncoder().encode('up') })())
+    expect(copy.relative).toBe('uploads/a.txt')
+    expect(await services.fs.readText(await services.fs.resolve('uploads/a.txt', { cwd: workspace }))).toBe('up')
+    await copy.remove?.()
+    expect(await provider.exists(record, 'uploads/a.txt')).toBe(false)
   }, 60_000)
 
   it('an unreachable service fails with a clear error; a fresh connection then works', async () => {

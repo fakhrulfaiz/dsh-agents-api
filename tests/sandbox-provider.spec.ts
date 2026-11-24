@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { startTestService, type TestService } from '@agentry/sandbox/testing'
 import type { OwnerId } from '../src/auth/authenticator.ts'
-import { createAgentrySandboxProvider } from '../src/sandbox/agentry-sandbox-provider.ts'
+import { copyIntoSandboxUploads, createAgentrySandboxProvider } from '../src/sandbox/agentry-sandbox-provider.ts'
 import type { EnvironmentRecord } from '../src/environment-types.ts'
 
 const OWNER = 'owner-a' as OwnerId
@@ -37,9 +37,29 @@ beforeEach(async () => {
         return void res.writeHead(200, { 'content-type': 'application/json' }).end('[]')
       }
       if (url.pathname === '/filesystem.Filesystem/ListDir') {
+        const { path, depth } = JSON.parse(Buffer.concat(chunks).toString() || '{}') as { path: string; depth?: number }
+        const below = [...files.keys()].filter((p) => p.startsWith(`${path}/`))
+        const seen = new Map<string, { name: string; type: string; path: string; size: string; modifiedTime: string }>()
+        for (const p of below) {
+          const parts = p.slice(path.length + 1).split('/')
+          if (depth === 1 && parts.length > 1) {
+            const dir = `${path}/${parts[0]!}`
+            seen.set(dir, { name: parts[0]!, type: 'FILE_TYPE_DIRECTORY', path: dir, size: '0', modifiedTime: '2026-11-24T00:00:00Z' })
+          } else {
+            seen.set(p, { name: p.split('/').pop()!, type: 'FILE_TYPE_FILE', path: p, size: String(files.get(p)!.length), modifiedTime: '2026-11-24T01:02:03Z' })
+          }
+        }
+        return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ entries: [...seen.values()] }))
+      }
+      if (url.pathname === '/filesystem.Filesystem/Stat') {
         const { path } = JSON.parse(Buffer.concat(chunks).toString() || '{}') as { path: string }
-        const entries = [...files.keys()].filter((p) => p.startsWith(`${path}/`)).map((p) => ({ name: p.split('/').pop(), type: 'FILE_TYPE_FILE', path: p }))
-        return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ entries }))
+        if (!files.has(path)) return void res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ code: 'not_found', message: 'no such file' }))
+        return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ entry: { name: path.split('/').pop(), type: 'FILE_TYPE_FILE', path, size: String(files.get(path)!.length) } }))
+      }
+      if (url.pathname === '/filesystem.Filesystem/Remove') {
+        const { path } = JSON.parse(Buffer.concat(chunks).toString() || '{}') as { path: string }
+        files.delete(path)
+        return void res.writeHead(200, { 'content-type': 'application/json' }).end('{}')
       }
       res.writeHead(404).end('{}')
     })
@@ -80,6 +100,30 @@ describe('sandbox environment provider', () => {
     expect(new TextDecoder().decode(await p.readFile(r, 'notes/a.txt'))).toBe('hello')
     expect(await p.listFiles(r)).toEqual(['notes/a.txt'])
     await expect(p.readFile(r, '../../etc/passwd')).rejects.toThrow(/invalid workspace path/)
+  })
+
+  it('lists workspace entries with size and time (skipping .git and node_modules), stats, removes, and copies uploads without overwriting', async () => {
+    const p = provider()
+    const created = await p.create(OWNER, 'env_1', {})
+    const r = record(created.handle!)
+    const w = created.workspacePath
+    files.set(`${w}/report.md`, '# hi')
+    files.set(`${w}/out/chart.png`, 'png!')
+    files.set(`${w}/node_modules/x/index.js`, 'x')
+    files.set(`${w}/.git/HEAD`, 'ref')
+    expect(await p.listEntries(r)).toEqual([
+      { path: 'out/chart.png', size: 4, last_modified: '2026-11-24T01:02:03.000Z' },
+      { path: 'report.md', size: 4, last_modified: '2026-11-24T01:02:03.000Z' },
+    ])
+    expect(await p.exists(r, 'report.md')).toBe(true)
+    expect(await p.exists(r, 'nope.md')).toBe(false)
+    const first = await copyIntoSandboxUploads(p, r, 'data.csv', (async function* () { yield new TextEncoder().encode('a,b') })())
+    const second = await copyIntoSandboxUploads(p, r, 'data.csv', (async function* () { yield new TextEncoder().encode('c,d') })())
+    expect([first.relative, second.relative]).toEqual(['uploads/data.csv', 'uploads/data-1.csv'])
+    expect(files.get(`${w}/uploads/data.csv`)).toBe('a,b')
+    expect(second.absolute).toBe(`${w}/uploads/data-1.csv`)
+    await second.remove?.()
+    expect(files.has(`${w}/uploads/data-1.csv`)).toBe(false)
   })
 
   it('a failed create reports failed with the reason; status of a missing sandbox is failed', async () => {

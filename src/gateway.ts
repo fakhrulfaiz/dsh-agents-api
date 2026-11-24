@@ -40,7 +40,7 @@ import { fileIdsFromInput, overlayAgent, parseApprovalResponse, userTextFromInpu
 import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
 import { mountAgentInstructions } from './mount-instructions.ts'
 import { AGENTRY_PRESET_ID } from './preset.ts'
-import { providerRows, type AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
+import { copyIntoSandboxUploads, providerRows, type AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
 import type { SandboxPresets } from './sandbox/presets.ts'
 import { SandboxApiError } from '@agentry/sandbox/client'
 import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
@@ -2142,6 +2142,15 @@ export class AgentsGateway {
       json(res, 200, { object: 'list', data: await listS3Artifacts(this.artifacts, sessionId) })
       return
     }
+    const sandbox = await this.sandboxOfSession(owner, sessionId)
+    if (sandbox !== undefined) {
+      try {
+        json(res, 200, { object: 'list', data: await sandbox.provider.listEntries(sandbox.record) })
+      } catch (e: unknown) {
+        json(res, 503, { error: { type: 'server_error', code: 'sandbox_unavailable', message: errorMessage(e) } })
+      }
+      return
+    }
     const workspace = await this.workspaceOf(res, sessionId)
     if (workspace === undefined) return
     json(res, 200, { object: 'list', data: await listWorkspaceArtifacts(workspace) })
@@ -2175,9 +2184,16 @@ export class AgentsGateway {
     if (this.artifacts !== undefined) {
       body = await getS3Artifact(this.artifacts, sessionId, rawPath)
     } else {
-      const workspace = await this.workspaceOf(res, sessionId)
-      if (workspace === undefined) return
-      body = await getWorkspaceArtifact(workspace, rawPath)
+      const sandbox = await this.sandboxOfSession(owner, sessionId)
+      if (sandbox !== undefined) {
+        body = await sandbox.provider.exists(sandbox.record, rawPath)
+          ? Buffer.from(await sandbox.provider.readFile(sandbox.record, rawPath))
+          : undefined
+      } else {
+        const workspace = await this.workspaceOf(res, sessionId)
+        if (workspace === undefined) return
+        body = await getWorkspaceArtifact(workspace, rawPath)
+      }
     }
     if (body === undefined) {
       notFound(res, 'artifact not found')
@@ -2300,7 +2316,26 @@ export class AgentsGateway {
   private async attachFiles(owner: OwnerId, sessionId: string, fileIds: readonly string[], agent: OAIAgent): Promise<AttachedFiles> {
     const cwd = this.sessionRegistry.get(sessionId)?.workspace ?? await this.history.workspace(sessionId)
     if (cwd === undefined) throw new AgentsApiRequestError(`Session "${sessionId}" has no workspace`, 409, 'uploads_unsafe')
-    return this.ingest.attach({ owner, sessionId, cwd, ids: fileIds, supportsImages: () => this.routeAcceptsImages(agent) })
+    const sandbox = await this.sandboxOfSession(owner, sessionId)
+    return this.ingest.attach({
+      owner, sessionId, cwd, ids: fileIds, supportsImages: () => this.routeAcceptsImages(agent),
+      ...(sandbox === undefined ? {} : { copy: (name: string, source: AsyncIterable<Uint8Array>) => copyIntoSandboxUploads(sandbox.provider, sandbox.record, name, source) }),
+    })
+  }
+
+  /**
+   * The Agentry Sandbox a session runs in, when its environment is one: its workspace lives
+   * there, not on host disk (the host path is an empty placeholder).
+   */
+  private async sandboxOfSession(owner: OwnerId, sessionId: string): Promise<{ provider: AgentrySandboxProvider; record: EnvironmentRecord } | undefined> {
+    const row = await this.store.sessions.get(sessionId, owner)
+    const environment = row === undefined ? undefined : configOf(row).environment
+    if (environment?.type !== 'sandbox' || environment.environment_id === undefined) return undefined
+    const record = await this.store.environments.get(owner, environment.environment_id)
+    if (record === undefined || record.provider_metadata['sandbox_id'] === undefined) return undefined
+    const provider = this.sandboxes.get(record.provider) as Partial<AgentrySandboxProvider> | undefined
+    if (typeof provider?.listEntries !== 'function') return undefined
+    return { provider: provider as AgentrySandboxProvider, record }
   }
 
   /**
