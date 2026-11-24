@@ -35,4 +35,9 @@ export class DeliverablesCache<T = unknown> {
     }
     return value
   }
+
+  /** Forget a session (after it is deleted). */
+  delete(sessionId: string): void {
+    this.#entries.delete(sessionId)
+  }
 }

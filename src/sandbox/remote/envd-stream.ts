@@ -18,6 +18,7 @@ export interface EnvdProcessSpec {
 
 const MAX_INPUT = 1024 * 1024
 const MAX_STDERR = 16 * 1024
+const KILL_TIMEOUT_MS = 5_000
 const SIGKILL = 9
 const SIGTERM = 15
 
@@ -66,6 +67,7 @@ export class EnvdProcessStream extends Duplex {
           const out = ev.value.output
           if (out.case === 'stdout' && out.value.length > 0) {
             if (!this.push(Buffer.from(out.value))) await new Promise<void>((r) => { this.resumeRead = r })
+            if (this.destroyed) return
           } else if (out.case === 'stderr' && this.stderrText.length < MAX_STDERR) {
             this.stderrText += Buffer.from(out.value).toString('utf8').slice(0, MAX_STDERR - this.stderrText.length)
           }
@@ -118,10 +120,13 @@ export class EnvdProcessStream extends Duplex {
   async kill(force = false): Promise<void> {
     const pid = this.pid
     if (pid === undefined) return
-    await this.envd.process.sendSignal({ process: { selector: { case: 'pid', value: pid } }, signal: force ? SIGKILL : SIGTERM }, { headers: this.envd.userHeaders(this.spec.user) }).catch(() => {})
+    // Bounded: a sandbox that stopped answering must not hold the stream open.
+    await this.envd.process.sendSignal({ process: { selector: { case: 'pid', value: pid } }, signal: force ? SIGKILL : SIGTERM }, { headers: this.envd.userHeaders(this.spec.user), signal: AbortSignal.timeout(KILL_TIMEOUT_MS) }).catch(() => {})
   }
 
   override _destroy(error: Error | null, cb: (e?: Error | null) => void): void {
+    // Before `start` there is no pid to signal: abort the Start call at once.
+    if (this.pid === undefined) this.controller.abort(error ?? new Error('stream closed'))
     void this.kill(true).finally(() => { this.controller.abort(error ?? new Error('stream closed')) })
     this.resumeRead?.()
     cb(error)
