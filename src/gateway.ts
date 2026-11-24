@@ -54,6 +54,7 @@ import { DEFAULT_APPROVAL_VERBS, mountComposio } from './mount-composio.ts'
 import type { GithubDeps } from './skills/github.ts'
 import { resolveAgentSkills, validateSkillSelection, type BuiltinSkill } from './skills/resolve.ts'
 import { mountAgentTools } from './mount-agent-tools.ts'
+import { mountSandboxTools } from './mount-sandbox-tools.ts'
 import { mountScheduleGuidance } from './mount-schedule-guidance.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
@@ -83,7 +84,7 @@ import { absoluteFilePath, parseFileListQuery, parseFileWrite, selectFilePage, t
 import { normalizeTemplateConfig, parseTemplateInput, toSdkTemplate, unsupportedFields } from './environment/template-compat.ts'
 import type { SandboxProvider } from './sandbox/contract.ts'
 import type { SandboxRegistry } from './sandbox/registry.ts'
-import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, OAISandboxEnvironment } from './environment-types.ts'
+import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, EnvironmentTemplateConfig, OAISandboxEnvironment } from './environment-types.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SubagentState } from './session-registry.ts'
 import {
@@ -1464,6 +1465,19 @@ export class AgentsGateway {
           }
         },
       })
+      // The user's isolated sandboxes, when Agentry Sandbox is configured.
+      const sandboxProvider = this.sandboxes.get('sandbox') as AgentrySandboxProvider | undefined
+      if (sandboxProvider?.api !== undefined) {
+        mountSandboxTools(agentCtx, {
+          owner,
+          store: this.store,
+          provider: sandboxProvider,
+          provision: (raw, inline) => this.provisionEnvironment(owner, raw, inline),
+          destroy: (record) => this.destroyEnvironment(record),
+          describe: (record) => this.environmentJson(owner, record),
+          ...(environment?.type === 'sandbox' && typeof environment['environment_id'] === 'string' ? { currentEnvironmentId: environment['environment_id'] } : {}),
+        })
+      }
       mountSkillTools(agentCtx, {
         owner,
         deps: this.installDeps(),
@@ -1885,11 +1899,26 @@ export class AgentsGateway {
   }
 
   private async createEnvironment(req: IncomingMessage, res: ServerResponse, owner: OwnerId): Promise<void> {
-    const body = await readBody(req) as { template_id?: string; session_id?: string; image?: string; provider?: string; name?: unknown }
-    if (body.name !== undefined && (typeof body.name !== 'string' || body.name.trim().length > 80)) {
-      badRequest(res, 'Field "name" must be a string of at most 80 characters')
-      return
+    try {
+      json(res, 201, await this.provisionEnvironment(owner, await readBody(req)))
+    } catch (error: unknown) {
+      if (error instanceof AgentsApiRequestError) {
+        writeRequestError(res, error)
+        return
+      }
+      throw error
     }
+  }
+
+  /**
+   * Creates an environment for `owner` (the create route and the agent's `sandbox_create`): the requested
+   * provider, else the template's, else the default. `inline` is template config used when no template is named.
+   * @returns the environment's wire form. Throws AgentsApiRequestError (400) for a bad request.
+   */
+  async provisionEnvironment(owner: OwnerId, raw: Record<string, unknown>, inline?: EnvironmentTemplateConfig): Promise<SdkEnvironment> {
+    const fail = (message: string, code = 'bad_request'): never => { throw new AgentsApiRequestError(message, 400, code) }
+    const body = raw as { template_id?: string; session_id?: string; image?: string; provider?: string; name?: unknown }
+    if (body.name !== undefined && (typeof body.name !== 'string' || body.name.trim().length > 80)) fail('Field "name" must be a string of at most 80 characters')
     const input: CreateEnvironmentInput = {
       ...(typeof body.template_id === 'string' ? { template_id: body.template_id } : {}),
       ...(typeof body.session_id === 'string' ? { session_id: body.session_id } : {}),
@@ -1899,39 +1928,30 @@ export class AgentsGateway {
     let templateProvider: string | undefined
     if (input.template_id !== undefined) {
       const template = await this.store.templates.get(owner, input.template_id)
-      if (template === undefined) {
-        badRequest(res, `template not found: ${input.template_id}`)
-        return
-      }
+      if (template === undefined) return fail(`template not found: ${input.template_id}`)
       input.template = template.config
       templateProvider = template.provider
+    } else if (inline !== undefined) {
+      input.template = inline
     }
-    if (input.session_id !== undefined && await this.store.sessions.get(input.session_id, owner) === undefined) {
-      badRequest(res, `session not found: ${input.session_id}`)
-      return
-    }
+    if (input.session_id !== undefined && await this.store.sessions.get(input.session_id, owner) === undefined) fail(`session not found: ${input.session_id}`)
     // The requested provider, else the template's, else the default. A provider that is not registered (for example one that was removed) answers 400.
-    let provider: SandboxProvider
+    let provider!: SandboxProvider
     try {
       const requested = typeof body.provider === 'string' && body.provider.trim() !== '' ? body.provider.trim() : templateProvider
       provider = requested !== undefined ? this.sandboxes.require(requested) : this.sandboxes.default()
     } catch (error: unknown) {
-      badRequest(res, errorMessage(error))
-      return
+      fail(errorMessage(error))
     }
     // A template the provider cannot fully apply is stored, but nothing is provisioned from it: never ignore fields silently.
     const unsupported = input.template === undefined ? [] : unsupportedFields(input.template, provider)
-    if (unsupported.length > 0) {
-      writeRequestError(res, new AgentsApiRequestError(`sandbox provider "${provider.kind}" cannot apply template fields: ${unsupported.join(', ')}`, 400, 'sandbox_template_unsupported'))
-      return
-    }
+    if (unsupported.length > 0) fail(`sandbox provider "${provider.kind}" cannot apply template fields: ${unsupported.join(', ')}`, 'sandbox_template_unsupported')
     const id = `env_${randomUUID().replaceAll('-', '')}`
-    let created: Awaited<ReturnType<SandboxProvider['create']>>
+    let created!: Awaited<ReturnType<SandboxProvider['create']>>
     try {
       created = await provider.create(owner, id, input)
     } catch (error: unknown) {
-      badRequest(res, errorMessage(error))
-      return
+      fail(errorMessage(error))
     }
     const record: EnvironmentRecord = {
       id,
@@ -1952,7 +1972,7 @@ export class AgentsGateway {
       })
       throw error
     }
-    json(res, 201, await this.environmentJson(owner, record))
+    return this.environmentJson(owner, record)
   }
 
   private async listEnvironments(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {

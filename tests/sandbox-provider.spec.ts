@@ -111,7 +111,7 @@ describe('sandbox environment provider', () => {
     expect((await stat(created.workspacePath)).isDirectory()).toBe(true)
     expect(created.handle).toMatchObject({ workspace_directory: created.workspacePath, sandbox_id: expect.stringMatching(/^sbx_/), image: 'python:3.13' })
     const sbx = await svc.service.get('owner-a', created.handle!.sandbox_id!)
-    expect(sbx.template).toMatchObject({ image: 'python:3.13', packages: ['jq'], network: false, workspacePath: created.workspacePath, setupCommands: ['echo hi', 'pip install --user rich'] })
+    expect(sbx.template).toMatchObject({ image: 'python:3.13', packages: ['jq'], network: false, workspacePath: created.workspacePath, setupCommands: ['echo hi', "python3 -m pip install --user --break-system-packages 'rich' || python3 -m pip install --user 'rich'"] })
     expect(await p.status(record(created.handle!))).toBe('connected')
     await p.destroy(record(created.handle!))
     await expect(svc.service.get('owner-a', created.handle!.sandbox_id!)).rejects.toThrow()
