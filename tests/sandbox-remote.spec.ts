@@ -43,9 +43,9 @@ describe.skipIf(!haveImages())('DSH remote providers over Agentry Sandbox', () =
     const sbx = await svc.service.create(OWNER, { name: 'remote-spec', template: { workspacePath: workspace } } as never)
     ctx = new Context()
     await ctx.plugin(SessionProjectionRegistry)
-    await ctx.plugin(SandboxPolicyService, { mode: 'danger-full-access', workspaceRoot: workspace })
+    await ctx.plugin(SandboxPolicyService, { mode: (process.env['REMOTE_SPEC_MODE'] ?? 'danger-full-access') as 'danger-full-access', workspaceRoot: workspace })
     fiber = ctx.plugin(runtime, { url: svc.url, key: svc.key, owner: OWNER, sandboxId: sbx.id, workspace })
-    services = await ready(ctx, ['ssh', 'fs', 'subprocess', 'sandbox', 'ptcRuntime'])
+    services = await ready(ctx, ['ssh', 'fs', 'subprocess', 'sandbox', 'ptcRuntime', 'sandboxPolicy'])
   }, 300_000)
 
   afterAll(async () => {
@@ -151,6 +151,17 @@ describe.skipIf(!haveImages())('DSH remote providers over Agentry Sandbox', () =
     expect(out).toContain('24 80')
     expect(out).toContain('40 132')
     expect(out).toContain('got hi')
+  }, 60_000)
+
+  it('confines a command with a workspace-write policy inside the sandbox (DSH's Landlock/bwrap enforcement works in the hardened container)', async () => {
+    const policy = services.sandboxPolicy.resolve({ mode: 'workspace-write', cwd: workspace } as never)
+    const confined = await services.sandbox.confine(['/bin/sh', '-c', `touch ${workspace}/inside && echo in-ok; touch /home/agent/outside && echo out-ok; true`], policy)
+    expect(confined.enforcement).toBe('full')
+    const h = services.subprocess.spawn({ argv: confined.argv, cwd: workspace, graceMs: 500, env: { PATH: '/usr/bin:/bin' }, stdio: { stdin: 'ignore', stdout: { maxBytes: 4096 }, stderr: { maxBytes: 4096 } } })
+    await h.done
+    const out = h.collected.stdout!.readFrom(0).text
+    expect(out).toContain('in-ok')
+    expect(out).not.toContain('out-ok')
   }, 60_000)
 
   it('an unreachable service fails with a clear error; a fresh connection then works', async () => {
