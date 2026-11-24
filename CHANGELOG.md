@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## Unreleased — Agentry Sandbox provider
+
+- `sandbox.url` / `sandbox.key` (or `AGENTRY_SANDBOX_URL` / `AGENTRY_SANDBOX_KEY`) configure the Agentry Sandbox service; one without the other, or a non-http(s) URL, fails startup by name. `@agentry/sandbox` (linked, bundled into `lib/index.js`) provides the service client.
+
 ## 2026-11-25 — Item timing for the trajectory
 
 - Saved items carry Agentry-extension timing from the Session log, in epoch milliseconds (`ItemTiming` in OpenAPI): assistant `message` and `reasoning` items get `step`, `timing.started_at_ms` (the step's `step/start`, else its first streamed token), `timing.first_token_at_ms` and `timing.completed_at_ms`, and the assistant message gets the step's `usage`; `function_call` and `command_execution` items get `step` and `timing.started_at_ms`, plus `completed_at_ms` once their result is logged; `function_call_output` and user messages get `timing.completed_at_ms`. Subagent items get the same. Fields are optional and additive; existing clients ignore them. Live and replayed projections stay identical, and wire frame ids do not change.

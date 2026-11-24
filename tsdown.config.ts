@@ -11,6 +11,10 @@ export default defineConfig({
   outDir: 'lib',
   dts: false,
   outExtensions: () => ({ js: '.js' }),
-  deps: { neverBundle: [/^@deepseek-ai\//, /^@aws-sdk\//, /^node:/, /^pg$/] },
+  deps: {
+    neverBundle: [/^@deepseek-ai\//, /^@aws-sdk\//, /^node:/, /^pg$/],
+    // The Agentry Sandbox client ships as TypeScript source (a linked package); bundle it and its RPC runtime.
+    alwaysBundle: [/^@agentry\/sandbox/, /^@connectrpc\//, /^@bufbuild\//],
+  },
   copy: [{ from: 'src/store/migrations/*.sql', to: 'lib/migrations' }],
 })

@@ -312,6 +312,10 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
     accessKeyId: z.string(),
     secretAccessKey: z.string(),
   }).default(ABSENT),
+  sandbox: z.object({
+    url: z.string(),
+    key: z.string(),
+  }).default(ABSENT),
 }), (config) => {
   validateAuth(config.auth as ResolvedAuthConfig | undefined)
   if (typeof config.workspaces !== 'string' || config.workspaces.trim() === '') throw new Error('agents-api: "workspaces" must not be empty')
