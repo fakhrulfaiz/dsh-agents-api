@@ -32,6 +32,8 @@ export interface SdkTemplate {
   provider: string
   /** Extension: container image for container providers. */
   image?: string
+  /** Extension: CPU and memory limits for container providers. */
+  resources?: { cpus?: number; memory_mb?: number }
   /** Extension: template fields set to something the provider cannot apply; provisioning fails while any remain. */
   unsupported_fields: TemplateField[]
 }
@@ -80,6 +82,7 @@ export function requestedFields(config: EnvironmentTemplateConfig): TemplateFiel
   if ((c.capability_directories?.length ?? 0) > 0) fields.push('capability_directories')
   if ((c.setup_commands?.length ?? 0) > 0) fields.push('setup_commands')
   if (c.image !== undefined && c.image !== '') fields.push('image')
+  if (c.resources !== undefined && (c.resources.cpus !== undefined || c.resources.memory_mb !== undefined)) fields.push('resources')
   return fields
 }
 
@@ -135,6 +138,7 @@ export function toSdkTemplate(stored: EnvironmentTemplate, provider: SandboxProv
         }),
     provider: stored.provider,
     ...(config.image !== undefined && config.image !== '' ? { image: config.image } : {}),
+    ...(config.resources !== undefined ? { resources: config.resources } : {}),
     unsupported_fields: unsupportedFields(config, provider),
   }
 }
@@ -218,6 +222,20 @@ export function parseTemplateInput(raw: unknown): { name?: string | null; provid
   if (body['image'] !== undefined && body['image'] !== null) {
     if (typeof body['image'] !== 'string') return { error: 'Field "image" must be a string' }
     config.image = body['image']
+  }
+  if (body['resources'] !== undefined && body['resources'] !== null) {
+    const r = body['resources']
+    if (!isRecord(r)) return { error: 'Field "resources" must be an object with cpus and memory_mb' }
+    const resources: { cpus?: number; memory_mb?: number } = {}
+    if (r['cpus'] !== undefined && r['cpus'] !== null) {
+      if (typeof r['cpus'] !== 'number' || !(r['cpus'] >= 0.1 && r['cpus'] <= 64)) return { error: 'Field "resources.cpus" must be a number from 0.1 to 64' }
+      resources.cpus = r['cpus']
+    }
+    if (r['memory_mb'] !== undefined && r['memory_mb'] !== null) {
+      if (typeof r['memory_mb'] !== 'number' || !Number.isInteger(r['memory_mb']) || r['memory_mb'] < 128 || r['memory_mb'] > 262_144) return { error: 'Field "resources.memory_mb" must be a whole number from 128 to 262144' }
+      resources.memory_mb = r['memory_mb']
+    }
+    if (Object.keys(resources).length > 0) config.resources = resources
   }
   return out
 }

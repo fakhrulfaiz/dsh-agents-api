@@ -10,7 +10,7 @@
  */
 import { mkdir, rmdir } from 'node:fs/promises'
 import { join, posix } from 'node:path'
-import { createSandboxApi, SandboxApiError, type SandboxApi, type WireSandbox, type WireTemplate } from '@agentry/sandbox/client'
+import { createSandboxApi, SandboxApiError, type SandboxApi, type WireBackend, type WireSandbox, type WireTemplate } from '@agentry/sandbox/client'
 import type { OwnerId } from '../auth/authenticator.ts'
 import { directorySegment } from '../environment/local.ts'
 import type { CreateEnvironmentInput } from '../environment/provider.ts'
@@ -26,7 +26,7 @@ export interface AgentrySandboxOptions {
 
 export interface AgentrySandboxProvider extends SandboxProvider {
   /** Whether the service answers and accepts the key, with the reason when not. */
-  availability(): Promise<{ available: true; version: string } | { available: false; reason: string }>
+  availability(): Promise<{ available: true; version: string; default_image?: WireBackend['default_image'] } | { available: false; reason: string }>
   /** The service client for one owner (start, stop, reset, envd). */
   api(owner: string): SandboxApi
   /** Workspace files with size and modification time, skipping `.git` and `node_modules` (at most 5000). */
@@ -106,6 +106,7 @@ export function toServiceTemplate(t: EnvironmentTemplateConfig | undefined): Wir
   ]
   if (setup.length > 0) out.setup_commands = setup
   if (t.network) out.network = t.network.access !== 'disabled'
+  if (t.resources !== undefined) out.resources = { ...t.resources }
   // Template files are base64 (`inline`); `file_id` files need the Files API and are not applied here.
   // `/workspace/...` (the SDK's workspace) lands in the sandbox's real workspace.
   const inWorkspace = (path: string) => (path === '/workspace' || path.startsWith('/workspace/') ? path.slice('/workspace/'.length) : path)
@@ -133,7 +134,7 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
 
   return {
     kind: 'sandbox',
-    capabilities: { templateFields: ['image', 'packages', 'setup_commands', 'env', 'network', 'files'], files: true, exec: true },
+    capabilities: { templateFields: ['image', 'packages', 'setup_commands', 'env', 'network', 'files', 'resources'], files: true, exec: true },
 
     api,
 
@@ -141,7 +142,7 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
       try {
         const [backend] = await quickApi('agentry').backends()
         if (!backend) return { available: false, reason: 'Agentry Sandbox has no backend' }
-        return backend.available ? { available: true, version: backend.version ?? 'unknown' } : { available: false, reason: backend.reason ?? 'the sandbox backend is unavailable' }
+        return backend.available ? { available: true, version: backend.version ?? 'unknown', ...(backend.default_image ? { default_image: backend.default_image } : {}) } : { available: false, reason: backend.reason ?? 'the sandbox backend is unavailable' }
       } catch (e) {
         if (e instanceof SandboxApiError && e.status === 401) return { available: false, reason: 'Agentry Sandbox refused the configured key' }
         return { available: false, reason: (e as Error).message }

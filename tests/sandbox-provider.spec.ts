@@ -87,6 +87,12 @@ describe('sandbox environment provider', () => {
     expect(out.files).toEqual([{ path: 'notes/a.md', content: '# hi' }, { path: 'b.txt', content: 'b' }])
   })
 
+  it('passes resources through and reports the default image', async () => {
+    const { toServiceTemplate } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    expect(toServiceTemplate({ resources: { cpus: 2, memory_mb: 4096 } }).resources).toEqual({ cpus: 2, memory_mb: 4096 })
+    expect(await provider().availability()).toMatchObject({ available: true, default_image: { name: expect.any(String), runtimes: { python: '3.11' } } })
+  })
+
   it('describes a sandbox, and says gone once it is deleted', async () => {
     const p = provider()
     const created = await p.create(OWNER, 'env_1', { name: 'Data box' })
@@ -155,7 +161,7 @@ describe('sandbox environment provider', () => {
   })
 
   it('reports availability, with the reason when the service is unreachable or refuses the key', async () => {
-    expect(await provider().availability()).toEqual({ available: true, version: 'fake' })
+    expect(await provider().availability()).toMatchObject({ available: true, version: 'fake' })
     expect(await createAgentrySandboxProvider({ url: 'http://127.0.0.1:1', key: 'k', workspacesRoot: root }).availability()).toMatchObject({ available: false, reason: expect.stringContaining('not reachable') })
     expect(await createAgentrySandboxProvider({ url: svc.url, key: 'wrong', workspacesRoot: root }).availability()).toMatchObject({ available: false, reason: expect.stringContaining('key') })
   })

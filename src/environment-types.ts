@@ -28,6 +28,8 @@ export interface EnvironmentTemplateConfig {
   skills?: Array<Record<string, unknown>>
   /** Extension: a container image for container providers. */
   image?: string
+  /** Extension: CPU and memory limits for container providers. */
+  resources?: { cpus?: number; memory_mb?: number }
   /** Legacy. */
   setup?: string
   /** Legacy. */
