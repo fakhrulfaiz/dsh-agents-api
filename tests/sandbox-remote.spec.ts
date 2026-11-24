@@ -207,6 +207,42 @@ describe.skipIf(!haveImages())('DSH remote providers over Agentry Sandbox', () =
     expect(h.collected.stdout!.readFrom(0).text).toBe('back\n')
   }, 180_000)
 
+  it('disposing a runtime closes its helper gracefully: background processes in the sandbox are cleaned up (review I2)', async () => {
+    const other = new Context()
+    await other.plugin(SessionProjectionRegistry)
+    await other.plugin(SandboxPolicyService, { mode: 'danger-full-access', workspaceRoot: workspace })
+    const otherFiber = other.plugin(runtime, { url: svc.url, key: svc.key, owner: OWNER, sandboxId, workspace })
+    const o = await ready(other, ['fs', 'subprocess'])
+    o.subprocess.spawn({ argv: ['/bin/sh', '-c', 'sleep 301'], cwd: workspace, graceMs: 500, env: { PATH: '/usr/bin:/bin' }, stdio: { stdin: 'ignore', stdout: { maxBytes: 64 }, stderr: { maxBytes: 64 } } })
+    await new Promise((r) => setTimeout(r, 1500))
+    const count = async () => {
+      const h = services.subprocess.spawn({ argv: ['/bin/sh', '-c', 'ps -eo args | grep -c "^sleep 301" || true'], cwd: workspace, graceMs: 500, env: { PATH: '/usr/bin:/bin' }, stdio: { stdin: 'ignore', stdout: { maxBytes: 64 }, stderr: { maxBytes: 64 } } })
+      await h.done
+      return h.collected.stdout!.readFrom(0).text.trim()
+    }
+    expect(await count()).toBe('1')
+    await otherFiber.dispose()
+    await new Promise((r) => setTimeout(r, 3000))
+    expect(await count()).toBe('0')
+  }, 90_000)
+
+  it('an idle connection closes its helper (so the sandbox can idle-stop) and the next call starts a new one (review I3)', async () => {
+    const helpers = async () => {
+      const h = services.subprocess.spawn({ argv: ['/bin/sh', '-c', 'ps -eo args | grep -c "dsh-ssh/lib/helper.js" || true'], cwd: workspace, graceMs: 500, env: { PATH: '/usr/bin:/bin' }, stdio: { stdin: 'ignore', stdout: { maxBytes: 64 }, stderr: { maxBytes: 64 } } })
+      await h.done
+      return Number(h.collected.stdout!.readFrom(0).text.trim())
+    }
+    const before = await helpers()
+    const conn = new EnvdSshConnection(new Context(), { url: svc.url, key: svc.key, owner: OWNER, sandboxId, workspace, idleMs: 1500 })
+    await conn.request('heartbeat', {}, z.null())
+    expect(await helpers()).toBe(before + 1)
+    await new Promise((r) => setTimeout(r, 5000))
+    expect(await helpers()).toBe(before)
+    await conn.request('heartbeat', {}, z.null())
+    expect(await helpers()).toBe(before + 1)
+    await conn.dispose()
+  }, 90_000)
+
   it('an unreachable service fails with a clear error; a fresh connection then works', async () => {
     const down = new Context()
     const conn = new EnvdSshConnection(down, { url: 'http://127.0.0.1:1', key: 'k', owner: OWNER, sandboxId: 'sbx_none', workspace })

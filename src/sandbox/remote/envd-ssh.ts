@@ -36,6 +36,8 @@ export interface EnvdSshConfig {
   user?: string
   requestTimeoutMs?: number
   leaseMs?: number
+  /** Close the helper after this long without calls or open program streams (default 10 minutes), so the sandbox can idle-stop; the next call starts a new one. */
+  idleMs?: number
   maxFrameBytes?: number
   maxPending?: number
 }
@@ -109,6 +111,9 @@ export class EnvdSshConnection extends Service {
   private heartbeat: NodeJS.Timeout | undefined
   private failure: Error | undefined
   private closed = false
+  private lastUsed = Date.now()
+  private inFlight = 0
+  private idleTimer: NodeJS.Timeout | undefined
   private disposal: Promise<void> | undefined
 
   constructor(ctx: Context, config: EnvdSshConfig) {
@@ -118,7 +123,7 @@ export class EnvdSshConnection extends Service {
     const key = config.key ?? credentials?.key
     if (!url || !key) throw new Error('Agentry Sandbox is not configured (sandbox.url / sandbox.key)')
     this.config = {
-      user: 'agent', requestTimeoutMs: 30_000, leaseMs: 30_000, maxFrameBytes: 64 * 1024 * 1024, maxPending: 128,
+      user: 'agent', requestTimeoutMs: 30_000, leaseMs: 30_000, idleMs: 10 * 60_000, maxFrameBytes: 64 * 1024 * 1024, maxPending: 128,
       ...config, url, key,
     }
     if (!this.config.workspace.startsWith('/')) throw new Error('sandbox workspace must be absolute')
@@ -150,15 +155,23 @@ export class EnvdSshConnection extends Service {
   }
 
   async request<T>(method: string, params: unknown, result: z.ZodType<T>, signal?: AbortSignal, wait = false): Promise<T> {
-    await this.current()
-    this.assertOpen()
-    const bounded = wait ? signal : signal === undefined
-      ? AbortSignal.timeout(this.config.requestTimeoutMs)
-      : AbortSignal.any([signal, AbortSignal.timeout(this.config.requestTimeoutMs)])
-    return (this.rpc as SshRpcPeer).request(method, params, result, bounded)
+    this.inFlight += 1
+    this.lastUsed = Date.now()
+    try {
+      await this.current()
+      this.assertOpen()
+      const bounded = wait ? signal : signal === undefined
+        ? AbortSignal.timeout(this.config.requestTimeoutMs)
+        : AbortSignal.any([signal, AbortSignal.timeout(this.config.requestTimeoutMs)])
+      return await (this.rpc as SshRpcPeer).request(method, params, result, bounded)
+    } finally {
+      this.inFlight -= 1
+      this.lastUsed = Date.now()
+    }
   }
 
   async connectStream(endpoint: SshStreamEndpoint, signal?: AbortSignal): Promise<Socket> {
+    this.lastUsed = Date.now()
     const hello = await this.current()
     this.assertOpen()
     const combined = signal === undefined ? this.lifetime.signal : AbortSignal.any([signal, this.lifetime.signal])
@@ -180,6 +193,30 @@ export class EnvdSshConnection extends Service {
     }
   }
 
+  /** Close an idle helper; the connection reconnects on its next call. */
+  private checkIdle(): void {
+    const helper = this.helper
+    if (helper === undefined || this.failure !== undefined || this.closed) return
+    if (this.inFlight > 0 || this.sockets.size > 0 || Date.now() - this.lastUsed < this.config.idleMs) return
+    const rpc = this.rpc
+    this.fail(new Error('sandbox helper closed after being idle'), true)
+    void (async () => {
+      await rpc?.request('close', {}, z.null(), AbortSignal.timeout(5000)).catch(() => {})
+      await this.retire(helper)
+    })()
+  }
+
+  /** Let a helper exit by itself (stdin closed, then SIGTERM, then SIGKILL), then drop its stream. */
+  private async retire(helper: EnvdProcessStream): Promise<void> {
+    const wait = (ms: number) => Promise.race([helper.exited.then(() => true), new Promise<boolean>((r) => setTimeout(r, ms, false))])
+    helper.end()
+    if (!await wait(3000)) {
+      await helper.kill(false)
+      if (!await wait(2000)) await helper.kill(true)
+    }
+    helper.destroy()
+  }
+
   dispose(): Promise<void> {
     this.disposal ??= this.disposeOnce()
     return this.disposal
@@ -187,20 +224,17 @@ export class EnvdSshConnection extends Service {
 
   private async disposeOnce(): Promise<void> {
     this.closed = true
-    this.lifetime.abort(new Error('sandbox connection is closing'))
     if (this.heartbeat !== undefined) clearInterval(this.heartbeat)
+    if (this.idleTimer !== undefined) clearInterval(this.idleTimer)
+    const helper = this.helper
     try {
       await this.ready.catch(() => {})
       if (this.failure === undefined) await this.rpc?.request('close', {}, z.null(), AbortSignal.timeout(this.config.requestTimeoutMs)).catch(() => {})
     } finally {
+      this.lifetime.abort(new Error('sandbox connection is closing'))
       this.rpc?.close()
       for (const s of [...this.sockets].reverse()) s.destroy()
-      if (this.helper) {
-        this.helper.end()
-        const exited = await Promise.race([this.helper.exited, new Promise((r) => setTimeout(r, 3000, 'timeout'))])
-        if (exited === 'timeout') await this.helper.kill(true)
-        this.helper.destroy()
-      }
+      if (helper && !helper.destroyed) await this.retire(helper)
     }
   }
 
@@ -209,15 +243,17 @@ export class EnvdSshConnection extends Service {
     if (this.failure !== undefined) throw this.failure
   }
 
-  private fail(error: Error): void {
+  private fail(error: Error, idle = false): void {
     if (this.failure !== undefined) return
-    if (process.env['AGENTRY_DEBUG_ERRORS'] === '1') process.stderr.write(`[agentry-sandbox-runtime] ${this.config.sandboxId}: ${error.message}\n`)
+    if (!idle && process.env['AGENTRY_DEBUG_ERRORS'] === '1') process.stderr.write(`[agentry-sandbox-runtime] ${this.config.sandboxId}: ${error.message}\n`)
     this.failure = error
-    this.lifetime.abort(error)
     if (this.heartbeat !== undefined) clearInterval(this.heartbeat)
+    if (idle) return
+    this.lifetime.abort(error)
     this.rpc?.close(error)
     for (const s of [...this.sockets].reverse()) s.destroy(error)
-    this.helper?.destroy(error)
+    const helper = this.helper
+    if (helper && !helper.destroyed) void this.retire(helper)
   }
 
   private async start(): Promise<Hello> {
@@ -238,9 +274,10 @@ export class EnvdSshConnection extends Service {
     const manifest = manifestSchema.parse(JSON.parse(Buffer.from(raw).toString('utf8')))
     this.manifest = manifest
     if (this.closed) throw new Error('sandbox connection closed before startup')
+    // The helper's own stream is not tied to the connection lifetime: closing lets it exit and clean up (retire).
     const helper = new EnvdProcessStream(this.envd, {
       cmd: manifest.node, args: ['--disable-sigusr1', manifest.helper], cwd: this.config.workspace, user: this.config.user,
-    }, this.lifetime.signal)
+    })
     this.helper = helper
     // Events of an earlier helper must not fail a newer connection.
     const failHere = (error: Error): void => { if (this.helper === helper) this.fail(error) }
@@ -264,6 +301,11 @@ export class EnvdSshConnection extends Service {
         .finally(() => { pending = undefined })
     }, Math.floor(this.config.leaseMs / 3))
     this.heartbeat.unref()
+    this.lastUsed = Date.now()
+    if (this.idleTimer === undefined) {
+      this.idleTimer = setInterval(() => { this.checkIdle() }, Math.max(500, Math.min(60_000, Math.floor(this.config.idleMs / 3))))
+      this.idleTimer.unref()
+    }
     return hello
   }
 }
