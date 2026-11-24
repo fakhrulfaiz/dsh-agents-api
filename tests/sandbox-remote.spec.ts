@@ -32,6 +32,7 @@ let svc: DockerTestService
 let ctx: Context
 let workspace: string
 let services: Context
+let fiber: { dispose(): unknown } | undefined
 
 const ready = (c: Context, names: string[]) => new Promise<Context>((resolve) => { c.inject(names, (inner) => { resolve(inner) }) })
 
@@ -43,12 +44,12 @@ describe.skipIf(!haveImages())('DSH remote providers over Agentry Sandbox', () =
     ctx = new Context()
     await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SandboxPolicyService, { mode: 'danger-full-access', workspaceRoot: workspace })
-    ctx.plugin(runtime, { url: svc.url, key: svc.key, owner: OWNER, sandboxId: sbx.id, workspace })
+    fiber = ctx.plugin(runtime, { url: svc.url, key: svc.key, owner: OWNER, sandboxId: sbx.id, workspace })
     services = await ready(ctx, ['ssh', 'fs', 'subprocess', 'sandbox', 'ptcRuntime'])
   }, 300_000)
 
   afterAll(async () => {
-    await ctx?.dispose?.()
+    await fiber?.dispose()
     await svc?.cleanup()
     await svc?.close()
   }, 120_000)
