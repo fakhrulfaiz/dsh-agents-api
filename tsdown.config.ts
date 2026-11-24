@@ -5,7 +5,7 @@ import { defineConfig } from 'tsdown'
 // a runtime dependency installed beside the package. Migration files are read
 // at runtime from `lib/migrations`, next to the bundle (see src/store/migrate.ts).
 export default defineConfig({
-  entry: { index: 'src/index.ts' },
+  entry: { index: 'src/index.ts', 'sandbox-runtime': 'src/sandbox/remote/plugin.ts' },
   format: 'esm',
   platform: 'node',
   outDir: 'lib',
@@ -14,7 +14,7 @@ export default defineConfig({
   deps: {
     neverBundle: [/^@deepseek-ai\//, /^@aws-sdk\//, /^node:/, /^pg$/],
     // The Agentry Sandbox client ships as TypeScript source (a linked package); bundle it and its RPC runtime.
-    alwaysBundle: [/^@agentry\/sandbox/, /^@connectrpc\//, /^@bufbuild\//],
+    alwaysBundle: [/^@agentry\/sandbox/, /^@connectrpc\//, /^@bufbuild\//, /^zod/],
   },
   copy: [{ from: 'src/store/migrations/*.sql', to: 'lib/migrations' }],
 })
