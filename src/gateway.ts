@@ -667,7 +667,9 @@ export class AgentsGateway {
       }
       if (error instanceof SessionCreateError) {
         this.ctx.logger.warn(`agents-api: session create failed: ${errorMessage(error)}`)
-        json(res, 500, { error: { type: 'server_error', message: 'The session could not be created', code: error.code } })
+        // Development aid: AGENTRY_DEBUG_ERRORS=1 returns the cause (it can name host paths, so never in production).
+        const detail = process.env['AGENTRY_DEBUG_ERRORS'] === '1' ? { detail: errorMessage((error as { cause?: unknown }).cause ?? error) } : {}
+        json(res, 500, { error: { type: 'server_error', message: 'The session could not be created', code: error.code, ...detail } })
         return
       }
       throw error
@@ -805,6 +807,11 @@ export class AgentsGateway {
         setup: this.buildAgentSetup(resolved, pending, cwd, owner, environment),
       })
       this.handles.set(sessionId, handle)
+      // Sandbox sessions start in full access: the container is the boundary (the agent has sudo there), and
+      // DSH's in-container confinement would set no_new_privs and break sudo. The user can still switch modes.
+      if (await this.sandboxEnvironmentOf(owner, environment)) {
+        (this.ctx.agents.get(sessionId) as { session?: { append(type: string, data: unknown): void } } | undefined)?.session?.append('sandbox/mode', { mode: 'danger-full-access' })
+      }
       this.pendingBySession.set(sessionId, pending)
       await this.store.sessions.insert({
         id: sessionId,
@@ -2321,6 +2328,13 @@ export class AgentsGateway {
       owner, sessionId, cwd, ids: fileIds, supportsImages: () => this.routeAcceptsImages(agent),
       ...(sandbox === undefined ? {} : { copy: (name: string, source: AsyncIterable<Uint8Array>) => copyIntoSandboxUploads(sandbox.provider, sandbox.record, name, source) }),
     })
+  }
+
+  /** Whether a session environment is an Agentry Sandbox environment. */
+  private async sandboxEnvironmentOf(owner: OwnerId, environment: OAIEnvironmentConfig | undefined): Promise<boolean> {
+    if (environment?.type !== 'sandbox' || environment.environment_id === undefined) return false
+    const record = await this.store.environments.get(owner, environment.environment_id)
+    return record?.provider === 'sandbox' && record.provider_metadata['sandbox_id'] !== undefined
   }
 
   /**

@@ -19,14 +19,19 @@ export const name = 'agentry-sandbox-runtime'
 export const inject = ['sandboxPolicy']
 export type Config = EnvdSshConfig
 
-export function apply(ctx: Context, config: Config): void {
-  ctx.plugin(EnvdSshConnection, config)
-  ctx.plugin(SshSandboxProvider)
-  ctx.plugin(SshSubprocessRuntime)
-  ctx.plugin(SshFileSystem)
-  ctx.inject(['ssh', 'fs', 'subprocess', 'sandbox', 'sandboxPolicy'], (inner) => {
-    inner.plugin(NodePtcRuntime, { launch: inner.ssh.ptcLaunch })
-  })
+/**
+ * Mounts the connection and then each provider, awaiting every one, so the
+ * preset's audit (which runs once this row has activated) sees fs, subprocess,
+ * sandbox and ptcRuntime already provided.
+ */
+export async function apply(ctx: Context, config: Config): Promise<void> {
+  await ctx.plugin(EnvdSshConnection, config)
+  await ctx.plugin(SshSandboxProvider)
+  await ctx.plugin(SshSubprocessRuntime)
+  await ctx.plugin(SshFileSystem)
+  const ssh = ctx.get('ssh') as EnvdSshConnection | undefined
+  if (ssh === undefined) throw new Error('the sandbox connection did not start')
+  await ctx.plugin(NodePtcRuntime, { launch: ssh.ptcLaunch })
 }
 
 export default { name, inject, apply }

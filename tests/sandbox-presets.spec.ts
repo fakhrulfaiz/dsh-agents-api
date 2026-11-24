@@ -74,11 +74,11 @@ describe('sandbox presets', () => {
     expect(group).toMatchObject({ name: 'cordis:group', group: true })
     expect(Object.keys(group['isolate'] as object).sort()).toEqual([...SANDBOX_ISOLATED].sort())
     const inside = ids(group['config'] as PresetRow[])
-    for (const id of ['sandbox-runtime', 'sandbox-policy', 'working-directory', 'bash-sandbox', 'tool-bash', 'tool-fs', 'tool-fs-search', 'tool-jobs', 'present', 'tool-workflow', 'workflow-ptc', 'tool-subagent', 'tool-subagent-fork', 'persona']) expect(inside).toContain(id)
+    for (const id of ['agentry-sbx-runtime', 'agentry-sbx-policy', 'agentry-sbx-working-directory', 'agentry-sbx-bash', 'tool-bash', 'tool-fs', 'tool-fs-search', 'tool-jobs', 'present', 'tool-workflow', 'workflow-ptc', 'tool-subagent', 'tool-subagent-fork', 'persona']) expect(inside).toContain(id)
     const isolatedGroups = JSON.stringify(rows).match(/"subprocess":true/g) ?? []
     expect(isolatedGroups).toHaveLength(1)
     expect(JSON.stringify(rows)).not.toMatch(/"key"|"url"/)
-    const runtime = (group['config'] as PresetRow[]).find((r) => r['id'] === 'sandbox-runtime')
+    const runtime = (group['config'] as PresetRow[]).find((r) => r['id'] === 'agentry-sbx-runtime')
     expect(runtime).toMatchObject({ name: '@agentry/api/sandbox-runtime', config: { owner: 'o', sandboxId: 'sbx_9', workspace: '/w/o/sandbox-env_9' } })
     const bash = ids(base).includes('tool-bash') ? (base.find((r) => r['id'] === 'tool-bash') as PresetRow) : undefined
     expect(bash?.['disabled']).toEqual({ __jsExpr: "process.platform === 'win32'" })

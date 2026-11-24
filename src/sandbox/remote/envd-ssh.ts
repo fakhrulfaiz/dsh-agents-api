@@ -7,8 +7,10 @@
  * the sandbox as an envd process: administrative RPC uses its stdin/stdout,
  * and each program stream is a small envd process piping stdio to the
  * helper's Unix socket, authenticated end to end with the helper's TLS-PSK
- * stream key. Same public contract as DSH's `SshConnection`: one session, no
- * reconnect or replay; loss invalidates the connection.
+ * stream key. Like DSH's `SshConnection`, nothing in flight is ever replayed and
+ * loss fails every pending operation; unlike it, the next call after a loss starts a
+ * new helper (a stopped sandbox is started again by the service), because a
+ * sandbox can be stopped and started under a long-lived preset.
  */
 import { connect as tlsConnect, type TLSSocket } from 'node:tls'
 import type { Socket } from 'node:net'
@@ -96,8 +98,8 @@ declare module '@deepseek-ai/cordis' {
 export class EnvdSshConnection extends Service {
   private readonly config: Required<EnvdSshConfig>
   private readonly envd: EnvdClient
-  private readonly lifetime = new AbortController()
-  private readonly ready: Promise<Hello>
+  private lifetime = new AbortController()
+  private ready: Promise<Hello>
   private readonly sockets = new Set<{ destroy(error?: Error): void }>()
   private manifest: Manifest | undefined
   private helper: EnvdProcessStream | undefined
@@ -127,6 +129,18 @@ export class EnvdSshConnection extends Service {
 
   async [Service.init](): Promise<void> { await this.ready }
 
+  /** The current helper, starting a new one when the previous transport was lost. */
+  private async current(): Promise<Hello> {
+    if (this.closed) throw new Error('sandbox connection is closed')
+    if (this.failure !== undefined) {
+      this.failure = undefined
+      this.lifetime = new AbortController()
+      this.ready = this.start()
+      void this.ready.catch((error: unknown) => { this.fail(error as Error) })
+    }
+    return this.ready
+  }
+
   /** The PTC worker launch inside the sandbox (DSH's Node bootstrap, verified by digest at hello). */
   get ptcLaunch(): { kind: 'node-script'; executable: string; bootstrapPath: string } {
     if (this.remote === undefined || this.manifest === undefined) throw new Error('sandbox helper is not ready')
@@ -134,8 +148,7 @@ export class EnvdSshConnection extends Service {
   }
 
   async request<T>(method: string, params: unknown, result: z.ZodType<T>, signal?: AbortSignal, wait = false): Promise<T> {
-    this.assertOpen()
-    await this.ready
+    await this.current()
     this.assertOpen()
     const bounded = wait ? signal : signal === undefined
       ? AbortSignal.timeout(this.config.requestTimeoutMs)
@@ -144,7 +157,7 @@ export class EnvdSshConnection extends Service {
   }
 
   async connectStream(endpoint: SshStreamEndpoint, signal?: AbortSignal): Promise<Socket> {
-    const hello = await this.ready
+    const hello = await this.current()
     this.assertOpen()
     const combined = signal === undefined ? this.lifetime.signal : AbortSignal.any([signal, this.lifetime.signal])
     if (!endpoint.path.startsWith(`${hello.root}/`) || /[\r\n\0]/u.test(endpoint.path)) throw new Error('sandbox helper returned an invalid stream path')
@@ -196,6 +209,7 @@ export class EnvdSshConnection extends Service {
 
   private fail(error: Error): void {
     if (this.failure !== undefined) return
+    if (process.env['AGENTRY_DEBUG_ERRORS'] === '1') process.stderr.write(`[agentry-sandbox-runtime] ${this.config.sandboxId}: ${error.message}\n`)
     this.failure = error
     this.lifetime.abort(error)
     if (this.heartbeat !== undefined) clearInterval(this.heartbeat)
@@ -221,11 +235,13 @@ export class EnvdSshConnection extends Service {
       cmd: manifest.node, args: ['--disable-sigusr1', manifest.helper], cwd: this.config.workspace, user: this.config.user,
     }, this.lifetime.signal)
     this.helper = helper
-    helper.on('error', (error) => { this.fail(error) })
-    helper.once('end', () => { this.fail(new Error(`sandbox helper disconnected; remote outcomes and cleanup are unknown${helper.stderrText ? ` (${helper.stderrText.trim().slice(0, 300)})` : ''}`)) })
+    // Events of an earlier helper must not fail a newer connection.
+    const failHere = (error: Error): void => { if (this.helper === helper) this.fail(error) }
+    helper.on('error', failHere)
+    helper.once('end', () => { failHere(new Error(`sandbox helper disconnected; remote outcomes and cleanup are unknown${helper.stderrText ? ` (${helper.stderrText.trim().slice(0, 300)})` : ''}`)) })
     const rpc = new SshRpcPeer(helper, helper, this.config.maxFrameBytes, this.config.maxPending)
     this.rpc = rpc
-    rpc.once('closed', (error) => { this.fail(error as Error) })
+    rpc.once('closed', (error) => { failHere(error as Error) })
     await helper.ready()
     const hello = await rpc.request('hello', {
       protocol: SSH_PROTOCOL_VERSION, workspace: this.config.workspace, leaseMs: this.config.leaseMs, bootstrapPath: manifest.bootstrapPath,
@@ -237,7 +253,7 @@ export class EnvdSshConnection extends Service {
     let pending: Promise<unknown> | undefined
     this.heartbeat = setInterval(() => {
       pending ??= rpc.request('heartbeat', {}, z.null(), AbortSignal.timeout(this.config.leaseMs / 2))
-        .catch((error: unknown) => { this.fail(error as Error) })
+        .catch((error: unknown) => { failHere(error as Error) })
         .finally(() => { pending = undefined })
     }, Math.floor(this.config.leaseMs / 3))
     this.heartbeat.unref()

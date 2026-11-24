@@ -70,6 +70,17 @@ describe.skipIf(!haveImages())('DSH remote providers over Agentry Sandbox', () =
     expect(h.collected.stderr!.readFrom(0).text).toBe('err\n')
   }, 60_000)
 
+  it('a plain process can use sudo (the agent is root-capable inside its sandbox)', async () => {
+    const h = services.subprocess.spawn({
+      argv: ['/bin/sh', '-c', 'grep NoNewPrivs /proc/self/status; sudo -n true && echo SUDO-OK'], cwd: workspace, graceMs: 500, env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' },
+      stdio: { stdin: 'ignore', stdout: { maxBytes: 4096 }, stderr: { maxBytes: 4096 } },
+    })
+    await h.done
+    const out = h.collected.stdout!.readFrom(0).text
+    process.stdout.write(`SUDO-PROBE ${JSON.stringify(out)} ${JSON.stringify(h.collected.stderr!.readFrom(0).text.slice(0, 200))}\n`)
+    expect(out).toContain('SUDO-OK')
+  }, 60_000)
+
   it('round-trips stdin', async () => {
     const h = services.subprocess.spawn({
       argv: ['/bin/cat'], cwd: workspace, graceMs: 1000, env: { PATH: '/usr/bin:/bin' },
@@ -184,6 +195,17 @@ describe.skipIf(!haveImages())('DSH remote providers over Agentry Sandbox', () =
     await copy.remove?.()
     expect(await provider.exists(record, 'uploads/a.txt')).toBe(false)
   }, 60_000)
+
+  it('after the sandbox is stopped, the next call starts it again on a new helper (files and installs kept)', async () => {
+    await services.fs.writeText(await services.fs.resolve('kept.txt', { cwd: workspace }), 'kept')
+    await svc.service.stop(OWNER, sandboxId)
+    await new Promise((r) => setTimeout(r, 1500))
+    expect(await services.fs.readText(await services.fs.resolve('kept.txt', { cwd: workspace }))).toBe('kept')
+    expect((await svc.service.get(OWNER, sandboxId)).state).toBe('running')
+    const h = services.subprocess.spawn({ argv: ['/bin/echo', 'back'], cwd: workspace, graceMs: 500, env: { PATH: '/usr/bin:/bin' }, stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 1024 } } })
+    await h.done
+    expect(h.collected.stdout!.readFrom(0).text).toBe('back\n')
+  }, 180_000)
 
   it('an unreachable service fails with a clear error; a fresh connection then works', async () => {
     const down = new Context()

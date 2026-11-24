@@ -14,7 +14,7 @@ import { parse } from 'yaml'
 export type PresetRow = Record<string, unknown>
 
 /** Isolated service slots of a sandbox preset's group. */
-export const SANDBOX_ISOLATED = ['subprocess', 'shell', 'fs', 'workingDirectory', 'sandbox', 'sandboxPolicy', 'ptcRuntime', 'terminals'] as const
+export const SANDBOX_ISOLATED = ['ssh', 'subprocess', 'shell', 'fs', 'workingDirectory', 'sandbox', 'sandboxPolicy', 'ptcRuntime', 'terminals'] as const
 
 export const sandboxPresetId = (sandboxId: string) => `agentry-sbx-${sandboxId}`
 
@@ -48,10 +48,10 @@ export function sandboxPresetRows(base: readonly PresetRow[], sandbox: { owner: 
     group: true,
     isolate: Object.fromEntries(SANDBOX_ISOLATED.map((k) => [k, true])),
     config: [
-      { id: 'sandbox-policy', name: '@deepseek-ai/dsh-sandbox-policy', config: { mode: { __jsExpr: "process.env.DSH_PERMISSION_MODE ?? 'workspace-write'" }, workspaceRoot: sandbox.workspace } },
-      { id: 'sandbox-runtime', name: '@agentry/api/sandbox-runtime', config: { owner: sandbox.owner, sandboxId: sandbox.sandboxId, workspace: sandbox.workspace } },
-      { id: 'working-directory', name: '@deepseek-ai/dsh-working-directory' },
-      { id: 'bash-sandbox', name: '@deepseek-ai/dsh-bash-sandbox', config: { timeoutMs: 60000 } },
+      { id: 'agentry-sbx-policy', name: '@deepseek-ai/dsh-sandbox-policy', config: { mode: 'danger-full-access', workspaceRoot: sandbox.workspace } },
+      { id: 'agentry-sbx-runtime', name: '@agentry/api/sandbox-runtime', config: { owner: sandbox.owner, sandboxId: sandbox.sandboxId, workspace: sandbox.workspace } },
+      { id: 'agentry-sbx-working-directory', name: '@deepseek-ai/dsh-working-directory' },
+      { id: 'agentry-sbx-bash', name: '@deepseek-ai/dsh-bash-sandbox', config: { timeoutMs: 60000 } },
       ...base,
     ],
   }]

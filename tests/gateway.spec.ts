@@ -49,6 +49,7 @@ interface FakeAgent {
   steer: ReturnType<typeof vi.fn>
   cancel: ReturnType<typeof vi.fn>
   model: FakeModel
+  session: { append: ReturnType<typeof vi.fn> }
 }
 
 /** Names of the agent management tools the last fake context saw mounted. */
@@ -98,6 +99,7 @@ function fakeContext(options?: {
         if (options?.failCreate) throw new Error('factory failed')
         const agent: FakeAgent = {
           id: sessionId,
+          session: { append: vi.fn() },
           followup: vi.fn(() => {
             if (options?.failFollowup) throw 'followup failed'
           }),
@@ -1262,7 +1264,9 @@ describe('sessions on Agentry Sandbox environments', () => {
         rows: () => [{ id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash' }],
       })
       const store = new MemoryStore()
-      const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), { ...testGatewayOptions(registry), sandboxPresets })
+      const fake = fakeContext()
+      const agentsMap = fake.agents
+      const api = new AgentsGateway(fake.ctx, openAuthenticator, '/v1', store, new SessionRegistry(), { ...testGatewayOptions(registry), sandboxPresets })
       const base = await listen((req, res) => api.handle(req, res))
       const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
       const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string }
@@ -1274,6 +1278,10 @@ describe('sessions on Agentry Sandbox environments', () => {
       expect(sandboxIds).toHaveLength(1)
       expect(sandboxIds[0]).toMatch(/^agentry-sbx-sbx_/)
       expect(mountedPresets).toEqual([sandboxIds[0], sandboxIds[0], 'agentry'])
+      // Sandbox sessions start in full access (sudo works in the container); the local one is untouched.
+      const appends = [...agentsMap.values()].map((a) => (a as { session: { append: ReturnType<typeof vi.fn> } }).session.append.mock.calls)
+      expect(appends.filter((c) => c.some(([type, data]) => type === 'sandbox/mode' && (data as { mode: string }).mode === 'danger-full-access'))).toHaveLength(2)
+      expect(appends.filter((c) => c.length === 0)).toHaveLength(1)
       expect((await call(`/agents/environments/${env.id}`, { method: 'DELETE' })).status).toBe(200)
       expect(registered.size).toBe(0)
     } finally {
