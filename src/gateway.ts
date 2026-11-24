@@ -40,7 +40,7 @@ import { fileIdsFromInput, overlayAgent, parseApprovalResponse, userTextFromInpu
 import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
 import { mountAgentInstructions } from './mount-instructions.ts'
 import { AGENTRY_PRESET_ID } from './preset.ts'
-import { copyIntoSandboxUploads, providerRows, type AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
+import { copyIntoSandboxUploads, MAX_ARTIFACT_BYTES, providerRows, type AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
 import { sandboxStartErrorIn, type SandboxPresets } from './sandbox/presets.ts'
 import { SandboxApiError } from '@agentry/sandbox/client'
 import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
@@ -989,6 +989,7 @@ export class AgentsGateway {
       return
     }
     await this.discardSession(owner, sessionId)
+    this.deliverablesCache.delete(sessionId)
     json(res, 200, { id: sessionId, object: 'agent.session.deleted', deleted: true })
   }
 
@@ -2155,10 +2156,7 @@ export class AgentsGateway {
   private async listArtifacts(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
     if (!await this.requireSession(res, owner, sessionId)) return
-    if (this.artifacts !== undefined) {
-      json(res, 200, { object: 'list', data: await listS3Artifacts(this.artifacts, sessionId) })
-      return
-    }
+    // A sandbox session's files live in the sandbox, whatever artifact store is configured.
     const sandbox = await this.sandboxOfSession(owner, sessionId)
     if (sandbox !== undefined) {
       try {
@@ -2166,6 +2164,10 @@ export class AgentsGateway {
       } catch (e: unknown) {
         json(res, 503, { error: { type: 'server_error', code: 'sandbox_unavailable', message: errorMessage(e) } })
       }
+      return
+    }
+    if (this.artifacts !== undefined) {
+      json(res, 200, { object: 'list', data: await listS3Artifacts(this.artifacts, sessionId) })
       return
     }
     const workspace = await this.workspaceOf(res, sessionId)
@@ -2198,19 +2200,26 @@ export class AgentsGateway {
       return
     }
     let body: Awaited<ReturnType<typeof getS3Artifact>>
-    if (this.artifacts !== undefined) {
+    const sandbox = await this.sandboxOfSession(owner, sessionId)
+    if (sandbox !== undefined) {
+      try {
+        const size = await sandbox.provider.fileSize(sandbox.record, rawPath)
+        if (size !== undefined && size > MAX_ARTIFACT_BYTES) {
+          json(res, 413, { error: { type: 'invalid_request_error', code: 'file_too_large', message: `artifacts over ${String(MAX_ARTIFACT_BYTES / 1024 / 1024)} MB are not served` } })
+          return
+        }
+        body = size === undefined ? undefined : Buffer.from(await sandbox.provider.readFile(sandbox.record, rawPath))
+      } catch (e: unknown) {
+        if (/invalid workspace path/.test(errorMessage(e))) { badRequest(res, 'artifact path escapes the session workspace'); return }
+        json(res, 503, { error: { type: 'server_error', code: 'sandbox_unavailable', message: errorMessage(e) } })
+        return
+      }
+    } else if (this.artifacts !== undefined) {
       body = await getS3Artifact(this.artifacts, sessionId, rawPath)
     } else {
-      const sandbox = await this.sandboxOfSession(owner, sessionId)
-      if (sandbox !== undefined) {
-        body = await sandbox.provider.exists(sandbox.record, rawPath)
-          ? Buffer.from(await sandbox.provider.readFile(sandbox.record, rawPath))
-          : undefined
-      } else {
-        const workspace = await this.workspaceOf(res, sessionId)
-        if (workspace === undefined) return
-        body = await getWorkspaceArtifact(workspace, rawPath)
-      }
+      const workspace = await this.workspaceOf(res, sessionId)
+      if (workspace === undefined) return
+      body = await getWorkspaceArtifact(workspace, rawPath)
     }
     if (body === undefined) {
       notFound(res, 'artifact not found')

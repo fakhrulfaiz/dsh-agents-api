@@ -31,6 +31,8 @@ export interface AgentrySandboxProvider extends SandboxProvider {
   /** Workspace files with size and modification time, skipping `.git` and `node_modules` (at most 5000). */
   listEntries(record: EnvironmentRecord): Promise<WorkspaceEntry[]>
   /** Whether a workspace-relative path exists in the sandbox. */
+  /** Size of a workspace file, or `undefined` when there is no such file. */
+  fileSize(record: EnvironmentRecord, path: string): Promise<number | undefined>
   exists(record: EnvironmentRecord, path: string): Promise<boolean>
   /** Remove a workspace-relative file in the sandbox (missing is not an error). */
   remove(record: EnvironmentRecord, path: string): Promise<void>
@@ -74,6 +76,9 @@ export async function copyIntoSandboxUploads(
 }
 
 const AGENT = 'agent'
+const QUICK_TIMEOUT_MS = 10_000
+/** Largest artifact served from a sandbox in one response. */
+export const MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
 
 /** A workspace-relative path, refusing anything that would leave the workspace. */
 function inside(dir: string, path: string): string {
@@ -107,6 +112,8 @@ const statusOf = (s: WireSandbox['state']): EnvironmentStatus => (s === 'failed'
 
 export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): AgentrySandboxProvider {
   const api = (owner: string) => createSandboxApi({ url: opts.url, key: opts.key, owner })
+  // Status and availability are read on page loads: answer within seconds, not the 180 s create budget.
+  const quickApi = (owner: string) => createSandboxApi({ url: opts.url, key: opts.key, owner, timeoutMs: QUICK_TIMEOUT_MS })
   const meta = (record: EnvironmentRecord) => {
     const id = record.provider_metadata['sandbox_id']
     const dir = record.provider_metadata['workspace_directory']
@@ -123,7 +130,7 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
 
     async availability() {
       try {
-        const [backend] = await api('agentry').backends()
+        const [backend] = await quickApi('agentry').backends()
         if (!backend) return { available: false, reason: 'Agentry Sandbox has no backend' }
         return backend.available ? { available: true, version: backend.version ?? 'unknown' } : { available: false, reason: backend.reason ?? 'the sandbox backend is unavailable' }
       } catch (e) {
@@ -147,8 +154,11 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
 
     async status(record) {
       try {
-        return statusOf((await api(ownerOf(record)).get(meta(record).id)).state)
-      } catch {
+        return statusOf((await quickApi(ownerOf(record)).get(meta(record).id)).state)
+      } catch (e) {
+        // Gone is failed; a transient outage keeps the last known status instead of flipping to failed.
+        if (e instanceof SandboxApiError && e.status === 404) return 'failed'
+        if (e instanceof SandboxApiError && (e.code === 'unreachable' || e.status >= 500)) return record.status
         return 'failed'
       }
     },
@@ -196,6 +206,19 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
         }
       }
       return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    },
+
+    async fileSize(record, path) {
+      const { id, dir } = meta(record)
+      const envd = api(ownerOf(record)).envd(id)
+      try {
+        const res = await envd.filesystem.stat({ path: inside(dir, path) }, { headers: envd.userHeaders(AGENT) })
+        const type = String(res.entry?.type)
+        return type === '1' || type === 'FILE_TYPE_FILE' ? Number(res.entry?.size ?? 0) : undefined
+      } catch (e) {
+        if ((e as { code?: unknown }).code === 5 || /not[_ ]found|no such file/i.test((e as Error).message)) return undefined
+        throw e
+      }
     },
 
     async exists(record, path) {
