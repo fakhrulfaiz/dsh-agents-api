@@ -77,6 +77,26 @@ const provider = () => createAgentrySandboxProvider({ url: svc.url, key: svc.key
 const record = (handle: Record<string, string>): EnvironmentRecord => ({ id: 'env_1', object: 'environment', status: 'connected', provider: 'sandbox', provider_metadata: handle, created_at: 1 }) as EnvironmentRecord
 
 describe('sandbox environment provider', () => {
+  it('maps template files: base64 inline data decoded, /workspace paths into the real workspace, file_id skipped', async () => {
+    const { toServiceTemplate } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const out = toServiceTemplate({ files: [
+      { type: 'inline', path: '/workspace/notes/a.md', data: Buffer.from('# hi').toString('base64') },
+      { type: 'inline', path: 'b.txt', data: Buffer.from('b').toString('base64') },
+      { type: 'file_id', path: '/workspace/c.bin', file_id: 'file_1' },
+    ] })
+    expect(out.files).toEqual([{ path: 'notes/a.md', content: '# hi' }, { path: 'b.txt', content: 'b' }])
+  })
+
+  it('describes a sandbox, and says gone once it is deleted', async () => {
+    const p = provider()
+    const created = await p.create(OWNER, 'env_1', { name: 'Data box' })
+    const r = record(created.handle!)
+    expect(await p.describe(r)).toMatchObject({ state: 'running', image: expect.any(String) })
+    expect((await svc.service.get('owner-a', created.handle!.sandbox_id!)).name).toBe('Data box')
+    await p.destroy(r)
+    expect(await p.describe(r)).toMatchObject({ state: 'gone' })
+  })
+
   it('creates a sandbox mounted at a host placeholder path, reports status and destroys it', async () => {
     const p = provider()
     const created = await p.create(OWNER, 'env_1', { template: { image: 'python:3.13', packages: { system: ['jq'], python: ['rich'] }, setup_commands: [{ command: 'echo hi' }], network: { access: 'disabled' } } })

@@ -3605,6 +3605,17 @@ components:
         provider:
           type: string
           description: Extension. Name of the sandbox provider that backs the environment, for example `local`.
+        name:
+          type: string
+          description: Extension. Display name given at create.
+        sandbox:
+          type: object
+          description: "Extension (Agentry Sandbox environments): the sandbox's live state. `gone` once the sandbox no longer exists; `unknown` when the service did not answer."
+          properties:
+            state: { type: string, enum: [provisioning, running, stopped, failed, deleting, gone, unknown] }
+            image: { type: string }
+            started_at: { type: [integer, "null"] }
+            last_used_at: { type: [integer, "null"] }
         provider_metadata:
           type: object
           description: Extension. Provider-owned handle; `workspace_directory` for `local`.
