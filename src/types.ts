@@ -439,6 +439,26 @@ export interface OAIMessageItem {
   schedule_id?: string
   status: ItemStatus
   turn_id: string
+  /** Agentry extension: the assistant step (1-based within its turn) that produced it. */
+  step?: number
+  /** Agentry extension: token usage of the assistant step, when the provider reported it. */
+  usage?: OAITokenUsage
+  /** Agentry extension: see `OAIItemTiming`. */
+  timing?: OAIItemTiming
+}
+
+/**
+ * Agentry extension: when the Session log recorded an item, in epoch
+ * milliseconds. Each field is present only when the log has it: a running
+ * tool call has no `completed_at_ms` yet.
+ */
+export interface OAIItemTiming {
+  /** An assistant step: when the step started (its request was sent); a tool call: when it was called. */
+  started_at_ms?: number
+  /** An assistant step: its first streamed token. */
+  first_token_at_ms?: number
+  /** When the item was finished: the reply settled, the tool answered, the message was logged. */
+  completed_at_ms?: number
 }
 
 /** Saved function call. */
@@ -450,6 +470,10 @@ export interface OAIFunctionCallItem {
   arguments: Record<string, unknown> | string
   status: ToolCallStatus
   turn_id: string
+  /** Agentry extension: the assistant step that called it. */
+  step?: number
+  /** Agentry extension: see `OAIItemTiming`. */
+  timing?: OAIItemTiming
 }
 
 /** Saved function-call result. */
@@ -463,6 +487,8 @@ export interface OAIFunctionCallOutputItem {
   turn_id: string
   /** Agentry extension: a sign-in link for a connected app found in the output; clients show a Connect button. */
   connect_request?: ConnectRequest
+  /** Agentry extension: see `OAIItemTiming`. */
+  timing?: OAIItemTiming
 }
 
 /** Saved MCP tool call. */
@@ -489,6 +515,10 @@ export interface OAICommandExecutionItem {
   duration_ms?: number
   status: ToolCallStatus
   turn_id: string
+  /** Agentry extension: the assistant step that called it. */
+  step?: number
+  /** Agentry extension: see `OAIItemTiming`. */
+  timing?: OAIItemTiming
 }
 
 /**
@@ -521,6 +551,10 @@ export interface OAIReasoningItem {
   summary?: Array<{ type: 'summary_text'; text: string }>
   status: ItemStatus
   turn_id: string
+  /** Agentry extension: the assistant step that produced it. */
+  step?: number
+  /** Agentry extension: see `OAIItemTiming`. */
+  timing?: OAIItemTiming
 }
 
 /** One saved session item. */

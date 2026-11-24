@@ -3,7 +3,11 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
-## 2026-11-24 — Faster deliverables
+## 2026-11-25 — Item timing for the trajectory
+
+- Saved items carry Agentry-extension timing from the Session log, in epoch milliseconds (`ItemTiming` in OpenAPI): assistant `message` and `reasoning` items get `step`, `timing.started_at_ms` (the step's `step/start`, else its first streamed token), `timing.first_token_at_ms` and `timing.completed_at_ms`, and the assistant message gets the step's `usage`; `function_call` and `command_execution` items get `step` and `timing.started_at_ms`, plus `completed_at_ms` once their result is logged; `function_call_output` and user messages get `timing.completed_at_ms`. Subagent items get the same. Fields are optional and additive; existing clients ignore them. Live and replayed projections stay identical, and wire frame ids do not change.
+
+## 2026-11-24 — Skill viewer, agent avatars, faster deliverables
 
 - `GET /agents/skills/view/{name}` lists a skill's files and `SKILL.md` (the caller's installed skills by name, else Agentry built-ins); `GET /agents/skills/view/{name}/files/{path}` returns one text file (≤ 256 KB; traversal 400, binary 415, larger 413), for the web skill viewer.
 - `agent_create` / `agent_update` take an avatar `icon` and `color` (names in `src/agent-avatar.ts`, shared with the web app), saved as `metadata.icon` / `metadata.color`; the `create-agent` skill asks the model to pick ones that fit the agent's job.

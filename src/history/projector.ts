@@ -14,6 +14,7 @@ import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import { textFromContent, toOAIUsage, parseToolArguments } from '../input.ts'
 import { redactAgentSecrets } from '../redact.ts'
 import { itemsFromEvent, slashCommandItem, type CommandRun } from '../items.ts'
+import { ItemTimer } from './item-timer.ts'
 import type {
   OAIAgent,
   OAIAgentSession,
@@ -89,6 +90,8 @@ export class WireProjector {
   lastActiveAt: number
   currentTurnId: string | undefined
   readonly #required: Array<Extract<OAIRequiredAction, { type: 'function_call' }>> = []
+  /** Step starts and open tool calls, for item timing. */
+  readonly #timer = new ItemTimer()
   /** Pending approvals and questions: live-only, never in the Session log, so a fold of the log never holds any. */
   #interaction: OAIRequiredAction[] = []
   readonly #frames: ReplayFrame[] | undefined
@@ -190,8 +193,11 @@ export class WireProjector {
     }
     if (event.type === 'command/done') return this.#commandDone(event, at, frames)
 
+    if (this.#timer.note(event)) return { frames }
+
     const turnId = this.currentTurnId ?? NO_TURN_ID
-    const projected = itemsFromEvent(event, turnId)
+    const projected = itemsFromEvent(event, turnId, this.#timer.context(event))
+    this.#timer.settle(event, projected)
     const known = projected.length > 0 || event.type === 'turn/end' || event.type === 'assistant/message'
     if (!known) return { frames }
     this.items.push(...projected)
