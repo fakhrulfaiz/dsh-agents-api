@@ -1229,14 +1229,19 @@ describe('sandbox environments through the gateway', () => {
       const providers = (await (await call('/agents/environments/providers')).json()) as { data: { name: string; available: boolean }[] }
       expect(providers.data.map((p) => [p.name, p.available])).toEqual(expect.arrayContaining([['local', true], ['sandbox', true]]))
       const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string; provider: string; status: string }
-      expect(env).toMatchObject({ provider: 'sandbox', status: 'connected' })
-      expect((await call(`/agents/environments/${env.id}/stop`, { method: 'POST' })).status).toBe(200)
+      expect(env).toMatchObject({ provider: 'sandbox', status: 'connected', sandbox: { state: 'running' } })
+      const stopped = await call(`/agents/environments/${env.id}/stop`, { method: 'POST' })
+      expect(stopped.status).toBe(200)
+      expect(await stopped.json()).toMatchObject({ sandbox: { state: 'stopped' } })
       expect((await call(`/agents/environments/${env.id}/start`, { method: 'POST' })).status).toBe(200)
       expect((await call(`/agents/environments/${env.id}/reset`, { method: 'POST', body: JSON.stringify({ keep_workspace: false }) })).status).toBe(200)
       expect(svc.backend.calls.some((c) => c.endsWith('keep=false'))).toBe(true)
       const second = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { status: string; error?: string }
       expect(second).toMatchObject({ status: 'failed', error: expect.stringContaining('limit 1') })
-      const local = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({}) })).json()) as { id: string }
+      const local = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ name: 'Scratch' }) })).json()) as { id: string; name?: string; sandbox?: unknown }
+      expect(local.name).toBe('Scratch')
+      expect(local.sandbox).toBeUndefined()
+      expect((await call('/agents/environments', { method: 'POST', body: JSON.stringify({ name: 'x'.repeat(81) }) })).status).toBe(400)
       const refused = await call(`/agents/environments/${local.id}/start`, { method: 'POST' })
       expect(refused.status).toBe(409)
       expect(JSON.stringify(await refused.json())).not.toContain(svc.key)

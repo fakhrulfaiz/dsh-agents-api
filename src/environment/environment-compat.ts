@@ -46,6 +46,17 @@ export interface SdkEnvironment {
   error?: string
   created_at: number
   updated_at?: number
+  /** Extension: display name given at create. */
+  name?: string
+  /** Extension (Agentry Sandbox environments): the sandbox's live state; `state: 'unknown'` when the service did not answer. */
+  sandbox?: SandboxSummary
+}
+
+export interface SandboxSummary {
+  state: 'provisioning' | 'running' | 'stopped' | 'failed' | 'deleting' | 'gone' | 'unknown'
+  image?: string
+  started_at?: number | null
+  last_used_at?: number | null
 }
 
 const text = (value: unknown): string => (typeof value === 'string' ? value : '')

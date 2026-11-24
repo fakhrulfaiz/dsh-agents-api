@@ -1885,11 +1885,16 @@ export class AgentsGateway {
   }
 
   private async createEnvironment(req: IncomingMessage, res: ServerResponse, owner: OwnerId): Promise<void> {
-    const body = await readBody(req) as { template_id?: string; session_id?: string; image?: string; provider?: string }
+    const body = await readBody(req) as { template_id?: string; session_id?: string; image?: string; provider?: string; name?: unknown }
+    if (body.name !== undefined && (typeof body.name !== 'string' || body.name.trim().length > 80)) {
+      badRequest(res, 'Field "name" must be a string of at most 80 characters')
+      return
+    }
     const input: CreateEnvironmentInput = {
       ...(typeof body.template_id === 'string' ? { template_id: body.template_id } : {}),
       ...(typeof body.session_id === 'string' ? { session_id: body.session_id } : {}),
       ...(typeof body.image === 'string' ? { image: body.image } : {}),
+      ...(typeof body.name === 'string' && body.name.trim() !== '' ? { name: body.name.trim() } : {}),
     }
     let templateProvider: string | undefined
     if (input.template_id !== undefined) {
@@ -1933,7 +1938,7 @@ export class AgentsGateway {
       object: 'environment',
       status: created.status,
       provider: provider.kind,
-      provider_metadata: provider.kind === 'local' ? { workspace_directory: created.workspacePath } : { ...created.handle },
+      provider_metadata: { ...(provider.kind === 'local' ? { workspace_directory: created.workspacePath } : { ...created.handle }), ...(input.name !== undefined ? { name: input.name } : {}) },
       created_at: Math.floor(Date.now() / 1000),
       ...(input.template_id !== undefined ? { template_id: input.template_id } : {}),
       ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
@@ -2065,8 +2070,14 @@ export class AgentsGateway {
 
   /** The wire form of an environment: the SDK `agent.environment`, with the resources of its template when it still exists. */
   private async environmentJson(owner: OwnerId, record: EnvironmentRecord): Promise<SdkEnvironment> {
-    const template = record.template_id === undefined ? undefined : await this.store.templates.get(owner, record.template_id)
-    return toSdkEnvironment(record, template)
+    const provider = this.sandboxes.get(record.provider) as Partial<AgentrySandboxProvider> | undefined
+    const [template, sandbox] = await Promise.all([
+      record.template_id === undefined ? undefined : this.store.templates.get(owner, record.template_id),
+      typeof provider?.describe === 'function' ? provider.describe(record) : undefined,
+    ])
+    const out = toSdkEnvironment(record, template)
+    const name = record.provider_metadata['name']
+    return { ...out, ...(name !== undefined ? { name } : {}), ...(sandbox !== undefined ? { sandbox } : {}) }
   }
 
   /** The provider behind a record, or a 400 answer when it is not registered. */

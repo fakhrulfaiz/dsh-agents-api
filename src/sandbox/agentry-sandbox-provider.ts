@@ -15,6 +15,7 @@ import type { OwnerId } from '../auth/authenticator.ts'
 import { directorySegment } from '../environment/local.ts'
 import type { CreateEnvironmentInput } from '../environment/provider.ts'
 import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplateConfig } from '../environment-types.ts'
+import type { SandboxSummary } from '../environment/environment-compat.ts'
 import type { SandboxProvider } from './contract.ts'
 
 export interface AgentrySandboxOptions {
@@ -31,6 +32,8 @@ export interface AgentrySandboxProvider extends SandboxProvider {
   /** Workspace files with size and modification time, skipping `.git` and `node_modules` (at most 5000). */
   listEntries(record: EnvironmentRecord): Promise<WorkspaceEntry[]>
   /** Whether a workspace-relative path exists in the sandbox. */
+  /** Live state, image and last use for the environment wire object. Never throws. */
+  describe(record: EnvironmentRecord): Promise<SandboxSummary>
   /** Size of a workspace file, or `undefined` when there is no such file. */
   fileSize(record: EnvironmentRecord, path: string): Promise<number | undefined>
   exists(record: EnvironmentRecord, path: string): Promise<boolean>
@@ -103,8 +106,14 @@ export function toServiceTemplate(t: EnvironmentTemplateConfig | undefined): Wir
   ]
   if (setup.length > 0) out.setup_commands = setup
   if (t.network) out.network = t.network.access !== 'disabled'
-  const files = [...(t.starter_files ?? []), ...((t.files ?? []) as unknown as { path: string; content: string }[])].filter((f) => typeof f?.path === 'string' && typeof f.content === 'string')
-  if (files.length > 0) out.files = files.map((f) => ({ path: f.path, content: f.content }))
+  // Template files are base64 (`inline`); `file_id` files need the Files API and are not applied here.
+  // `/workspace/...` (the SDK's workspace) lands in the sandbox's real workspace.
+  const inWorkspace = (path: string) => (path === '/workspace' || path.startsWith('/workspace/') ? path.slice('/workspace/'.length) : path)
+  const files = [
+    ...(t.starter_files ?? []).map((f) => ({ path: f.path, content: f.content })),
+    ...(t.files ?? []).flatMap((f) => (f.type === 'inline' ? [{ path: f.path, content: Buffer.from(f.data, 'base64').toString('utf8') }] : [])),
+  ].filter((f) => typeof f.path === 'string' && inWorkspace(f.path) !== '')
+  if (files.length > 0) out.files = files.map((f) => ({ path: inWorkspace(f.path), content: f.content }))
   return out
 }
 
@@ -145,10 +154,19 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
       const template = toServiceTemplate(input.template)
       if (input.image) template.image = input.image
       try {
-        const s = await api(owner).create({ name: environmentId, template, workspace_path: dir })
+        const s = await api(owner).create({ name: input.name ?? environmentId, template, workspace_path: dir })
         return { status: statusOf(s.state), workspacePath: dir, handle: { sandbox_id: s.id, workspace_directory: dir, image: s.image, owner } }
       } catch (e) {
         return { status: 'failed' as const, workspacePath: dir, error: (e as Error).message }
+      }
+    },
+
+    async describe(record) {
+      try {
+        const s = await quickApi(ownerOf(record)).get(meta(record).id)
+        return { state: s.state, image: s.image, started_at: s.started_at, last_used_at: s.last_used_at }
+      } catch (e) {
+        return { state: e instanceof SandboxApiError && e.status === 404 ? 'gone' : 'unknown', ...(record.provider_metadata['image'] ? { image: record.provider_metadata['image'] } : {}) }
       }
     },
 
