@@ -12,6 +12,7 @@ import { SshSubprocessRuntime } from '@deepseek-ai/dsh-subprocess-ssh'
 import { SshSandboxProvider } from '@deepseek-ai/dsh-sandbox-ssh'
 import { NodePtcRuntime } from '@deepseek-ai/dsh-ptc-runtime-node'
 import { EnvdSshConnection, type EnvdSshConfig } from './envd-ssh.ts'
+import { registerSandboxDependencies } from './dependencies.ts'
 
 export { EnvdSshConnection, type EnvdSshConfig } from './envd-ssh.ts'
 
@@ -32,6 +33,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const ssh = ctx.get('ssh') as EnvdSshConnection | undefined
   if (ssh === undefined) throw new Error('the sandbox connection did not start')
   await ctx.plugin(NodePtcRuntime, { launch: ssh.ptcLaunch })
+  // Shadows the host's tool, which would report the server's bundled runtime instead of the sandbox's.
+  // Optional: registered whenever the tools service is present (always, in a session), never blocking the runtime.
+  ctx.inject(['tools'], (inner) => { registerSandboxDependencies(inner, config) })
 }
 
 export default { name, inject, apply }
