@@ -20,6 +20,7 @@
  */
 
 import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 import { loadBuiltins, type BuiltinSkill } from './skills/resolve.ts'
 import { DEFAULT_APPROVAL_VERBS } from './mount-composio.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -35,14 +36,17 @@ import type {} from '@deepseek-ai/dsh-user-questions'
 import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { firstThen, type Authenticator } from './auth/authenticator.ts'
+import { firstThen, type Authenticator, type OwnerId } from './auth/authenticator.ts'
 import { API_KEY_HASH_PATTERN, createApiKeyAuthenticator, type ApiKeyEntry } from './auth/api-keys.ts'
 import { createKeycloakAuthenticator } from './auth/keycloak.ts'
 import { createStaticKeyAuthenticator } from './auth/static-key.ts'
 import { installApprovalBridge } from './approvals/approval-bridge.ts'
 import { bridgeChildSessionEvent } from './bridge.ts'
-import { createLocalProvider } from './environment/local.ts'
+import { createLocalProvider, directorySegment } from './environment/local.ts'
 import { createAgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
+import { agentryPresetRows, createSandboxPresets, setSandboxCredentials, type PresetRegistryLike, type SandboxPresets } from './sandbox/presets.ts'
+import { copySkillsInto } from './sandbox/skills-copy.ts'
+import { createSandboxApi } from '@agentry/sandbox/client'
 import { SandboxRegistry } from './sandbox/registry.ts'
 import { DEFAULT_ALLOWED_MEDIA_TYPES, stagingDirectory, validateUploads, type UploadsConfig } from './files/config.ts'
 import { createFilesystemFileStore, type FileStore } from './files/file-store.ts'
@@ -429,11 +433,28 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   })
   const sandboxes = new SandboxRegistry('local')
   sandboxes.register(createLocalProvider(runtime.workspacesRoot))
+  let sandboxPresets: SandboxPresets | undefined
   if (runtime.sandbox !== undefined) {
-    sandboxes.register(createAgentrySandboxProvider({ ...runtime.sandbox, workspacesRoot: runtime.workspacesRoot }))
+    const sandboxConfig = runtime.sandbox
+    sandboxes.register(createAgentrySandboxProvider({ ...sandboxConfig, workspacesRoot: runtime.workspacesRoot }))
+    setSandboxCredentials(sandboxConfig)
+    ctx.effect(() => () => { setSandboxCredentials(undefined) })
+    const patch = fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))
+    const rows = agentryPresetRows(patch)
+    sandboxPresets = createSandboxPresets({
+      presets: () => ctx.get('agentPresets') as PresetRegistryLike | undefined,
+      rows: () => rows,
+      prepare: async ({ owner, sandboxId }) => {
+        const api = createSandboxApi({ ...sandboxConfig, owner })
+        const copied = await copySkillsInto(api, sandboxId, [join(config.skills.dir, directorySegment(owner as OwnerId, 'owner')), config.skills.builtinDir])
+        ctx.logger.info(`agents-api: sandbox ${sandboxId}: ${String(copied)} skill files copied`)
+      },
+    })
+    ctx.effect(() => () => { void sandboxPresets?.dispose() })
   }
   const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth, message => ctx.logger.warn(message)), prefix, undefined, sessionRegistry, {
     sandboxes,
+    ...(sandboxPresets === undefined ? {} : { sandboxPresets }),
     workspacesRoot: runtime.workspacesRoot,
     runtimeInfoPath: `${process.env['AGENTRY_OFFICE_RUNTIME'] ?? `${process.env['HOME'] ?? ''}/.dsh/office-runtime/primary-runtime`}/runtime.json`,
     history: createSessionHistory(ctx.sessionQuery),

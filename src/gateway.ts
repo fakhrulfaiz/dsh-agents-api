@@ -41,6 +41,7 @@ import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
 import { mountAgentInstructions } from './mount-instructions.ts'
 import { AGENTRY_PRESET_ID } from './preset.ts'
 import { providerRows, type AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
+import type { SandboxPresets } from './sandbox/presets.ts'
 import { SandboxApiError } from '@agentry/sandbox/client'
 import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
 import { sweepStaged, type InstallDeps } from './skills/install.ts'
@@ -130,6 +131,8 @@ export interface Route {
 export interface GatewayOptions {
   /** Sandbox providers for `/agents/environments`, by name, with a default. */
   sandboxes: SandboxRegistry
+  /** Per-sandbox agent presets; sessions on Agentry Sandbox environments mount theirs. Absent: such sessions cannot start. */
+  sandboxPresets?: SandboxPresets
   /** Root of `<owner>/<session>/` default session workspaces. */
   workspacesRoot: string
   /** The bundled runtime payload's `runtime.json`, for `GET /agents/environments/runtimes`; absent means none. */
@@ -195,6 +198,7 @@ export class AgentsGateway {
   /** Resumes in flight, so two requests do not resume one session twice. */
   private readonly resuming = new Map<string, Promise<void>>()
   private readonly sandboxes: SandboxRegistry
+  private readonly sandboxPresets: SandboxPresets | undefined
   private readonly runtimeInfoPath: string | undefined
   private readonly workspacesRoot: string
   private readonly history: SessionHistory
@@ -243,6 +247,7 @@ export class AgentsGateway {
   ) {
     if (store !== undefined) this.attachStore(store)
     this.sandboxes = options.sandboxes
+    this.sandboxPresets = options.sandboxPresets
     this.runtimeInfoPath = options.runtimeInfoPath
     this.workspacesRoot = options.workspacesRoot
     this.history = options.history
@@ -797,7 +802,7 @@ export class AgentsGateway {
         sessionId,
         meta: { cwd },
         agentOptions,
-        setup: this.buildAgentSetup(resolved, pending, cwd, owner),
+        setup: this.buildAgentSetup(resolved, pending, cwd, owner, environment),
       })
       this.handles.set(sessionId, handle)
       this.pendingBySession.set(sessionId, pending)
@@ -1386,18 +1391,39 @@ export class AgentsGateway {
   }
 
   /**
+   * Mount the session's preset: `agentry`, or for a session on an Agentry
+   * Sandbox environment that sandbox's preset (every tool runs inside it),
+   * held for the agent's lifetime.
+   */
+  private async mountSessionPreset(agentCtx: Context, owner: OwnerId, environment: OAIEnvironmentConfig | undefined): Promise<void> {
+    const environmentId = environment?.type === 'sandbox' ? environment.environment_id : undefined
+    const record = environmentId === undefined ? undefined : await this.store.environments.get(owner, environmentId)
+    const sandboxId = record?.provider === 'sandbox' ? record.provider_metadata['sandbox_id'] : undefined
+    if (record === undefined || sandboxId === undefined) {
+      await mountDefaultPreset(agentCtx)
+      return
+    }
+    if (this.sandboxPresets === undefined) throw new Error('Agentry Sandbox sessions need an agent preset registry')
+    const workspace = record.provider_metadata['workspace_directory']
+    if (workspace === undefined) throw new Error(`environment ${record.id} has no workspace path`)
+    const lease = await this.sandboxPresets.acquire(owner, sandboxId, workspace)
+    ;(agentCtx as { effect?: (fn: () => () => void) => void }).effect?.(() => () => { void lease[Symbol.asyncDispose]() })
+    await mountDefaultPreset(agentCtx, lease.presetId)
+  }
+
+  /**
    * Agent composition shared by create and resume.
    * @param resolved - session agent.
    * @param pending - the session's parked function calls.
    * @param cwd - session working directory.
    * @returns the `agents.create` / `agents.resume` setup callback.
    */
-  private buildAgentSetup(resolved: OAIAgent, pending: PendingFunctionCalls, cwd: string, owner: OwnerId): AgentSetup {
+  private buildAgentSetup(resolved: OAIAgent, pending: PendingFunctionCalls, cwd: string, owner: OwnerId, environment?: OAIEnvironmentConfig): AgentSetup {
     const functionTools = resolved.tools.filter(
       (tool): tool is OAIFunctionTool => tool.type === 'function',
     )
     return async (agentCtx) => {
-      await mountDefaultPreset(agentCtx)
+      await this.mountSessionPreset(agentCtx, owner, environment)
       this.mountAgentrySkills(agentCtx, resolved.id, owner)
       mountAgentInstructions(agentCtx, resolved.instructions, resolved.name)
       // Mounted before the mask so an agent's `host_tools` can hide the agent tools.
@@ -1464,7 +1490,7 @@ export class AgentsGateway {
       const handle = await this.ctx.agents.resume({
         resumeSessionId: SessionId(row.id),
         agentOptions: await this.agentOptionsFor(config.agent),
-        setup: this.buildAgentSetup(config.agent, pending, cwd, row.ownerId),
+        setup: this.buildAgentSetup(config.agent, pending, cwd, row.ownerId, config.environment),
       })
       if (await this.store.sessions.get(row.id, 'any') === undefined) {
         // Deleted while the resume was in flight: undo it.
@@ -2014,6 +2040,8 @@ export class AgentsGateway {
       this.ctx.logger.warn(`agents-api: environment ${record.id} uses sandbox provider "${record.provider}", which is not registered; removing the record without cleaning a backend`)
       return
     }
+    const sandboxId = record.provider_metadata['sandbox_id']
+    if (sandboxId !== undefined) await this.sandboxPresets?.evict(sandboxId)
     await provider.destroy(record)
   }
 

@@ -22,9 +22,9 @@ import { EnvdProcessStream } from './envd-stream.ts'
 export const DSH_RUNTIME_MANIFEST = '/opt/agentry/dsh/manifest.json'
 
 export interface EnvdSshConfig {
-  /** Agentry Sandbox base URL and service key (server-side only). */
-  url: string
-  key: string
+  /** Agentry Sandbox base URL and service key (server-side only); default: the API's configured credentials. */
+  url?: string
+  key?: string
   /** Owner the sandbox belongs to. */
   owner: string
   sandboxId: string
@@ -110,12 +110,16 @@ export class EnvdSshConnection extends Service {
 
   constructor(ctx: Context, config: EnvdSshConfig) {
     super(ctx, 'ssh')
+    const credentials = (globalThis as Record<symbol, unknown>)[Symbol.for('agentry.sandbox.credentials')] as { url: string; key: string } | undefined
+    const url = config.url ?? credentials?.url
+    const key = config.key ?? credentials?.key
+    if (!url || !key) throw new Error('Agentry Sandbox is not configured (sandbox.url / sandbox.key)')
     this.config = {
       user: 'agent', requestTimeoutMs: 30_000, leaseMs: 30_000, maxFrameBytes: 64 * 1024 * 1024, maxPending: 128,
-      ...config,
+      ...config, url, key,
     }
     if (!this.config.workspace.startsWith('/')) throw new Error('sandbox workspace must be absolute')
-    this.envd = createSandboxApi({ url: config.url, key: config.key, owner: config.owner }).envd(config.sandboxId)
+    this.envd = createSandboxApi({ url, key, owner: config.owner }).envd(config.sandboxId)
     this.ready = this.start()
     void this.ready.catch((error: unknown) => { this.fail(error as Error) })
     ctx.effect(() => () => this.dispose())

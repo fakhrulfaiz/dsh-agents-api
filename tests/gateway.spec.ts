@@ -53,6 +53,8 @@ interface FakeAgent {
 
 /** Names of the agent management tools the last fake context saw mounted. */
 const mountedAgentTools: string[] = []
+/** Preset ids sessions mounted through `agentPresets.mount`. */
+const mountedPresets: string[] = []
 
 function fakeContext(options?: {
   failCreate?: boolean
@@ -68,6 +70,7 @@ function fakeContext(options?: {
   pluginCalls: Array<Record<string, unknown>>
 } {
   mountedAgentTools.length = 0
+  mountedPresets.length = 0
   const agents = new Map<string, FakeAgent>()
   const sessions = new Map<string, { id: string }>()
   const registeredTools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }> = []
@@ -114,7 +117,7 @@ function fakeContext(options?: {
                 getSectionOrder: () => 2500,
               }
           await setup({
-            get: (name: string) => name === 'systemPrompt' ? systemPrompt : undefined,
+            get: (name: string) => name === 'systemPrompt' ? systemPrompt : name === 'agentPresets' ? { mount: async (_ctx: unknown, id?: string) => { mountedPresets.push(id ?? 'agentry') } } : undefined,
             ...(systemPrompt === undefined ? {} : { systemPrompt }),
             plugin: async (_plugin, config) => {
               pluginCalls.push(config)
@@ -1235,6 +1238,44 @@ describe('sandbox environments through the gateway', () => {
       const refused = await call(`/agents/environments/${local.id}/start`, { method: 'POST' })
       expect(refused.status).toBe(409)
       expect(JSON.stringify(await refused.json())).not.toContain(svc.key)
+    } finally {
+      await svc.close()
+    }
+  })
+})
+
+describe('sessions on Agentry Sandbox environments', () => {
+  it('mount the sandbox preset (one registration per sandbox), local sessions mount agentry, deleting the environment evicts it', async () => {
+    const { startTestService } = await import('@agentry/sandbox/testing')
+    const { createAgentrySandboxProvider } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const { createSandboxPresets } = await import('../src/sandbox/presets.ts')
+    const svc = await startTestService()
+    try {
+      const root = join(tmpdir(), 'agentry-gateway-spec-sbx-presets')
+      const registry = new SandboxRegistry('local')
+      registry.register(createLocalProvider(root))
+      registry.register(createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root }))
+      const registered = new Map<string, unknown>()
+      const sandboxPresets = createSandboxPresets({
+        presets: () => ({ register: async (def) => { registered.set(def.id, def.plugins); return async () => { registered.delete(def.id) } } }),
+        rows: () => [{ id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash' }],
+      })
+      const store = new MemoryStore()
+      const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), { ...testGatewayOptions(registry), sandboxPresets })
+      const base = await listen((req, res) => api.handle(req, res))
+      const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string }
+      const session = (body: object) => call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, ...body }) })
+      expect((await session({ environment: { type: 'sandbox', environment_id: env.id } })).status).toBe(200)
+      expect((await session({ environment: { type: 'sandbox', environment_id: env.id } })).status).toBe(200)
+      expect((await session({ environment: { type: 'none' } })).status).toBe(200)
+      const sandboxIds = [...registered.keys()]
+      expect(sandboxIds).toHaveLength(1)
+      expect(sandboxIds[0]).toMatch(/^agentry-sbx-sbx_/)
+      expect(mountedPresets).toEqual([sandboxIds[0], sandboxIds[0], 'agentry'])
+      expect((await call(`/agents/environments/${env.id}`, { method: 'DELETE' })).status).toBe(200)
+      expect(registered.size).toBe(0)
     } finally {
       await svc.close()
     }
