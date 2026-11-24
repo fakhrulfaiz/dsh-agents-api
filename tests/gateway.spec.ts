@@ -1390,3 +1390,35 @@ describe('failed sandbox environments never fall back to the host (review C1)', 
     }
   })
 })
+
+describe('a sandbox that cannot start (review I1)', () => {
+  it('answers 503 sandbox_unavailable with the reason instead of a generic 500', async () => {
+    const { startTestService } = await import('@agentry/sandbox/testing')
+    const { createAgentrySandboxProvider } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const { createSandboxPresets } = await import('../src/sandbox/presets.ts')
+    const svc = await startTestService()
+    try {
+      const root = join(tmpdir(), 'agentry-gateway-spec-sbx-i1')
+      const registry = new SandboxRegistry('local')
+      registry.register(createLocalProvider(root))
+      registry.register(createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root }))
+      const sandboxPresets = createSandboxPresets({
+        presets: () => ({ register: async () => async () => {}, resolve: async (id: string) => ({ id, broken: 'Agentry Sandbox is not reachable for sandbox x' }) }),
+        rows: () => [],
+      })
+      const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), { ...testGatewayOptions(registry), sandboxPresets })
+      const base = await listen((req, res) => api.handle(req, res))
+      const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string }
+      const res = await call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment: { type: 'sandbox', environment_id: env.id } }) })
+      expect(res.status).toBe(503)
+      const body = JSON.stringify(await res.json())
+      expect(body).toContain('sandbox_unavailable')
+      expect(body).toContain('not reachable')
+      expect(body).not.toContain(svc.key)
+    } finally {
+      await svc.close()
+    }
+  })
+})

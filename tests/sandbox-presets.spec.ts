@@ -58,6 +58,20 @@ describe('sandbox presets', () => {
     expect(reg.registered.size).toBe(1)
   })
 
+  it('a broken first activation is unregistered and reported, and the next acquire registers again (review I1)', async () => {
+    const reg = fakeRegistry()
+    let broken: string | undefined = 'ssh: Agentry Sandbox is not reachable'
+    const registry = { ...reg, register: reg.register, resolve: async (id: string) => ({ id, ...(broken === undefined ? {} : { broken }) }) }
+    const presets = createSandboxPresets({ presets: () => registry, rows: () => [] })
+    await expect(presets.acquire('o', 'sbx_4', '/w')).rejects.toThrow(/could not start.*not reachable/)
+    expect(reg.registered.size).toBe(0)
+    expect(presets.registered()).toEqual([])
+    broken = undefined
+    const lease = await presets.acquire('o', 'sbx_4', '/w')
+    expect(lease.presetId).toBe('agentry-sbx-sbx_4')
+    expect(reg.calls).toEqual(['register agentry-sbx-sbx_4', 'unregister agentry-sbx-sbx_4', 'register agentry-sbx-sbx_4'])
+  })
+
   it('a failed prepare fails the acquire and leaves nothing registered', async () => {
     const reg = fakeRegistry()
     const presets = createSandboxPresets({ presets: () => reg, rows: () => [], prepare: async () => { throw new Error('copy failed') } })

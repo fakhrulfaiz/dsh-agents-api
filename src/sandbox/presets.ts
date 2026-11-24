@@ -13,6 +13,19 @@ import { parse } from 'yaml'
 
 export type PresetRow = Record<string, unknown>
 
+/** A sandbox session's preset could not start (service unreachable, sandbox cannot start). */
+export class SandboxStartError extends Error {
+  override name = 'SandboxStartError'
+}
+
+/** The SandboxStartError in `error` or its cause chain. */
+export function sandboxStartErrorIn(error: unknown): SandboxStartError | undefined {
+  for (let e: unknown = error, depth = 0; e instanceof Error && depth < 8; e = e.cause, depth += 1) {
+    if (e instanceof SandboxStartError) return e
+  }
+  return undefined
+}
+
 /** Isolated service slots of a sandbox preset's group. */
 export const SANDBOX_ISOLATED = ['ssh', 'subprocess', 'shell', 'fs', 'workingDirectory', 'sandbox', 'sandboxPolicy', 'ptcRuntime', 'terminals'] as const
 
@@ -59,6 +72,8 @@ export function sandboxPresetRows(base: readonly PresetRow[], sandbox: { owner: 
 
 export interface PresetRegistryLike {
   register(definition: { id: string; name?: string; description?: string; order?: number; plugins: readonly PresetRow[] }): Promise<() => Promise<void>>
+  /** DSH reports a preset whose activation failed as `broken` (a mount failure is final). */
+  resolve?(id: string): Promise<{ id: string; broken?: unknown }>
 }
 
 export interface SandboxPresetsOptions {
@@ -103,7 +118,14 @@ export function createSandboxPresets(opts: SandboxPresetsOptions) {
           refs: 0,
           ready: (async () => {
             await opts.prepare?.(sandbox)
-            return registry.register({ id: presetId, name: 'Agentry (sandbox)', order: 1000, plugins: sandboxPresetRows(opts.rows(), sandbox) })
+            const unregister = await registry.register({ id: presetId, name: 'Agentry (sandbox)', order: 1000, plugins: sandboxPresetRows(opts.rows(), sandbox) })
+            const state = await registry.resolve?.(presetId)
+            if (state?.broken !== undefined) {
+              await unregister()
+              const reason = typeof state.broken === 'string' ? state.broken : JSON.stringify(state.broken)
+              throw new SandboxStartError(`the sandbox could not start: ${reason}`)
+            }
+            return unregister
           })(),
         }
         entries.set(sandboxId, created)

@@ -41,7 +41,7 @@ import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
 import { mountAgentInstructions } from './mount-instructions.ts'
 import { AGENTRY_PRESET_ID } from './preset.ts'
 import { copyIntoSandboxUploads, providerRows, type AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
-import type { SandboxPresets } from './sandbox/presets.ts'
+import { sandboxStartErrorIn, type SandboxPresets } from './sandbox/presets.ts'
 import { SandboxApiError } from '@agentry/sandbox/client'
 import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
 import { sweepStaged, type InstallDeps } from './skills/install.ts'
@@ -842,6 +842,8 @@ export class AgentsGateway {
       }
       if (error instanceof StoreUnavailableError) throw error
       if (error instanceof AgentsApiMcpConfigError) throw new AgentsApiRequestError(error.message, 400, 'bad_request')
+      const sandboxDown = sandboxStartErrorIn(error)
+      if (sandboxDown !== undefined) throw new AgentsApiRequestError(sandboxDown.message, 503, 'sandbox_unavailable')
       throw new SessionCreateError(error)
     }
     return { sessionId, projector, base, resolved }
