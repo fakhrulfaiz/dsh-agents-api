@@ -1,0 +1,283 @@
+/**
+ * DeepSeek Harness's remote providers against a real Agentry Sandbox (Docker),
+ * through EnvdSshConnection. Skipped without Docker or the runtime images
+ * (`pnpm images:build` in agentry-sandbox).
+ */
+import { execFileSync } from 'node:child_process'
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-fs'
+import type {} from '@deepseek-ai/dsh-subprocess'
+import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
+import { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
+import { startDockerTestService, type DockerTestService } from '@agentry/sandbox/testing'
+import { z } from 'zod'
+import * as runtime from '../src/sandbox/remote/plugin.ts'
+import { EnvdSshConnection } from '../src/sandbox/remote/envd-ssh.ts'
+
+function haveImages(): boolean {
+  try {
+    execFileSync('docker', ['image', 'inspect', 'agentry/dsh-runtime:0.2.2-rc.1', 'agentry/envd:envd-v0.6.13', 'agentry/sandbox:1'], { stdio: 'pipe', timeout: 15_000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+const OWNER = 'remote-spec'
+let svc: DockerTestService
+let ctx: Context
+let workspace: string
+let services: Context
+let fiber: { dispose(): unknown } | undefined
+let sandboxId: string
+
+const ready = (c: Context, names: string[]) => new Promise<Context>((resolve) => { c.inject(names, (inner) => { resolve(inner) }) })
+
+describe.skipIf(!haveImages())('DSH remote providers over Agentry Sandbox', () => {
+  beforeAll(async () => {
+    svc = await startDockerTestService()
+    workspace = await mkdtemp(join(tmpdir(), 'agentry-remote-'))
+    const sbx = await svc.service.create(OWNER, { name: 'remote-spec', template: { workspacePath: workspace } } as never)
+    sandboxId = sbx.id
+    ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SandboxPolicyService, { mode: (process.env['REMOTE_SPEC_MODE'] ?? 'danger-full-access') as 'danger-full-access', workspaceRoot: workspace })
+    fiber = ctx.plugin(runtime, { url: svc.url, key: svc.key, owner: OWNER, sandboxId: sbx.id, workspace })
+    services = await ready(ctx, ['ssh', 'fs', 'subprocess', 'sandbox', 'ptcRuntime', 'sandboxPolicy'])
+  }, 300_000)
+
+  afterAll(async () => {
+    await fiber?.dispose()
+    await svc?.cleanup()
+    await svc?.close()
+  }, 120_000)
+
+  it('runs a process inside the sandbox with its exit code and collected output', async () => {
+    const h = services.subprocess.spawn({
+      argv: ['/bin/sh', '-c', 'echo "$(whoami) $(pwd) $(cat /etc/os-release | head -1)"; echo err >&2; exit 3'],
+      cwd: workspace, graceMs: 1000, env: { PATH: '/usr/local/bin:/usr/bin:/bin' },
+      stdio: { stdin: 'ignore', stdout: { maxBytes: 65536 }, stderr: { maxBytes: 65536 } },
+    })
+    const outcome = await h.done
+    expect(outcome.exitCode).toBe(3)
+    const out = h.collected.stdout!.readFrom(0).text
+    expect(out).toContain(`agent ${workspace}`)
+    expect(out).toContain('Debian')
+    expect(h.collected.stderr!.readFrom(0).text).toBe('err\n')
+  }, 60_000)
+
+  it('a plain process can use sudo (the agent is root-capable inside its sandbox)', async () => {
+    const h = services.subprocess.spawn({
+      argv: ['/bin/sh', '-c', 'grep NoNewPrivs /proc/self/status; sudo -n true && echo SUDO-OK'], cwd: workspace, graceMs: 500, env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' },
+      stdio: { stdin: 'ignore', stdout: { maxBytes: 4096 }, stderr: { maxBytes: 4096 } },
+    })
+    await h.done
+    const out = h.collected.stdout!.readFrom(0).text
+    process.stdout.write(`SUDO-PROBE ${JSON.stringify(out)} ${JSON.stringify(h.collected.stderr!.readFrom(0).text.slice(0, 200))}\n`)
+    expect(out).toContain('SUDO-OK')
+  }, 60_000)
+
+  it('round-trips stdin', async () => {
+    const h = services.subprocess.spawn({
+      argv: ['/bin/cat'], cwd: workspace, graceMs: 1000, env: { PATH: '/usr/bin:/bin' },
+      stdio: { stdin: { data: 'hello sandbox\n' }, stdout: { maxBytes: 65536 }, stderr: 'pipe' },
+    })
+    expect((await h.done).exitCode).toBe(0)
+    expect(h.collected.stdout!.readFrom(0).text).toBe('hello sandbox\n')
+  }, 60_000)
+
+  it('terminate stops the process tree inside the sandbox', async () => {
+    const h = services.subprocess.spawn({
+      argv: ['/bin/sh', '-c', 'sleep 300 & sleep 301; wait'], cwd: workspace, graceMs: 500, env: { PATH: '/usr/bin:/bin' },
+      stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 1024 } },
+    })
+    await new Promise((r) => setTimeout(r, 500))
+    h.terminate()
+    const outcome = await h.done
+    expect(outcome.exitCode === null || outcome.exitCode !== 0).toBe(true)
+    const ps = services.subprocess.spawn({
+      argv: ['/bin/sh', '-c', 'ps -eo args | grep -c "^sleep 30[01]" || true'], cwd: workspace, graceMs: 500, env: { PATH: '/usr/bin:/bin' },
+      stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 1024 } },
+    })
+    await ps.done
+    expect(ps.collected.stdout!.readFrom(0).text.trim()).toBe('0')
+  }, 60_000)
+
+  it('reads, writes, edits, lists, moves and deletes files in the sandbox workspace', async () => {
+    const fs = services.fs
+    const target = await fs.resolve('notes/a.txt', { cwd: workspace })
+    expect(fs.processPath(target)).toBe(`${workspace}/notes/a.txt`)
+    const parent = await fs.resolve(workspace)
+    await fs.writeText(target, 'one\ntwo\n')
+    expect(await fs.readText(target)).toBe('one\ntwo\n')
+    const info = await fs.stat(target)
+    expect(info).toMatchObject({ type: 'file', size: 8 })
+    const edited = await fs.editText(target, { oldString: 'two', newString: 'three', replaceAll: false })
+    expect(edited).toBeTruthy()
+    expect(await fs.readText(target)).toBe('one\nthree\n')
+    expect(new TextDecoder().decode(await fs.readByteRange(target, { offset: 4, length: 5 }))).toBe('three')
+    const notes = await fs.resolve('notes', { cwd: workspace })
+    expect((await fs.listDir(notes)).map((e) => e.name)).toContain('a.txt')
+    const moved = await fs.resolve('notes/b.txt', { cwd: workspace })
+    await fs.moveFile(target, moved, {})
+    expect(await fs.stat(target)).toBeUndefined()
+    expect(fs.contains(parent, moved)).toBe(true)
+    await fs.deleteFile(moved)
+    expect(await fs.stat(moved)).toBeUndefined()
+  }, 60_000)
+
+  it('round-trips 10 MB (write, then streamed read); whole-text and over-cap reads are refused with DSH\'s limits', async () => {
+    const fs = services.fs
+    const target = await fs.resolve('big.txt', { cwd: workspace })
+    const big = 'x'.repeat(10 * 1024 * 1024)
+    await fs.writeText(target, big)
+    expect((await fs.stat(target))?.size).toBe(big.length)
+    let streamed = 0
+    for await (const c of await fs.streamText(target)) streamed += c.length
+    expect(streamed).toBe(big.length)
+    await expect(fs.readText(target)).rejects.toThrow(/whole-text transfer exceeds/)
+    await expect(fs.readBytes(target, undefined, 1024)).rejects.toThrow(/exceeds the 1024-byte limit/)
+  }, 120_000)
+
+  it('runs code through the PTC runtime inside the sandbox', async () => {
+    expect(services.ssh.ptcLaunch).toMatchObject({ kind: 'node-script', executable: '/opt/agentry/dsh/node' })
+    const spec = services.ptcRuntime.resolve({ program: "const os = await import('node:os'); return `${os.userInfo().username}:${process.cwd()}`", bindings: [], cwd: workspace } as never)
+    const result = await services.ptcRuntime.run(spec)
+    expect(JSON.stringify(result)).toContain(`agent:${workspace}`)
+  }, 120_000)
+
+  it('opens a terminal inside the sandbox and resizes it', async () => {
+    const t = await services.subprocess.spawnTerminal({
+      argv: ['/bin/sh', '-c', 'stty size; read line; stty size; echo "got $line"'], cwd: workspace,
+      env: { PATH: '/usr/bin:/bin', TERM: 'xterm' }, rows: 24, cols: 80, terminalType: 'xterm', graceMs: 500,
+    })
+    let out = ''
+    t.output.on('data', (c: Buffer) => { out += c.toString() })
+    for (let i = 0; i < 50 && !out.includes('24 80'); i++) await new Promise((r) => setTimeout(r, 100))
+    await t.resize(132, 40)
+    await t.write('hi\r')
+    await t.done
+    expect(out).toContain('24 80')
+    expect(out).toContain('40 132')
+    expect(out).toContain('got hi')
+  }, 60_000)
+
+  it('confines a command with a workspace-write policy inside the sandbox (DSH Landlock or bwrap enforcement works in the hardened container)', async () => {
+    const policy = services.sandboxPolicy.resolve({ mode: 'workspace-write', cwd: workspace } as never)
+    const confined = await services.sandbox.confine(['/bin/sh', '-c', `touch ${workspace}/inside && echo in-ok; touch /home/agent/outside && echo out-ok; true`], policy as never)
+    expect(confined.enforcement).toBe('full')
+    const h = services.subprocess.spawn({ argv: confined.argv, cwd: workspace, graceMs: 500, env: { PATH: '/usr/bin:/bin' }, stdio: { stdin: 'ignore', stdout: { maxBytes: 4096 }, stderr: { maxBytes: 4096 } } })
+    await h.done
+    const out = h.collected.stdout!.readFrom(0).text
+    expect(out).toContain('in-ok')
+    expect(out).not.toContain('out-ok')
+  }, 60_000)
+
+  it('the environment provider lists, stats, reads and copies uploads in the live sandbox (as the web app sees them)', async () => {
+    const { createAgentrySandboxProvider, copyIntoSandboxUploads } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const provider = createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: tmpdir() })
+    const record = { id: 'env_live', object: 'environment', status: 'connected', provider: 'sandbox', provider_metadata: { sandbox_id: sandboxId, workspace_directory: workspace, owner: OWNER }, created_at: 1 } as never
+    await services.fs.writeText(await services.fs.resolve('out/report.md', { cwd: workspace }), '# live')
+    const entries = await provider.listEntries(record)
+    const report = entries.find((e) => e.path === 'out/report.md')
+    expect(report).toMatchObject({ size: 6 })
+    expect(Date.parse(report!.last_modified)).toBeGreaterThan(Date.now() - 600_000)
+    expect(await provider.exists(record, 'out/report.md')).toBe(true)
+    expect(await provider.exists(record, 'out/none.md')).toBe(false)
+    expect(new TextDecoder().decode(await provider.readFile(record, 'out/report.md'))).toBe('# live')
+    const copy = await copyIntoSandboxUploads(provider, record, 'a.txt', (async function* () { yield new TextEncoder().encode('up') })())
+    expect(copy.relative).toBe('uploads/a.txt')
+    expect(await services.fs.readText(await services.fs.resolve('uploads/a.txt', { cwd: workspace }))).toBe('up')
+    await copy.remove?.()
+    expect(await provider.exists(record, 'uploads/a.txt')).toBe(false)
+  }, 60_000)
+
+  it('after the sandbox is stopped, the next call starts it again on a new helper (files and installs kept)', async () => {
+    await services.fs.writeText(await services.fs.resolve('kept.txt', { cwd: workspace }), 'kept')
+    await svc.service.stop(OWNER, sandboxId)
+    await new Promise((r) => setTimeout(r, 1500))
+    expect(await services.fs.readText(await services.fs.resolve('kept.txt', { cwd: workspace }))).toBe('kept')
+    expect((await svc.service.get(OWNER, sandboxId)).state).toBe('running')
+    const h = services.subprocess.spawn({ argv: ['/bin/echo', 'back'], cwd: workspace, graceMs: 500, env: { PATH: '/usr/bin:/bin' }, stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 1024 } } })
+    await h.done
+    expect(h.collected.stdout!.readFrom(0).text).toBe('back\n')
+  }, 180_000)
+
+  it('disposing a runtime closes its helper gracefully: background processes in the sandbox are cleaned up (review I2)', async () => {
+    const other = new Context()
+    await other.plugin(SessionProjectionRegistry)
+    await other.plugin(SandboxPolicyService, { mode: 'danger-full-access', workspaceRoot: workspace })
+    const otherFiber = other.plugin(runtime, { url: svc.url, key: svc.key, owner: OWNER, sandboxId, workspace })
+    const o = await ready(other, ['fs', 'subprocess'])
+    o.subprocess.spawn({ argv: ['/bin/sh', '-c', 'sleep 301'], cwd: workspace, graceMs: 500, env: { PATH: '/usr/bin:/bin' }, stdio: { stdin: 'ignore', stdout: { maxBytes: 64 }, stderr: { maxBytes: 64 } } })
+    await new Promise((r) => setTimeout(r, 1500))
+    const count = async () => {
+      const h = services.subprocess.spawn({ argv: ['/bin/sh', '-c', 'ps -eo args | grep -c "^sleep 301" || true'], cwd: workspace, graceMs: 500, env: { PATH: '/usr/bin:/bin' }, stdio: { stdin: 'ignore', stdout: { maxBytes: 64 }, stderr: { maxBytes: 64 } } })
+      await h.done
+      return h.collected.stdout!.readFrom(0).text.trim()
+    }
+    expect(await count()).toBe('1')
+    await otherFiber.dispose()
+    await new Promise((r) => setTimeout(r, 3000))
+    expect(await count()).toBe('0')
+  }, 90_000)
+
+  it('an idle connection closes its helper (so the sandbox can idle-stop) and the next call starts a new one (review I3)', async () => {
+    const helpers = async () => {
+      const h = services.subprocess.spawn({ argv: ['/bin/sh', '-c', 'ps -eo args | grep -c "dsh-ssh/lib/helper.js" || true'], cwd: workspace, graceMs: 500, env: { PATH: '/usr/bin:/bin' }, stdio: { stdin: 'ignore', stdout: { maxBytes: 64 }, stderr: { maxBytes: 64 } } })
+      await h.done
+      return Number(h.collected.stdout!.readFrom(0).text.trim())
+    }
+    const before = await helpers()
+    const conn = new EnvdSshConnection(new Context(), { url: svc.url, key: svc.key, owner: OWNER, sandboxId, workspace, idleMs: 1500 })
+    await conn.request('heartbeat', {}, z.null())
+    expect(await helpers()).toBe(before + 1)
+    await new Promise((r) => setTimeout(r, 5000))
+    expect(await helpers()).toBe(before)
+    await conn.request('heartbeat', {}, z.null())
+    expect(await helpers()).toBe(before + 1)
+    await conn.dispose()
+  }, 90_000)
+
+  it('runs the prepare hook (skills copy) on every new helper, including after a stop (review I4)', async () => {
+    const calls: string[] = []
+    const key = Symbol.for('agentry.sandbox.prepare')
+    ;(globalThis as Record<symbol, unknown>)[key] = async (owner: string, id: string) => { calls.push(`${owner}/${id}`) }
+    try {
+      const conn = new EnvdSshConnection(new Context(), { url: svc.url, key: svc.key, owner: OWNER, sandboxId, workspace })
+      await conn.request('heartbeat', {}, z.null())
+      expect(calls).toEqual([`${OWNER}/${sandboxId}`])
+      await svc.service.stop(OWNER, sandboxId)
+      await new Promise((r) => setTimeout(r, 1500))
+      await conn.request('heartbeat', {}, z.null()).catch(() => {})
+      await conn.request('heartbeat', {}, z.null())
+      expect(calls).toEqual([`${OWNER}/${sandboxId}`, `${OWNER}/${sandboxId}`])
+      await conn.dispose()
+    } finally {
+      delete (globalThis as Record<symbol, unknown>)[key]
+    }
+  }, 120_000)
+
+  it('an unreachable service fails with a clear error; a fresh connection then works', async () => {
+    const down = new Context()
+    const conn = new EnvdSshConnection(down, { url: 'http://127.0.0.1:1', key: 'k', owner: OWNER, sandboxId: 'sbx_none', workspace })
+    await expect(conn.request('heartbeat', {}, z.null())).rejects.toThrow(/not reachable/)
+    await conn.dispose()
+    expect(await services.fs.stat(await services.fs.resolve(workspace))).toMatchObject({ type: 'directory' })
+  }, 60_000)
+
+  it('the file is the one the process sees (same world)', async () => {
+    const fs = services.fs
+    await fs.writeText(await fs.resolve('shared.txt', { cwd: workspace }), 'from fs')
+    const h = services.subprocess.spawn({
+      argv: ['/bin/cat', 'shared.txt'], cwd: workspace, graceMs: 500, env: { PATH: '/usr/bin:/bin' },
+      stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 1024 } },
+    })
+    await h.done
+    expect(h.collected.stdout!.readFrom(0).text).toBe('from fs')
+  }, 60_000)
+})

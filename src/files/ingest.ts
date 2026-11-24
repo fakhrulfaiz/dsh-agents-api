@@ -90,7 +90,7 @@ export class AttachmentIngest {
    * @returns the blocks, note, and commit and rollback callbacks.
    * @throws AgentsApiRequestError as `validate`, plus 409 `file_already_attached` when a concurrent send claimed a file first, 409 `uploads_unsafe` for an unsafe workspace, 404 `file_not_found` when staged bytes are gone, 503 `attachments_unavailable`. Any failure leaves the rows `staged` and removes copies made so far.
    */
-  async attach(args: { owner: OwnerId; sessionId: string; cwd: string; ids: readonly string[]; supportsImages: () => Promise<boolean> }): Promise<AttachedFiles> {
+  async attach(args: { owner: OwnerId; sessionId: string; cwd: string; ids: readonly string[]; supportsImages: () => Promise<boolean>; copy?: (name: string, source: AsyncIterable<Uint8Array>) => Promise<WorkspaceCopy> }): Promise<AttachedFiles> {
     const { owner, sessionId, cwd, ids } = args
     const { store, staging } = this.deps
     const rows = await this.validate(owner, ids)
@@ -98,7 +98,7 @@ export class AttachmentIngest {
     if (claimed === undefined) throw new AgentsApiRequestError('A file is already attached to a message', 409, 'file_already_attached')
     const copies: WorkspaceCopy[] = []
     const rollback = async (): Promise<void> => {
-      await Promise.all(copies.splice(0).map(copy => rm(copy.absolute, { force: true }).catch(() => undefined)))
+      await Promise.all(copies.splice(0).map(copy => (copy.remove ? copy.remove() : rm(copy.absolute, { force: true })).catch(() => undefined)))
       await store().files.release(owner, ids)
     }
     try {
@@ -131,7 +131,7 @@ export class AttachmentIngest {
           block = { type: 'file', attachment: ref }
           snapshot = { kind: 'file', ref }
         }
-        const copy = await copyIntoUploads(cwd, row.name, bytes())
+        const copy = await (args.copy ? args.copy(row.name, bytes()) : copyIntoUploads(cwd, row.name, bytes()))
         copies.push(copy)
         await store().files.markAttached(row.id, owner, { attachment: snapshot, workspacePath: copy.relative })
         blocks.push(block)

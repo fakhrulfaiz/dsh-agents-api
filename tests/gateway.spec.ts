@@ -49,10 +49,13 @@ interface FakeAgent {
   steer: ReturnType<typeof vi.fn>
   cancel: ReturnType<typeof vi.fn>
   model: FakeModel
+  session: { append: ReturnType<typeof vi.fn> }
 }
 
 /** Names of the agent management tools the last fake context saw mounted. */
 const mountedAgentTools: string[] = []
+/** Preset ids sessions mounted through `agentPresets.mount`. */
+const mountedPresets: string[] = []
 
 function fakeContext(options?: {
   failCreate?: boolean
@@ -68,6 +71,7 @@ function fakeContext(options?: {
   pluginCalls: Array<Record<string, unknown>>
 } {
   mountedAgentTools.length = 0
+  mountedPresets.length = 0
   const agents = new Map<string, FakeAgent>()
   const sessions = new Map<string, { id: string }>()
   const registeredTools: Array<{ name: string; execute: (args: unknown, exec: { callId: string; signal: AbortSignal }) => Promise<unknown> }> = []
@@ -95,6 +99,7 @@ function fakeContext(options?: {
         if (options?.failCreate) throw new Error('factory failed')
         const agent: FakeAgent = {
           id: sessionId,
+          session: { append: vi.fn() },
           followup: vi.fn(() => {
             if (options?.failFollowup) throw 'followup failed'
           }),
@@ -114,7 +119,7 @@ function fakeContext(options?: {
                 getSectionOrder: () => 2500,
               }
           await setup({
-            get: (name: string) => name === 'systemPrompt' ? systemPrompt : undefined,
+            get: (name: string) => name === 'systemPrompt' ? systemPrompt : name === 'agentPresets' ? { mount: async (_ctx: unknown, id?: string) => { mountedPresets.push(id ?? 'agentry') } } : undefined,
             ...(systemPrompt === undefined ? {} : { systemPrompt }),
             plugin: async (_plugin, config) => {
               pluginCalls.push(config)
@@ -1205,5 +1210,215 @@ describe('AgentsGateway.createIdleSession', () => {
     const sessionId = register.mock.calls[0]![0].snapshot().id
     expect(registry.get(sessionId)).toBeUndefined()
     expect((await store.sessions.list({ owner: TEST_OWNER, limit: 10 })).data).toEqual([])
+  })
+})
+
+describe('sandbox environments through the gateway', () => {
+  it('creates on the sandbox provider, lists providers with availability, starts, stops, resets; local refuses lifecycle', async () => {
+    const { startTestService } = await import('@agentry/sandbox/testing')
+    const { createAgentrySandboxProvider } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const svc = await startTestService({ AGENTRY_SANDBOX_MAX_PER_OWNER: '1' })
+    try {
+      const registry = new SandboxRegistry('local')
+      registry.register(createLocalProvider(join(tmpdir(), 'agentry-gateway-spec-sbx')))
+      registry.register(createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: join(tmpdir(), 'agentry-gateway-spec-sbx') }))
+      const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), testGatewayOptions(registry))
+      const base = await listen((req, res) => api.handle(req, res))
+      const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+      const providers = (await (await call('/agents/environments/providers')).json()) as { data: { name: string; available: boolean }[] }
+      expect(providers.data.map((p) => [p.name, p.available])).toEqual(expect.arrayContaining([['local', true], ['sandbox', true]]))
+      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string; provider: string; status: string }
+      expect(env).toMatchObject({ provider: 'sandbox', status: 'connected' })
+      expect((await call(`/agents/environments/${env.id}/stop`, { method: 'POST' })).status).toBe(200)
+      expect((await call(`/agents/environments/${env.id}/start`, { method: 'POST' })).status).toBe(200)
+      expect((await call(`/agents/environments/${env.id}/reset`, { method: 'POST', body: JSON.stringify({ keep_workspace: false }) })).status).toBe(200)
+      expect(svc.backend.calls.some((c) => c.endsWith('keep=false'))).toBe(true)
+      const second = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { status: string; error?: string }
+      expect(second).toMatchObject({ status: 'failed', error: expect.stringContaining('limit 1') })
+      const local = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({}) })).json()) as { id: string }
+      const refused = await call(`/agents/environments/${local.id}/start`, { method: 'POST' })
+      expect(refused.status).toBe(409)
+      expect(JSON.stringify(await refused.json())).not.toContain(svc.key)
+    } finally {
+      await svc.close()
+    }
+  })
+})
+
+describe('sessions on Agentry Sandbox environments', () => {
+  it('mount the sandbox preset (one registration per sandbox), local sessions mount agentry, deleting the environment evicts it', async () => {
+    const { startTestService } = await import('@agentry/sandbox/testing')
+    const { createAgentrySandboxProvider } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const { createSandboxPresets } = await import('../src/sandbox/presets.ts')
+    const svc = await startTestService()
+    try {
+      const root = join(tmpdir(), 'agentry-gateway-spec-sbx-presets')
+      const registry = new SandboxRegistry('local')
+      registry.register(createLocalProvider(root))
+      registry.register(createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root }))
+      const registered = new Map<string, unknown>()
+      const sandboxPresets = createSandboxPresets({
+        presets: () => ({ register: async (def) => { registered.set(def.id, def.plugins); return async () => { registered.delete(def.id) } } }),
+        rows: () => [{ id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash' }],
+      })
+      const store = new MemoryStore()
+      const fake = fakeContext()
+      const agentsMap = fake.agents
+      const api = new AgentsGateway(fake.ctx, openAuthenticator, '/v1', store, new SessionRegistry(), { ...testGatewayOptions(registry), sandboxPresets })
+      const base = await listen((req, res) => api.handle(req, res))
+      const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string }
+      const session = (body: object) => call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, ...body }) })
+      expect((await session({ environment: { type: 'sandbox', environment_id: env.id } })).status).toBe(200)
+      expect((await session({ environment: { type: 'sandbox', environment_id: env.id } })).status).toBe(200)
+      expect((await session({ environment: { type: 'none' } })).status).toBe(200)
+      const sandboxIds = [...registered.keys()]
+      expect(sandboxIds).toHaveLength(1)
+      expect(sandboxIds[0]).toMatch(/^agentry-sbx-sbx_/)
+      expect(mountedPresets).toEqual([sandboxIds[0], sandboxIds[0], 'agentry'])
+      // Sandbox sessions start in full access (sudo works in the container); the local one is untouched.
+      const appends = [...agentsMap.values()].map((a) => (a as { session: { append: ReturnType<typeof vi.fn> } }).session.append.mock.calls)
+      expect(appends.filter((c) => c.some(([type, data]) => type === 'sandbox/mode' && (data as { mode: string }).mode === 'danger-full-access'))).toHaveLength(2)
+      expect(appends.filter((c) => c.length === 0)).toHaveLength(1)
+      expect((await call(`/agents/environments/${env.id}`, { method: 'DELETE' })).status).toBe(200)
+      expect(registered.size).toBe(0)
+    } finally {
+      await svc.close()
+    }
+  })
+})
+
+describe('workspace data of sandbox sessions', () => {
+  it('artifacts list and read come from the sandbox; a local session still reads host disk', async () => {
+    const { startTestService } = await import('@agentry/sandbox/testing')
+    const { createAgentrySandboxProvider } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const { createSandboxPresets } = await import('../src/sandbox/presets.ts')
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const svc = await startTestService()
+    const files = new Map<string, string>()
+    const envd = createServer((req, res) => {
+      const url = new URL(req.url ?? '/', 'http://x')
+      const chunks: Buffer[] = []
+      req.on('data', (c: Buffer) => chunks.push(c))
+      req.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString() || '{}') as { path?: string }
+        if (url.pathname === '/files') {
+          const v = files.get(url.searchParams.get('path') ?? '')
+          return void (v === undefined ? res.writeHead(404).end('{}') : res.end(v))
+        }
+        if (url.pathname === '/filesystem.Filesystem/ListDir') {
+          const entries = [...files.keys()].filter((p) => p.startsWith(`${body.path ?? ''}/`)).map((p) => ({ name: p.split('/').pop(), type: 'FILE_TYPE_FILE', path: p, size: String(files.get(p)!.length), modifiedTime: '2026-11-24T00:00:00Z' }))
+          return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ entries }))
+        }
+        if (url.pathname === '/filesystem.Filesystem/Stat') {
+          if (!files.has(body.path ?? '')) return void res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ code: 'not_found', message: 'no such file' }))
+          return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ entry: { name: 'x', type: 'FILE_TYPE_FILE', path: body.path } }))
+        }
+        res.writeHead(404).end('{}')
+      })
+    })
+    await new Promise<void>((r) => envd.listen(0, '127.0.0.1', r))
+    svc.backend.setEndpoint(`http://127.0.0.1:${String((envd.address() as AddressInfo).port)}`)
+    try {
+      const root = join(tmpdir(), `agentry-gateway-spec-sbx-data-${String(Date.now())}`)
+      const registry = new SandboxRegistry('local')
+      registry.register(createLocalProvider(root))
+      registry.register(createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root }))
+      const sandboxPresets = createSandboxPresets({ presets: () => ({ register: async () => async () => {} }), rows: () => [] })
+      const store = new MemoryStore()
+      const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), { ...testGatewayOptions(registry), sandboxPresets })
+      const base = await listen((req, res) => api.handle(req, res))
+      const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string }
+      const sbx = (await (await call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment: { type: 'sandbox', environment_id: env.id } }) })).json()) as { id: string }
+      const workspace = (await Promise.all([...svc.ownersSeen].map((o) => svc.service.list(o)))).flat()[0]!.template.workspacePath!
+      files.set(`${workspace}/report.md`, '# from the sandbox')
+      const listed = (await (await call(`/agents/sessions/${sbx.id}/artifacts`)).json()) as { data: { path: string }[] }
+      expect(listed.data.map((e) => e.path)).toEqual(['report.md'])
+      const read = await call(`/agents/sessions/${sbx.id}/artifacts/report.md`)
+      expect(read.status).toBe(200)
+      expect(await read.text()).toBe('# from the sandbox')
+      expect((await call(`/agents/sessions/${sbx.id}/artifacts/missing.md`)).status).toBe(404)
+
+      const localDir = join(root, 'local-ws')
+      await mkdir(localDir, { recursive: true })
+      await writeFile(join(localDir, 'host.md'), 'on host')
+      const local = (await (await call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment: { type: 'self_hosted', workspace_directory: localDir } }) })).json()) as { id: string }
+      const localListed = (await (await call(`/agents/sessions/${local.id}/artifacts`)).json()) as { data: { path: string }[] }
+      expect(localListed.data.map((e) => e.path)).toEqual(['host.md'])
+    } finally {
+      await svc.close()
+      envd.closeAllConnections()
+      await new Promise<void>((r) => envd.close(() => r()))
+    }
+  })
+})
+
+describe('failed sandbox environments never fall back to the host (review C1)', () => {
+  it('a session on a failed sandbox environment, or one provisioned while the service refuses, is refused and mounts nothing', async () => {
+    const { startTestService } = await import('@agentry/sandbox/testing')
+    const { createAgentrySandboxProvider } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const { createSandboxPresets } = await import('../src/sandbox/presets.ts')
+    const svc = await startTestService()
+    try {
+      const root = join(tmpdir(), 'agentry-gateway-spec-sbx-c1')
+      const registry = new SandboxRegistry('local')
+      registry.register(createLocalProvider(root))
+      registry.register(createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root }))
+      const sandboxPresets = createSandboxPresets({ presets: () => ({ register: async () => async () => {} }), rows: () => [] })
+      const store = new MemoryStore()
+      const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), { ...testGatewayOptions(registry), sandboxPresets })
+      const base = await listen((req, res) => api.handle(req, res))
+      const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+      svc.backend.failNextCreate('quota: limit 1 reached')
+      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string; status: string }
+      expect(env.status).toBe('failed')
+      const attach = await call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment: { type: 'sandbox', environment_id: env.id } }) })
+      expect(attach.status).toBe(409)
+      expect(JSON.stringify(await attach.json())).toContain('environment_failed')
+      const tpl = (await (await call('/agents/environments/templates', { method: 'POST', body: JSON.stringify({ name: 't', provider: 'sandbox', config: {} }) })).json()) as { id: string }
+      svc.backend.failNextCreate('quota: limit 1 reached')
+      const provisioned = await call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment: { type: 'sandbox', template_id: tpl.id } }) })
+      expect(provisioned.status).toBe(409)
+      expect(mountedPresets).toEqual([])
+    } finally {
+      await svc.close()
+    }
+  })
+})
+
+describe('a sandbox that cannot start (review I1)', () => {
+  it('answers 503 sandbox_unavailable with the reason instead of a generic 500', async () => {
+    const { startTestService } = await import('@agentry/sandbox/testing')
+    const { createAgentrySandboxProvider } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const { createSandboxPresets } = await import('../src/sandbox/presets.ts')
+    const svc = await startTestService()
+    try {
+      const root = join(tmpdir(), 'agentry-gateway-spec-sbx-i1')
+      const registry = new SandboxRegistry('local')
+      registry.register(createLocalProvider(root))
+      registry.register(createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root }))
+      const sandboxPresets = createSandboxPresets({
+        presets: () => ({ register: async () => async () => {}, resolve: async (id: string) => ({ id, broken: 'Agentry Sandbox is not reachable for sandbox x' }) }),
+        rows: () => [],
+      })
+      const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), { ...testGatewayOptions(registry), sandboxPresets })
+      const base = await listen((req, res) => api.handle(req, res))
+      const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string }
+      const res = await call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment: { type: 'sandbox', environment_id: env.id } }) })
+      expect(res.status).toBe(503)
+      const body = JSON.stringify(await res.json())
+      expect(body).toContain('sandbox_unavailable')
+      expect(body).toContain('not reachable')
+      expect(body).not.toContain(svc.key)
+    } finally {
+      await svc.close()
+    }
   })
 })

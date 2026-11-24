@@ -21,6 +21,8 @@ export interface RuntimeConfigInput {
     accessKeyId?: string
     secretAccessKey?: string
   }
+  /** Agentry Sandbox service (the `sandbox` environment provider); off unless both are set. */
+  sandbox?: { url?: string; key?: string }
 }
 
 /** Resolved optional backends for one plugin apply. */
@@ -29,6 +31,8 @@ export interface RuntimeConfig {
   workspacesRoot: string
   /** Generic S3 artifact endpoint, or omitted so reads use the session cwd. */
   artifacts?: ArtifactS3Config
+  /** Agentry Sandbox service; omitted when not configured (the `sandbox` provider is then not registered). */
+  sandbox?: { url: string; key: string }
 }
 
 /** Env vars that used to configure the removed Codebox backend. */
@@ -83,6 +87,20 @@ export function resolveRuntimeConfig(
   const accessKeyId = text(config.artifacts?.accessKeyId) ?? text(env['AWS_ACCESS_KEY_ID'])
   const secretAccessKey = text(config.artifacts?.secretAccessKey) ?? text(env['AWS_SECRET_ACCESS_KEY'])
   const runtime: RuntimeConfig = { workspacesRoot }
+  const sandboxUrl = text(config.sandbox?.url) ?? text(env['AGENTRY_SANDBOX_URL'])
+  const sandboxKey = text(config.sandbox?.key) ?? text(env['AGENTRY_SANDBOX_KEY'])
+  if (sandboxUrl !== undefined || sandboxKey !== undefined) {
+    if (sandboxUrl === undefined) throw new Error('agents-api: "sandbox.url" is required when "sandbox.key" is set')
+    if (sandboxKey === undefined) throw new Error('agents-api: "sandbox.key" is required when "sandbox.url" is set')
+    let parsed: URL
+    try {
+      parsed = new URL(sandboxUrl)
+    } catch {
+      throw new Error('agents-api: "sandbox.url" must be an http(s) URL')
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('agents-api: "sandbox.url" must be an http(s) URL')
+    runtime.sandbox = { url: sandboxUrl.replace(/\/+$/u, ''), key: sandboxKey }
+  }
   if (endpoint !== undefined && accessKeyId !== undefined && secretAccessKey !== undefined) {
     const bucket = text(config.artifacts?.bucket) ?? text(env['SEAWEEDFS_BUCKET']) ?? 'dsh-session'
     const prefix = text(config.artifacts?.prefix) ?? text(env['DSH_SESSION_S3_PREFIX']) ?? ''
