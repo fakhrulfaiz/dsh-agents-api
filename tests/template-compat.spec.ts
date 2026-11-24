@@ -132,3 +132,15 @@ describe('parseTemplateInput', () => {
     expect(parseTemplateInput({})).toEqual({ config: {} })
   })
 })
+
+describe('template resources', () => {
+  it('parses cpus and memory, refuses out-of-range values, and needs a provider that applies them', async () => {
+    const { parseTemplateInput, requestedFields } = await import('../src/environment/template-compat.ts')
+    const ok = parseTemplateInput({ name: 'x', resources: { cpus: 1.5, memory_mb: 2048 } })
+    expect(ok).toMatchObject({ config: { resources: { cpus: 1.5, memory_mb: 2048 } } })
+    expect(requestedFields((ok as { config: object }).config)).toContain('resources')
+    expect(parseTemplateInput({ resources: { cpus: 100 } })).toMatchObject({ error: expect.stringContaining('cpus') })
+    expect(parseTemplateInput({ resources: { memory_mb: 64 } })).toMatchObject({ error: expect.stringContaining('memory_mb') })
+    expect(parseTemplateInput({ resources: 'big' })).toMatchObject({ error: expect.stringContaining('resources') })
+  })
+})
