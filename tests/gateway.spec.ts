@@ -1356,3 +1356,37 @@ describe('workspace data of sandbox sessions', () => {
     }
   })
 })
+
+describe('failed sandbox environments never fall back to the host (review C1)', () => {
+  it('a session on a failed sandbox environment, or one provisioned while the service refuses, is refused and mounts nothing', async () => {
+    const { startTestService } = await import('@agentry/sandbox/testing')
+    const { createAgentrySandboxProvider } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const { createSandboxPresets } = await import('../src/sandbox/presets.ts')
+    const svc = await startTestService()
+    try {
+      const root = join(tmpdir(), 'agentry-gateway-spec-sbx-c1')
+      const registry = new SandboxRegistry('local')
+      registry.register(createLocalProvider(root))
+      registry.register(createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root }))
+      const sandboxPresets = createSandboxPresets({ presets: () => ({ register: async () => async () => {} }), rows: () => [] })
+      const store = new MemoryStore()
+      const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), { ...testGatewayOptions(registry), sandboxPresets })
+      const base = await listen((req, res) => api.handle(req, res))
+      const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+      svc.backend.failNextCreate('quota: limit 1 reached')
+      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string; status: string }
+      expect(env.status).toBe('failed')
+      const attach = await call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment: { type: 'sandbox', environment_id: env.id } }) })
+      expect(attach.status).toBe(409)
+      expect(JSON.stringify(await attach.json())).toContain('environment_failed')
+      const tpl = (await (await call('/agents/environments/templates', { method: 'POST', body: JSON.stringify({ name: 't', provider: 'sandbox', config: {} }) })).json()) as { id: string }
+      svc.backend.failNextCreate('quota: limit 1 reached')
+      const provisioned = await call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment: { type: 'sandbox', template_id: tpl.id } }) })
+      expect(provisioned.status).toBe(409)
+      expect(mountedPresets).toEqual([])
+    } finally {
+      await svc.close()
+    }
+  })
+})

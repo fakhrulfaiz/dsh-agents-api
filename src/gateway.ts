@@ -1405,11 +1405,14 @@ export class AgentsGateway {
   private async mountSessionPreset(agentCtx: Context, owner: OwnerId, environment: OAIEnvironmentConfig | undefined): Promise<void> {
     const environmentId = environment?.type === 'sandbox' ? environment.environment_id : undefined
     const record = environmentId === undefined ? undefined : await this.store.environments.get(owner, environmentId)
-    const sandboxId = record?.provider === 'sandbox' ? record.provider_metadata['sandbox_id'] : undefined
-    if (record === undefined || sandboxId === undefined) {
+    if (environmentId !== undefined && record === undefined) throw new Error(`environment ${environmentId} no longer exists; this session cannot run`)
+    if (record === undefined || record.provider === 'local') {
       await mountDefaultPreset(agentCtx)
       return
     }
+    // Never fall back to the host for a non-local environment: an unroutable session fails.
+    const sandboxId = record.provider_metadata['sandbox_id']
+    if (sandboxId === undefined) throw new Error(`environment ${record.id} has no sandbox (${record.status}${record.error ? `: ${record.error}` : ''}); this session cannot run`)
     if (this.sandboxPresets === undefined) throw new Error('Agentry Sandbox sessions need an agent preset registry')
     const workspace = record.provider_metadata['workspace_directory']
     if (workspace === undefined) throw new Error(`environment ${record.id} has no workspace path`)
@@ -1650,6 +1653,7 @@ export class AgentsGateway {
       const provider = this.sandboxes.get(record.provider)
       if (provider === undefined) throw bad(`sandbox provider "${record.provider}" is not available`, 'bad_request')
       needsExec(provider)
+      if (record.status === 'failed') throw new AgentsApiRequestError(`environment ${record.id} failed${record.error ? `: ${record.error}` : ''}; create a new one`, 409, 'environment_failed')
       const directory = record.provider_metadata['workspace_directory']
       if (directory === undefined) throw bad(`environment ${record.id} has no host workspace`, 'sandbox_exec_unavailable')
       return { cwd: directory, environment: { type: 'sandbox', environment_id: record.id } }
@@ -1676,6 +1680,10 @@ export class AgentsGateway {
       created = await provider.create(owner, id, { session_id: sessionId, template: config })
     } catch (error: unknown) {
       throw bad(errorMessage(error), 'bad_request')
+    }
+    if (created.status === 'failed') {
+      await provider.destroy({ id, object: 'environment', status: 'failed', provider: provider.kind, provider_metadata: { ...created.handle }, created_at: 0 } as EnvironmentRecord).catch(() => {})
+      throw new AgentsApiRequestError(`the sandbox could not be created${created.error ? `: ${created.error}` : ''}`, 409, 'environment_failed')
     }
     const record: EnvironmentRecord = {
       id,
