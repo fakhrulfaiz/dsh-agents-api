@@ -90,6 +90,12 @@ function inside(dir: string, path: string): string {
   return posix.join(dir, rel)
 }
 
+/** Installs Python packages for `agent`, on images whose Python is externally managed (Debian 12) and on older pip alike. */
+export function pipInstall(packages: string[]): string {
+  const list = packages.map((p) => `'${p.replace(/'/g, `'\\''`)}'`).join(' ')
+  return `python3 -m pip install --user --break-system-packages ${list} || python3 -m pip install --user ${list}`
+}
+
 /** The OpenAI-shaped template as the service's template (packages by kind, setup commands in order). */
 export function toServiceTemplate(t: EnvironmentTemplateConfig | undefined): WireTemplate {
   if (!t) return {}
@@ -101,7 +107,8 @@ export function toServiceTemplate(t: EnvironmentTemplateConfig | undefined): Wir
   const setup = [
     ...(t.setup ? [t.setup] : []),
     ...(t.setup_commands ?? []).map((c) => (c.cwd ? `cd ${JSON.stringify(c.cwd)} && ${c.command}` : c.command)),
-    ...(!Array.isArray(t.packages) && t.packages?.python?.length ? [`pip install --user ${t.packages.python.join(' ')}`] : []),
+    // Debian 12's Python is "externally managed": --user installs need --break-system-packages (older pip lacks the flag).
+    ...(!Array.isArray(t.packages) && t.packages?.python?.length ? [pipInstall(t.packages.python)] : []),
     ...(!Array.isArray(t.packages) && t.packages?.npm?.length ? [`sudo npm install -g ${t.packages.npm.join(' ')}`] : []),
   ]
   if (setup.length > 0) out.setup_commands = setup
@@ -183,6 +190,12 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
     },
 
     async destroy(record) {
+      // An environment whose sandbox was never created (its create failed) has only the host placeholder to remove.
+      if (!record.provider_metadata['sandbox_id']) {
+        const dir = record.provider_metadata['workspace_directory']
+        if (dir) await rmdir(dir).catch(() => {})
+        return
+      }
       const { id, dir } = meta(record)
       try {
         await api(ownerOf(record)).remove(id)
