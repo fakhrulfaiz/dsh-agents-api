@@ -153,7 +153,7 @@ describe.skipIf(!haveImages())('DSH remote providers over Agentry Sandbox', () =
     expect(out).toContain('got hi')
   }, 60_000)
 
-  it('confines a command with a workspace-write policy inside the sandbox (DSH's Landlock/bwrap enforcement works in the hardened container)', async () => {
+  it('confines a command with a workspace-write policy inside the sandbox (DSH Landlock or bwrap enforcement works in the hardened container)', async () => {
     const policy = services.sandboxPolicy.resolve({ mode: 'workspace-write', cwd: workspace } as never)
     const confined = await services.sandbox.confine(['/bin/sh', '-c', `touch ${workspace}/inside && echo in-ok; touch /home/agent/outside && echo out-ok; true`], policy)
     expect(confined.enforcement).toBe('full')
