@@ -18,7 +18,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import { SshRpcPeer, SSH_PROTOCOL_VERSION } from '@deepseek-ai/dsh-ssh/protocol'
 import { helloSchema, type SshStreamEndpoint } from '@deepseek-ai/dsh-ssh/schemas'
 import { z } from 'zod'
-import { createSandboxApi, type EnvdClient } from '@agentry/sandbox/client'
+import { createSandboxApi, SandboxApiError, type EnvdClient, type SandboxApi } from '@agentry/sandbox/client'
 import { EnvdProcessStream } from './envd-stream.ts'
 
 export const DSH_RUNTIME_MANIFEST = '/opt/agentry/dsh/manifest.json'
@@ -98,6 +98,7 @@ declare module '@deepseek-ai/cordis' {
 export class EnvdSshConnection extends Service {
   private readonly config: Required<EnvdSshConfig>
   private readonly envd: EnvdClient
+  private readonly api: SandboxApi
   private lifetime = new AbortController()
   private ready: Promise<Hello>
   private readonly sockets = new Set<{ destroy(error?: Error): void }>()
@@ -121,7 +122,8 @@ export class EnvdSshConnection extends Service {
       ...config, url, key,
     }
     if (!this.config.workspace.startsWith('/')) throw new Error('sandbox workspace must be absolute')
-    this.envd = createSandboxApi({ url, key, owner: config.owner }).envd(config.sandboxId)
+    this.api = createSandboxApi({ url, key, owner: config.owner })
+    this.envd = this.api.envd(config.sandboxId)
     this.ready = this.start()
     void this.ready.catch((error: unknown) => { this.fail(error as Error) })
     ctx.effect(() => () => this.dispose())
@@ -224,7 +226,12 @@ export class EnvdSshConnection extends Service {
       raw = await this.envd.readFile(DSH_RUNTIME_MANIFEST, this.config.user)
     } catch (e) {
       const message = (e as Error).message
-      if (/ failed: 404\b/.test(message)) throw new Error('this sandbox has no DeepSeek Harness runtime at /opt/agentry/dsh (Agentry Sandbox injects it unless AGENTRY_SANDBOX_DSH_RUNTIME_IMAGE is none)')
+      if (/ failed: 404\b/.test(message)) {
+        // The relay also answers 404 for a sandbox that is gone (or not this owner's): tell the two apart.
+        const exists = await this.api.get(this.config.sandboxId).then(() => true, (e: unknown) => !(e instanceof SandboxApiError && e.status === 404))
+        if (!exists) throw new Error(`sandbox ${this.config.sandboxId} no longer exists (it was deleted); start a new chat on another environment`)
+        throw new Error('this sandbox has no DeepSeek Harness runtime at /opt/agentry/dsh (Agentry Sandbox injects it unless AGENTRY_SANDBOX_DSH_RUNTIME_IMAGE is none)')
+      }
       if (/ failed: \d{3}\b/.test(message)) throw new Error(`Agentry Sandbox refused sandbox ${this.config.sandboxId}: ${message}`)
       throw new Error(`Agentry Sandbox is not reachable for sandbox ${this.config.sandboxId}: ${message}`)
     }
