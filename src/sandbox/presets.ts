@@ -37,6 +37,10 @@ const CREDENTIALS = Symbol.for('agentry.sandbox.credentials')
 export function setSandboxCredentials(credentials: { url: string; key: string } | undefined): void {
   ;(globalThis as Record<symbol, unknown>)[CREDENTIALS] = credentials
 }
+/** What to refresh inside a sandbox whenever its helper (re)starts — the API copies skills here. */
+export function setSandboxPrepare(prepare: ((owner: string, sandboxId: string) => Promise<void>) | undefined): void {
+  ;(globalThis as Record<symbol, unknown>)[Symbol.for('agentry.sandbox.prepare')] = prepare
+}
 export function sandboxCredentials(): { url: string; key: string } | undefined {
   return (globalThis as Record<symbol, unknown>)[CREDENTIALS] as { url: string; key: string } | undefined
 }

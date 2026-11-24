@@ -273,6 +273,13 @@ export class EnvdSshConnection extends Service {
     }
     const manifest = manifestSchema.parse(JSON.parse(Buffer.from(raw).toString('utf8')))
     this.manifest = manifest
+    // Refresh what the API copies into the sandbox (skills) on every new helper: after a stop, reset or idle close too.
+    const prepare = (globalThis as Record<symbol, unknown>)[Symbol.for('agentry.sandbox.prepare')] as ((owner: string, sandboxId: string) => Promise<void>) | undefined
+    if (prepare) {
+      await prepare(this.config.owner, this.config.sandboxId).catch((error: unknown) => {
+        if (process.env['AGENTRY_DEBUG_ERRORS'] === '1') process.stderr.write(`[agentry-sandbox-runtime] ${this.config.sandboxId}: prepare failed: ${(error as Error).message}\n`)
+      })
+    }
     if (this.closed) throw new Error('sandbox connection closed before startup')
     // The helper's own stream is not tied to the connection lifetime: closing lets it exit and clean up (retire).
     const helper = new EnvdProcessStream(this.envd, {

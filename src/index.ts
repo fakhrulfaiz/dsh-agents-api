@@ -44,7 +44,7 @@ import { installApprovalBridge } from './approvals/approval-bridge.ts'
 import { bridgeChildSessionEvent } from './bridge.ts'
 import { createLocalProvider, directorySegment } from './environment/local.ts'
 import { createAgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
-import { agentryPresetRows, createSandboxPresets, setSandboxCredentials, type PresetRegistryLike, type SandboxPresets } from './sandbox/presets.ts'
+import { agentryPresetRows, createSandboxPresets, setSandboxCredentials, setSandboxPrepare, type PresetRegistryLike, type SandboxPresets } from './sandbox/presets.ts'
 import { copySkillsInto } from './sandbox/skills-copy.ts'
 import { createSandboxApi } from '@agentry/sandbox/client'
 import { SandboxRegistry } from './sandbox/registry.ts'
@@ -441,14 +441,16 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     ctx.effect(() => () => { setSandboxCredentials(undefined) })
     const patch = fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))
     const rows = agentryPresetRows(patch)
+    // Skills are copied whenever a sandbox's helper starts (first use, after a stop, reset or idle close).
+    setSandboxPrepare(async (owner, sandboxId) => {
+      const api = createSandboxApi({ ...sandboxConfig, owner })
+      const copied = await copySkillsInto(api, sandboxId, [join(config.skills.dir, directorySegment(owner as OwnerId, 'owner')), config.skills.builtinDir])
+      ctx.logger.info(`agents-api: sandbox ${sandboxId}: ${String(copied)} skill files copied`)
+    })
+    ctx.effect(() => () => { setSandboxPrepare(undefined) })
     sandboxPresets = createSandboxPresets({
       presets: () => ctx.get('agentPresets') as PresetRegistryLike | undefined,
       rows: () => rows,
-      prepare: async ({ owner, sandboxId }) => {
-        const api = createSandboxApi({ ...sandboxConfig, owner })
-        const copied = await copySkillsInto(api, sandboxId, [join(config.skills.dir, directorySegment(owner as OwnerId, 'owner')), config.skills.builtinDir])
-        ctx.logger.info(`agents-api: sandbox ${sandboxId}: ${String(copied)} skill files copied`)
-      },
     })
     ctx.effect(() => () => { void sandboxPresets?.dispose() })
   }

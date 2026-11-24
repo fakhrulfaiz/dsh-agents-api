@@ -243,6 +243,25 @@ describe.skipIf(!haveImages())('DSH remote providers over Agentry Sandbox', () =
     await conn.dispose()
   }, 90_000)
 
+  it('runs the prepare hook (skills copy) on every new helper, including after a stop (review I4)', async () => {
+    const calls: string[] = []
+    const key = Symbol.for('agentry.sandbox.prepare')
+    ;(globalThis as Record<symbol, unknown>)[key] = async (owner: string, id: string) => { calls.push(`${owner}/${id}`) }
+    try {
+      const conn = new EnvdSshConnection(new Context(), { url: svc.url, key: svc.key, owner: OWNER, sandboxId, workspace })
+      await conn.request('heartbeat', {}, z.null())
+      expect(calls).toEqual([`${OWNER}/${sandboxId}`])
+      await svc.service.stop(OWNER, sandboxId)
+      await new Promise((r) => setTimeout(r, 1500))
+      await conn.request('heartbeat', {}, z.null()).catch(() => {})
+      await conn.request('heartbeat', {}, z.null())
+      expect(calls).toEqual([`${OWNER}/${sandboxId}`, `${OWNER}/${sandboxId}`])
+      await conn.dispose()
+    } finally {
+      delete (globalThis as Record<symbol, unknown>)[key]
+    }
+  }, 120_000)
+
   it('an unreachable service fails with a clear error; a fresh connection then works', async () => {
     const down = new Context()
     const conn = new EnvdSshConnection(down, { url: 'http://127.0.0.1:1', key: 'k', owner: OWNER, sandboxId: 'sbx_none', workspace })
