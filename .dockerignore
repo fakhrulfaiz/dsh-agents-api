@@ -1,0 +1,8 @@
+.git
+.claude
+node_modules
+lib
+.env
+.env.*
+tsconfig.dsh.json
+tsconfig.dsh.types.json

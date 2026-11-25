@@ -1,0 +1,49 @@
+# The Agentry API from the published image, with its own Postgres.
+#
+#   cp agentry-api.env.example .env      # fill it in (Compose reads .env for both services)
+#   docker login ghcr.io                  # only if the package is private
+#   docker compose up -d
+#
+# Update: change AGENTRY_API_TAG in .env (or the tag below), then `docker compose pull && docker compose up -d`.
+# Logs: `docker compose logs -f api`. Each GitHub Release attaches this file with its tag pinned.
+name: agentry-api
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agentry
+      POSTGRES_DB: agentry
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentry -d agentry"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    image: ghcr.io/fakhrulfaiz/agentry-api:${AGENTRY_API_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # The bundled Postgres unless .env names another database.
+      AGENTRY_DATABASE_URL: ${AGENTRY_DATABASE_URL:-postgres://agentry:${POSTGRES_PASSWORD}@postgres:5432/agentry}
+    # Plain HTTP: published on this machine only. Put a TLS reverse proxy in front for other machines.
+    ports:
+      - "127.0.0.1:${AGENTRY_API_PORT:-3080}:3080"
+    # Lets AGENTRY_SANDBOX_URL=http://host.docker.internal:3090 reach Agentry Sandbox on this machine.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # DSH home (profile, settings, Session logs), workspaces and uploads.
+    volumes:
+      - api-data:/data
+
+volumes:
+  postgres-data:
+  api-data:

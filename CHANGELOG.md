@@ -3,6 +3,12 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## Unreleased — Docker image and CI
+
+- `Dockerfile`: DeepSeek Harness at `dsh.pin` (cloned from the public repo, built with `build:artifacts`), the Office runtime (`prepare:primary-runtime`, `AGENTRY_OFFICE_RUNTIME`), Agentry Sandbox's client (cloned, `SANDBOX_REF`) and this plugin, in one image. `docker/entrypoint.sh` places the `agents` profile on the data volume (`DSH_HOME=/data/dsh`; image-owned files refreshed on every start, `cordis.patch.yml` kept), requires `AGENTRY_DATABASE_URL` and `AGENTRY_DEV_KEY`, and boots on the container's own address (DSH rejects wildcard binds). Workspaces and uploads live in `/data`. Verified: boots, every profile entry activates, `/v1` answers with the key and 401 without it, migrations run.
+- `docker/compose.yaml` (the API plus Postgres 16) and `docker/agentry-api.env.example`; `docker/README.md` documents running and building.
+- GitHub Actions: `ci.yml` builds the image on pushes to `develop` and pull requests to `main` (plus a "version not yet released" check on the pull request); `publish.yml` releases on merge to `main`: `ghcr.io/fakhrulfaiz/agentry-api` (`<version>-<sha>`, `<version>`, `latest`), tag `v<version>`, and a GitHub Release with the compose file (pinned) and the settings template (`scripts/ci/release-notes.sh` takes the notes from a `## <version>` section here).
+
 ## Unreleased — Agentry Sandbox provider
 
 - Sandbox tools for agents (registered on every session's agent when Agentry Sandbox is configured): `sandbox_list`, `sandbox_templates`, `sandbox_create`, `sandbox_start`, `sandbox_stop`, `sandbox_exec` (a shell command as `agent` in the sandbox's workspace; exit code plus the last 20 KB of stdout and 8 KB of stderr; 1–600 s) and `sandbox_delete`. Scoped to the session owner; creating and deleting ask the user first (`Create sandbox "…" (template or image, packages, no internet)`, `Delete sandbox "…" and all its files`); the sandbox the chat runs in is never stopped or deleted by them; Agentry Sandbox limits come back as the tool's error. `POST /agents/environments` and `sandbox_create` share one code path (`provisionEnvironment`).
