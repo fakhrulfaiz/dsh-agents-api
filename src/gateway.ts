@@ -58,6 +58,7 @@ import type { GithubDeps } from './skills/github.ts'
 import { resolveAgentSkills, validateSkillSelection, type BuiltinSkill } from './skills/resolve.ts'
 import { mountAgentTools } from './mount-agent-tools.ts'
 import { mountSandboxTools } from './mount-sandbox-tools.ts'
+import { mountComposioAppTools } from './mount-composio-app-tools.ts'
 import { mountScheduleGuidance } from './mount-schedule-guidance.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
@@ -1514,6 +1515,7 @@ export class AgentsGateway {
         sendPolicy: resolved.send_policy ?? 'ask',
         serverLabel: this.composio.serverLabel,
       })
+      mountComposioAppTools(agentCtx, { serverLabel: this.composio.serverLabel, grants: effectiveGrants(resolved) })
     }
   }
 

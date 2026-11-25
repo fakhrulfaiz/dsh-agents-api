@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
+import { APP_TOOLS } from '../src/mount-composio-app-tools.ts'
 import { materializeAgent } from '../src/agent-records.ts'
 import { createLocalProvider } from '../src/environment/local.ts'
 import type { CreateAgentParams, OAIAgent } from '../src/types.ts'
@@ -222,6 +223,8 @@ function gateway(apiKey = '', options?: {
     pluginCalls,
   }
 }
+
+const APP_TOOL_NAMES = new Set(APP_TOOLS.map(tool => tool.name))
 
 describe('http body helpers', () => {
   it('parses objects and treats invalid JSON as empty', async () => {
@@ -770,7 +773,7 @@ describe('AgentsGateway', () => {
         },
       }),
     })).json() as { id: string }
-    expect(registeredTools.map(tool => tool.name).filter(name => !name.startsWith('skill_'))).toEqual(['get_weather'])
+    expect(registeredTools.map(tool => tool.name).filter(name => !name.startsWith('skill_') && !APP_TOOL_NAMES.has(name))).toEqual(['get_weather'])
 
     feed(created.id, logEvent('turn/start', { turn: 1 }, 1))
     const events: unknown[] = []

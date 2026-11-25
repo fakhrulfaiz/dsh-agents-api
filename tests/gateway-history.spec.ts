@@ -3,6 +3,7 @@
  * lazy resume, status writes, and index-only listing.
  */
 
+import { APP_TOOLS } from '../src/mount-composio-app-tools.ts'
 import { fakeLlm, fakeModel } from './support/fake-model.ts'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -160,6 +161,8 @@ const frameIds = (text: string) => [...text.matchAll(/^id: (\d+)$/gmu)].map(matc
 const frameTypes = (text: string) => [...text.matchAll(/^event: (.+)$/gmu)].map(match => match[1])
 
 const user = (seq: number) => logEvent('user/message', { content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }, seq)
+
+const APP_TOOL_NAMES = new Set(APP_TOOLS.map(tool => tool.name))
 
 describe('SSE replay', () => {
   it('replays across restart: Last-Event-ID yields exactly the missed events, then live, with no duplicates', async () => {
@@ -541,7 +544,7 @@ describe('resume', () => {
     ])
     expect(posted.map(response => response.status)).toEqual([200, 200])
     expect(second.resume).toHaveBeenCalledOnce()
-    expect(second.tools.map(tool => tool.name).filter(name => !name.startsWith('skill_'))).toEqual(['get_weather'])
+    expect(second.tools.map(tool => tool.name).filter(name => !name.startsWith('skill_') && !APP_TOOL_NAMES.has(name))).toEqual(['get_weather'])
     expect(second.agents.get(id)!.followup).toHaveBeenCalledOnce()
 
     // The call parked before the restart was closed by the Session layer; a late result for it is refused.
