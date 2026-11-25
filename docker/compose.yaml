@@ -32,8 +32,9 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      # The bundled Postgres unless .env names another database.
-      AGENTRY_DATABASE_URL: ${AGENTRY_DATABASE_URL:-postgres://agentry:${POSTGRES_PASSWORD}@postgres:5432/agentry}
+      # The bundled Postgres (the entrypoint builds the URL from POSTGRES_PASSWORD) unless .env
+      # sets AGENTRY_DATABASE_URL.
+      POSTGRES_HOST: postgres
     # Plain HTTP: published on this machine only. Put a TLS reverse proxy in front for other machines.
     ports:
       - "127.0.0.1:${AGENTRY_API_PORT:-3080}:3080"

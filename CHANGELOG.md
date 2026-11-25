@@ -3,15 +3,20 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
-## Unreleased — Docker image and CI
+## 0.1.0 — 2026-11-25
+
+First tagged release of the Agentry API: the OpenAI Agents API–compatible surface on DeepSeek Harness (agents, sessions with streaming and replay, approvals, subagents, schedules, skills, files and deliverables, environments and templates on the local or Agentry Sandbox provider, sandbox tools for agents), now shipped as a Docker image (`ghcr.io/fakhrulfaiz/agentry-api`) with a compose file, as described in the entries below.
+
+## 2026-11-25 — Docker image and CI
 
 - The image ships DeepSeek Harness from npm (`@deepseek-ai/dsh@<dsh.pin version>`) and the plugin from its `npm pack` tarball with runtime dependencies only, instead of the built source tree: 1.49 GB instead of 3.22 GB. Verified the same as the full image: every entry activates, `/v1` and skills answer, and a turn runs up to the model call. `dsh.pin` must name a version published on npm.
+- With the bundled Postgres the entrypoint builds the database URL from `POSTGRES_PASSWORD` (and `POSTGRES_HOST`, set by the compose file), so no connection string with a credential slot is written in the repository; `AGENTRY_DATABASE_URL` still wins when set.
 - Example database URLs use `<user>:<password>@<host>` placeholders (a GitGuardian "generic password" alert on `user:password@host` was a false positive).
 - `Dockerfile`: DeepSeek Harness at `dsh.pin` (cloned from the public repo, built with `build:artifacts`), the Office runtime (`prepare:primary-runtime`, `AGENTRY_OFFICE_RUNTIME`), Agentry Sandbox's client (cloned, `SANDBOX_REF`) and this plugin, in one image. `docker/entrypoint.sh` places the `agents` profile on the data volume (`DSH_HOME=/data/dsh`; image-owned files refreshed on every start, `cordis.patch.yml` kept), requires `AGENTRY_DATABASE_URL` and `AGENTRY_DEV_KEY`, and boots on the container's own address (DSH rejects wildcard binds). Workspaces and uploads live in `/data`. Verified: boots, every profile entry activates, `/v1` answers with the key and 401 without it, migrations run.
 - `docker/compose.yaml` (the API plus Postgres 16) and `docker/agentry-api.env.example`; `docker/README.md` documents running and building.
 - GitHub Actions: `ci.yml` builds the image on pushes to `develop` and pull requests to `main` (plus a "version not yet released" check on the pull request); `publish.yml` releases on merge to `main`: `ghcr.io/fakhrulfaiz/agentry-api` (`<version>-<sha>`, `<version>`, `latest`), tag `v<version>`, and a GitHub Release with the compose file (pinned) and the settings template (`scripts/ci/release-notes.sh` takes the notes from a `## <version>` section here).
 
-## Unreleased — Agentry Sandbox provider
+## 2026-11-25 — Agentry Sandbox provider
 
 - Sandbox tools for agents (registered on every session's agent when Agentry Sandbox is configured): `sandbox_list`, `sandbox_templates`, `sandbox_create`, `sandbox_start`, `sandbox_stop`, `sandbox_exec` (a shell command as `agent` in the sandbox's workspace; exit code plus the last 20 KB of stdout and 8 KB of stderr; 1–600 s) and `sandbox_delete`. Scoped to the session owner; creating and deleting ask the user first (`Create sandbox "…" (template or image, packages, no internet)`, `Delete sandbox "…" and all its files`); the sandbox the chat runs in is never stopped or deleted by them; Agentry Sandbox limits come back as the tool's error. `POST /agents/environments` and `sandbox_create` share one code path (`provisionEnvironment`).
 - Fixed: template Python packages failed to install on the standard image (Debian 12's Python is externally managed); they are installed with `python3 -m pip install --user --break-system-packages`, falling back to plain `--user` for older pip. Fixed: an environment whose sandbox was never created (its create failed) could not be deleted; it now deletes, and the sandbox tools say it failed to set up and why.
