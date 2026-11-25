@@ -394,6 +394,15 @@ export class AgentsGateway {
     this.#knownOwners.clear()
   }
 
+  /**
+   * Whether requests can be served: the store is attached, still opening, or failed to start.
+   * @returns the state, with the start failure's message when it failed.
+   */
+  storeStatus(): { state: 'ready' } | { state: 'starting' } | { state: 'failed'; error: string } {
+    if (this.#store !== undefined) return { state: 'ready' }
+    return this.#storeError === undefined ? { state: 'starting' } : { state: 'failed', error: this.#storeError }
+  }
+
   /** The attached store; a detach during a request surfaces as a store outage. */
   private get store(): Store {
     if (this.#store === undefined) throw new StoreUnavailableError(this.#storeError ?? 'agents store is not attached')

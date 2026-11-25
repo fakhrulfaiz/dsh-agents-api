@@ -2423,11 +2423,31 @@ paths:
           $ref: "#/components/responses/StoreUnavailable"
   /health:
     get:
-      summary: Liveness probe
+      summary: Readiness probe
+      description: 200 once the Postgres store is open and `/v1` can serve; 503 while it opens or after it failed to start.
       tags:
         - Health
       security: []
       responses:
+        "503":
+          description: The store is still opening (`store` is `starting`) or failed to start (`failed`, with `error`).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    const: false
+                  service:
+                    const: agents-api
+                  store:
+                    enum: [starting, failed]
+                  error:
+                    type: string
+                required:
+                  - ok
+                  - service
+                  - store
         "200":
           description: OK
           content:

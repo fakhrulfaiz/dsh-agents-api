@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## Unreleased — readiness
+
+- `GET /health` answers 200 only once the Postgres store is open (`/v1` can serve), and 503 `{ ok: false, store: "starting" | "failed", error? }` while it opens or after a failed start. It used to answer 200 at once, so container health checks, Compose and the web launcher could treat the API as ready during the seconds when every `/v1` call answered 503 `store_unavailable`. `AgentsGateway.storeStatus()` exposes the state.
+
 ## 0.1.0 — 2026-11-25
 
 First tagged release of the Agentry API: the OpenAI Agents API–compatible surface on DeepSeek Harness (agents, sessions with streaming and replay, approvals, subagents, schedules, skills, files and deliverables, environments and templates on the local or Agentry Sandbox provider, sandbox tools for agents), now shipped as a Docker image (`ghcr.io/fakhrulfaiz/agentry-api`) with a compose file, as described in the entries below.

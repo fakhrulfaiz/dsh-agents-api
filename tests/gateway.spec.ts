@@ -1,3 +1,4 @@
+import { healthResponse } from '../src/index.ts'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { EventEmitter } from 'node:events'
 import type { AddressInfo } from 'node:net'
@@ -1114,6 +1115,18 @@ describe('AgentsGateway store and owner scoping', () => {
     expect((await fetch(`${root}/v1/agents`)).status).toBe(200)
     api.detachStore()
     expect((await fetch(`${root}/v1/agents`)).status).toBe(503)
+  })
+
+  it('reports the store state for /health: starting, failed with the error, then ready', () => {
+    const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', undefined, new SessionRegistry(), testGatewayOptions(environments))
+    expect(api.storeStatus()).toEqual({ state: 'starting' })
+    expect(healthResponse(api.storeStatus())).toEqual({ status: 503, body: { ok: false, service: 'agents-api', store: 'starting' } })
+    api.failStore('migration 0001-initial.sql failed')
+    expect(healthResponse(api.storeStatus())).toEqual({ status: 503, body: { ok: false, service: 'agents-api', store: 'failed', error: 'migration 0001-initial.sql failed' } })
+    api.attachStore(new MemoryStore())
+    expect(healthResponse(api.storeStatus())).toEqual({ status: 200, body: { ok: true, service: 'agents-api' } })
+    api.detachStore()
+    expect(api.storeStatus()).toEqual({ state: 'starting' })
   })
 
   it('records the owner on first request and hides other owners\' records as 404', async () => {

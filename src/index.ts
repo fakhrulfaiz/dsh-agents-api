@@ -12,7 +12,7 @@
  * - Items: `GET /v1/agents/sessions/{session_id}/items`
  * - Turns: `GET /v1/agents/sessions/{session_id}/turns`, `GET /v1/agents/sessions/{session_id}/turns/{turn_id}`
  * - Environments, artifacts, and subagents under the same prefix
- * - `GET /health` on the webserver, outside `/v1`
+ * - `GET /health` on the webserver, outside `/v1`: 200 once the store is open, 503 before or after a failed start
  *
  * Reference: https://developers.openai.com/api/docs/guides/agents-api
  *
@@ -518,9 +518,10 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
       kind: 'exact',
       path: '/health',
       handler: (_req: IncomingMessage, res: ServerResponse) => {
-        res.statusCode = 200
+        const { status, body } = healthResponse(gateway.storeStatus())
+        res.statusCode = status
         res.setHeader('Content-Type', 'application/json')
-        res.end(JSON.stringify({ ok: true, service: 'agents-api' }))
+        res.end(JSON.stringify(body))
       },
     }),
     'agents-api: /health',
@@ -534,6 +535,17 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     }),
     `agents-api: ${prefix}`,
   )
+}
+
+/**
+ * The `/health` answer: 200 once the store is attached (so `/v1` can serve), 503 while it
+ * opens or after it failed to start. Container health checks and launchers wait on it.
+ * @param store - the gateway's store state.
+ * @returns status code and JSON body.
+ */
+export function healthResponse(store: ReturnType<AgentsGateway['storeStatus']>): { status: number; body: Record<string, unknown> } {
+  if (store.state === 'ready') return { status: 200, body: { ok: true, service: 'agents-api' } }
+  return { status: 503, body: { ok: false, service: 'agents-api', store: store.state, ...(store.state === 'failed' ? { error: store.error } : {}) } }
 }
 
 /**
