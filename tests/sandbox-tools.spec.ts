@@ -55,6 +55,12 @@ afterEach(async () => { await svc?.close() })
 describe('sandbox tools', () => {
   beforeEach(async () => { await setup() })
 
+  it('lists the built-in templates for the sandbox provider', async () => {
+    const res = await call('sandbox_templates') as { templates: { id: string; name: string; packages: { python?: string[] } }[] }
+    expect(res.templates.map((t) => t.id)).toEqual(['tpl_builtin_data_science', 'tpl_builtin_web_scraping', 'tpl_builtin_node_typescript', 'tpl_builtin_offline'])
+    expect(res.templates[0]).toMatchObject({ name: 'Data science', packages: { python: ['matplotlib', 'seaborn', 'scipy', 'scikit-learn'] } })
+  })
+
   it('registers the nine tools', () => {
     expect([...tools.keys()].sort()).toEqual([...SANDBOX_TOOL_NAMES].sort())
   })

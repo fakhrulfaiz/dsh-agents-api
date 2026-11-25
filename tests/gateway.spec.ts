@@ -1473,3 +1473,42 @@ describe('a sandbox that cannot start (review I1)', () => {
     }
   })
 })
+
+describe('built-in templates', () => {
+  it('lead the first page when the isolated sandbox is configured, resolve by id, and cannot be changed or deleted', async () => {
+    const { startTestService } = await import('@agentry/sandbox/testing')
+    const { createAgentrySandboxProvider } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const svc = await startTestService()
+    try {
+      const root = join(tmpdir(), 'agentry-gateway-spec-builtin')
+      const withSandbox = new SandboxRegistry('local')
+      withSandbox.register(createLocalProvider(root))
+      withSandbox.register(createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root }))
+      const serve = async (registry: InstanceType<typeof SandboxRegistry>) => {
+        const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), testGatewayOptions(registry))
+        const base = await listen((req, res) => api.handle(req, res))
+        return (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+      }
+      const call = await serve(withSandbox)
+      const mine = (await (await call('/agents/environments/templates', { method: 'POST', body: JSON.stringify({ name: 'mine', provider: 'sandbox', config: {} }) })).json()) as { id: string }
+      const listed = (await (await call('/agents/environments/templates')).json()) as { data: { id: string; name: string; provider: string; built_in?: boolean }[] }
+      expect(listed.data.map((t) => t.name)).toEqual(['Data science', 'Web and scraping', 'Node and TypeScript', 'Offline', 'mine'])
+      expect(listed.data.filter((t) => t.built_in).every((t) => t.provider === 'sandbox')).toBe(true)
+      expect(listed.data.find((t) => t.id === mine.id)?.built_in).toBeUndefined()
+      expect(await (await call('/agents/environments/templates/tpl_builtin_offline')).json()).toMatchObject({ name: 'Offline', built_in: true })
+      expect((await call('/agents/environments/templates/tpl_builtin_offline', { method: 'POST', body: '{"name":"x"}' })).status).toBe(400)
+      expect((await call('/agents/environments/templates/tpl_builtin_offline', { method: 'DELETE' })).status).toBe(400)
+      // An environment can start from one.
+      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox', template_id: 'tpl_builtin_data_science' }) })).json()) as { status: string; template_id?: string }
+      expect(env).toMatchObject({ status: 'connected', template_id: 'tpl_builtin_data_science' })
+      // Without the isolated sandbox there are none.
+      const plain = new SandboxRegistry('local')
+      plain.register(createLocalProvider(root))
+      const bare = await serve(plain)
+      expect(((await (await bare('/agents/environments/templates')).json()) as { data: unknown[] }).data).toEqual([])
+    } finally {
+      await svc.close()
+    }
+  })
+})

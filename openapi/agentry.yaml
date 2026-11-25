@@ -3409,11 +3409,13 @@ components:
             - path
             - file_id
     EnvironmentTemplate:
-      description: An `agent.environment.template` as the OpenAI Agents API defines it. Confidential parts (inline file data, `env`, setup commands, archives) are never returned; `provider`, `image` and `unsupported_fields` are extensions.
+      description: An `agent.environment.template` as the OpenAI Agents API defines it. Confidential parts (inline file data, `env`, setup commands, archives) are never returned; `provider`, `image`, `unsupported_fields` and `built_in` are extensions. Built-in templates (`tpl_builtin_*`) lead the first page of the list when the isolated sandbox is configured; they cannot be changed or deleted (400).
       type: object
       properties:
         id:
           type: string
+        built_in:
+          type: boolean
         object:
           const: agent.environment.template
         name:

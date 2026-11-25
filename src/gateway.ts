@@ -46,6 +46,7 @@ import { SandboxApiError } from '@agentry/sandbox/client'
 import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
 import { sweepStaged, type InstallDeps } from './skills/install.ts'
 import { SkillInstallApi } from './skills/routes.ts'
+import { builtinTemplate, BUILTIN_TEMPLATES, isBuiltinTemplateId } from './environment/builtin-templates.ts'
 import { TerminalError, TerminalHub } from './sandbox/terminals.ts'
 import { forgetWorkspaceAlias, workspaceOf } from './sandbox/workspace-alias.ts'
 import { DeliverablesCache } from './history/deliverables-cache.ts'
@@ -1694,7 +1695,7 @@ export class AgentsGateway {
       return { cwd: directory, environment: { type: 'sandbox', environment_id: record.id } }
     }
     const templateId = spec.type === 'sandbox' ? spec.template_id : typeof spec.environment_template_id === 'string' ? spec.environment_template_id : undefined
-    const template = templateId === undefined ? undefined : await this.store.templates.get(owner, templateId)
+    const template = templateId === undefined ? undefined : await this.templateFor(owner, templateId)
     if (templateId !== undefined && template === undefined) throw bad(`template not found: ${templateId}`, 'resource_not_found', 404)
     const inline = spec.type === 'openai_hosted' ? parseTemplateInput(spec) : { config: {} }
     if ('error' in inline) throw bad(inline.error, 'bad_request')
@@ -1857,22 +1858,37 @@ export class AgentsGateway {
     json(res, 201, toSdkTemplate(await this.store.templates.create(owner, template), provider))
   }
 
+  /** A template by id: a built-in one, or one of the owner's. */
+  private async templateFor(owner: OwnerId, id: string): Promise<EnvironmentTemplate | undefined> {
+    return builtinTemplate(id) ?? await this.store.templates.get(owner, id)
+  }
+
   private async listTemplates(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
-    const page = await this.store.templates.list(owner, listQuery(url))
-    json(res, 200, { ...page, data: page.data.map(template => toSdkTemplate(template, this.sandboxes.get(template.provider))) })
+    const query = listQuery(url)
+    const page = await this.store.templates.list(owner, query)
+    // The built-in templates lead the first page (and only it); they need the isolated sandbox provider.
+    const builtins = query.after === undefined && this.sandboxes.get('sandbox') !== undefined ? [...BUILTIN_TEMPLATES] : []
+    json(res, 200, { ...page, data: [...builtins, ...page.data].map(template => ({
+      ...toSdkTemplate(template, this.sandboxes.get(template.provider)),
+      ...(isBuiltinTemplateId(template.id) ? { built_in: true } : {}),
+    })) })
   }
 
   private async getTemplate(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const template = await this.store.templates.get(owner, routeParam(params, 'template_id'))
+    const template = await this.templateFor(owner, routeParam(params, 'template_id'))
     if (!template) {
       notFound(res, 'template not found')
       return
     }
-    json(res, 200, toSdkTemplate(template, this.sandboxes.get(template.provider)))
+    json(res, 200, { ...toSdkTemplate(template, this.sandboxes.get(template.provider)), ...(isBuiltinTemplateId(template.id) ? { built_in: true } : {}) })
   }
 
   private async updateTemplate(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const templateId = routeParam(params, 'template_id')
+    if (isBuiltinTemplateId(templateId)) {
+      badRequest(res, 'built-in templates cannot be changed; make your own template instead')
+      return
+    }
     const existing = await this.store.templates.get(owner, templateId)
     if (!existing) {
       notFound(res, 'template not found')
@@ -1909,6 +1925,10 @@ export class AgentsGateway {
 
   private async deleteTemplate(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const templateId = routeParam(params, 'template_id')
+    if (isBuiltinTemplateId(templateId)) {
+      badRequest(res, 'built-in templates cannot be deleted')
+      return
+    }
     if (!await this.store.templates.delete(owner, templateId)) {
       notFound(res, 'template not found')
       return
@@ -1947,7 +1967,7 @@ export class AgentsGateway {
     }
     let templateProvider: string | undefined
     if (input.template_id !== undefined) {
-      const template = await this.store.templates.get(owner, input.template_id)
+      const template = await this.templateFor(owner, input.template_id)
       if (template === undefined) return fail(`template not found: ${input.template_id}`)
       input.template = template.config
       templateProvider = template.provider
@@ -2202,7 +2222,7 @@ export class AgentsGateway {
   private async environmentJson(owner: OwnerId, record: EnvironmentRecord): Promise<SdkEnvironment> {
     const provider = this.sandboxes.get(record.provider) as Partial<AgentrySandboxProvider> | undefined
     const [template, sandbox] = await Promise.all([
-      record.template_id === undefined ? undefined : this.store.templates.get(owner, record.template_id),
+      record.template_id === undefined ? undefined : this.templateFor(owner, record.template_id),
       typeof provider?.describe === 'function' ? provider.describe(record) : undefined,
     ])
     const out = toSdkEnvironment(record, template)

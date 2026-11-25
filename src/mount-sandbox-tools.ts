@@ -16,6 +16,7 @@ import { runInEnvd, SandboxApiError } from '@agentry/sandbox/client'
 import type { OwnerId } from './auth/authenticator.ts'
 import type { SdkEnvironment } from './environment/environment-compat.ts'
 import type { EnvironmentRecord, EnvironmentTemplateConfig } from './environment-types.ts'
+import { BUILTIN_TEMPLATES } from './environment/builtin-templates.ts'
 import { AgentsApiRequestError } from './errors.ts'
 import type { AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
 import { forgetWorkspaceAlias, workspaceOf } from './sandbox/workspace-alias.ts'
@@ -170,7 +171,7 @@ export function mountSandboxTools(agentCtx: Context, deps: SandboxToolsDeps): vo
     tool('sandbox_templates', 'List the user\'s saved sandbox templates (setups to create a sandbox from).', object({}), async () => {
       const page = await store.templates.list(owner, { limit: 100 })
       return {
-        templates: page.data.filter((t) => t.provider === 'sandbox').map((t) => ({
+        templates: [...BUILTIN_TEMPLATES, ...page.data].filter((t) => t.provider === 'sandbox').map((t) => ({
           id: t.id,
           name: t.name || null,
           image: t.config.image ?? null,
