@@ -3,7 +3,11 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
-## Unreleased — readiness
+## 0.1.1 — 2026-11-25
+
+- Fixed: `GET /health` reported the API ready before its database was open, so health checks and Compose could send traffic during the seconds `/v1` still answered 503. It now answers 200 only once the store is open (503 `starting` / `failed` before), and the image's health check follows it.
+
+## 2026-11-25 — readiness
 
 - `GET /health` answers 200 only once the Postgres store is open (`/v1` can serve), and 503 `{ ok: false, store: "starting" | "failed", error? }` while it opens or after a failed start. It used to answer 200 at once, so container health checks, Compose and the web launcher could treat the API as ready during the seconds when every `/v1` call answered 503 `store_unavailable`. `AgentsGateway.storeStatus()` exposes the state.
 
