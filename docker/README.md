@@ -65,4 +65,4 @@ that is also published on npm (`dsh-v0.2.2-rc.1` → `@deepseek-ai/dsh@0.2.2-rc.
 `ghcr.io/fakhrulfaiz/agentry-api` (`<version>-<sha>`, `<version>`, `latest`), the tag `v<version>`
 and a GitHub Release with this folder's compose file and settings template.
 
-The API is built against agentry-sandbox `develop` on develop and `main` for PRs and releases, so release agentry-sandbox to main before the API when the API needs new sandbox client features.
+The API is built against agentry-sandbox `develop` on develop and `main` for PRs and releases, CI resolves that branch to its commit (`git ls-remote`) and passes it as `SANDBOX_SHA`, so the cached clone layer can't serve a stale sandbox client. Release agentry-sandbox to main before the API when the API needs new sandbox client features.

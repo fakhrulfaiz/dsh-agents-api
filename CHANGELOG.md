@@ -3,6 +3,10 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
+## Unreleased
+
+- CI and release builds pin the agentry-sandbox commit (`SANDBOX_SHA` build arg, resolved with `git ls-remote`), so the Docker cache can no longer reuse a stale clone of the sandbox client.
+
 ## 0.2.0 — 2026-11-25
 
 Agentry Sandbox places (Docker over SSH, SSH machines, E2B) with GPUs, and a readiness fix.

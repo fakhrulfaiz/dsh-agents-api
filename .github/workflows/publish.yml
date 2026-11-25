@@ -61,11 +61,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - if: steps.meta.outputs.release == 'true'
+        name: Resolve the agentry-sandbox commit
+        id: sandbox
+        run: |
+          sha=$(git ls-remote https://github.com/fakhrulfaiz/agentry-sandbox.git refs/heads/main | cut -f1)
+          test -n "$sha" || { echo "could not resolve agentry-sandbox main" >&2; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - if: steps.meta.outputs.release == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          build-args: DSH_TAG=${{ steps.meta.outputs.dsh }}
+          build-args: |
+            DSH_TAG=${{ steps.meta.outputs.dsh }}
+            SANDBOX_REF=main
+            SANDBOX_SHA=${{ steps.sandbox.outputs.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
