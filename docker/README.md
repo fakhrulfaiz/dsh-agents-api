@@ -63,6 +63,6 @@ that is also published on npm (`dsh-v0.2.2-rc.1` → `@deepseek-ai/dsh@0.2.2-rc.
 `.github/workflows/ci.yml` builds the image on pushes to `develop` and on pull requests to `main`
 (plus the "version not yet released" check). `publish.yml` releases on merge to `main`: the image to
 `ghcr.io/fakhrulfaiz/agentry-api` (`<version>-<sha>`, `<version>`, `latest`), the tag `v<version>`
+and a GitHub Release with this folder's compose file and settings template.
 
 The API is built against agentry-sandbox `develop` on develop and `main` for PRs and releases, so release agentry-sandbox to main before the API when the API needs new sandbox client features.
-and a GitHub Release with this folder's compose file and settings template.
