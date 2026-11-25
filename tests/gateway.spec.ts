@@ -1264,6 +1264,39 @@ describe('sandbox environments through the gateway', () => {
   })
 })
 
+describe('environment place', () => {
+  const setup = async (svcUrl?: { url: string; key: string }) => {
+    const { createAgentrySandboxProvider } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const registry = new SandboxRegistry('local')
+    registry.register(createLocalProvider(join(tmpdir(), 'agentry-gateway-spec-place')))
+    if (svcUrl) registry.register(createAgentrySandboxProvider({ url: svcUrl.url, key: svcUrl.key, workspacesRoot: join(tmpdir(), 'agentry-gateway-spec-place') }))
+    const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), testGatewayOptions(registry))
+    const base = await listen((req, res) => api.handle(req, res))
+    return (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+  }
+
+  it('environment create forwards place to the service', async () => {
+    const { startTestService } = await import('@agentry/sandbox/testing')
+    const svc = await startTestService()
+    try {
+      const call = await setup(svc)
+      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox', place: 'local' }) })).json()) as { status: string; sandbox?: { place?: string } }
+      expect(env).toMatchObject({ status: 'connected', sandbox: { place: 'local' } })
+      const bad = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox', place: 'nowhere' }) })).json()) as { status: string; error?: string }
+      expect(bad.status).toBe('failed')
+    } finally {
+      await svc.close()
+    }
+  })
+
+  it('place on a non-sandbox provider is 400', async () => {
+    const call = await setup()
+    const res = await call('/agents/environments', { method: 'POST', body: JSON.stringify({ place: 'local' }) })
+    expect(res.status).toBe(400)
+  })
+})
+
 describe('sessions on Agentry Sandbox environments', () => {
   it('mount the sandbox preset (one registration per sandbox), local sessions mount agentry, deleting the environment evicts it', async () => {
     const { startTestService } = await import('@agentry/sandbox/testing')

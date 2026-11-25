@@ -174,3 +174,48 @@ describe('sandbox environment provider', () => {
     expect(await p.create(OWNER, 'env_b', {})).toMatchObject({ status: 'failed', error: expect.stringContaining('limit 1') })
   })
 })
+
+describe('places', () => {
+  const backend = (over: Record<string, unknown>) => ({
+    id: 'local', name: 'This computer', default: true, kind: 'docker', available: true, version: '1',
+    capabilities: { persistent: true, reset: true, isolated: true, network: true, resources: true, gpu: false, envdBuiltIn: false, runsAsRoot: true, templateFields: [] },
+    default_image: { name: 'img:1' }, ...over,
+  })
+  const stub = async (rows: unknown[]) => {
+    const server = http.createServer((_req, res) => void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ object: 'list', data: rows })))
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, close: () => server.close() }
+  }
+
+  it('providerRows lists every Agentry Sandbox place, default first', async () => {
+    const { providerRows } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const s = await stub([backend({}), backend({ id: 'gpu1', name: 'GPU box', kind: 'docker-ssh', default: false, gpus: { count: 2, models: ['A100'] }, capabilities: { ...backend({}).capabilities, gpu: true } }), backend({ id: 'down', name: 'Down', default: false, available: false, reason: 'ssh refused' })])
+    try {
+      const provider = createAgentrySandboxProvider({ url: s.url, key: 'k', workspacesRoot: root })
+      const rows = await providerRows({ list: () => [{ name: 'sandbox', capabilities: {}, default: false }], get: () => provider })
+      expect(rows[0]).toMatchObject({ name: 'sandbox', available: true, default_image: { name: 'img:1' } })
+      const places = (rows[0] as unknown as { places: Record<string, unknown>[] }).places
+      expect(places.map((p) => p['id'])).toEqual(['local', 'gpu1', 'down'])
+      expect(places[0]).toMatchObject({ id: 'local', default: true, available: true, capabilities: { reset: true, isolated: true, gpu: false } })
+      expect(places[1]).toMatchObject({ gpus: { count: 2, models: ['A100'] }, capabilities: { gpu: true } })
+      expect(places[2]).toMatchObject({ available: false, reason: 'ssh refused' })
+    } finally { s.close() }
+  })
+
+  it('availability is true when any place is available', async () => {
+    const s = await stub([backend({ available: false, reason: 'docker is down' }), backend({ id: 'b', default: false })])
+    try {
+      expect(await createAgentrySandboxProvider({ url: s.url, key: 'k', workspacesRoot: root }).availability()).toMatchObject({ available: true })
+    } finally { s.close() }
+    const none = await stub([backend({ available: false, reason: 'docker is down' })])
+    try {
+      expect(await createAgentrySandboxProvider({ url: none.url, key: 'k', workspacesRoot: root }).availability()).toMatchObject({ available: false, reason: 'docker is down' })
+    } finally { none.close() }
+  })
+
+  it('toServiceTemplate passes place and gpus', async () => {
+    const { toServiceTemplate } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    expect(toServiceTemplate({ place: 'gpu1', gpus: 'all' })).toMatchObject({ place: 'gpu1', gpus: 'all' })
+    expect(toServiceTemplate({ gpus: 2 }).gpus).toBe(2)
+  })
+})

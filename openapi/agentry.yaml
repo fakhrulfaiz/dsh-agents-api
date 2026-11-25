@@ -1257,6 +1257,42 @@ paths:
                           type: string
                         default:
                           type: boolean
+                        available:
+                          type: boolean
+                          description: Sandbox provider only. True when any place is available.
+                        reason:
+                          type: string
+                          description: Sandbox provider only. Why it is unavailable.
+                        default_image:
+                          type: object
+                          description: Sandbox provider only. The default place's image.
+                          additionalProperties: true
+                        places:
+                          type: array
+                          description: Sandbox provider only. Every enabled Agentry Sandbox place, default first.
+                          items:
+                            type: object
+                            properties:
+                              id: { type: string }
+                              name: { type: string }
+                              kind: { type: string }
+                              default: { type: boolean }
+                              available: { type: boolean }
+                              reason: { type: string }
+                              gpus:
+                                type: object
+                                properties:
+                                  count: { type: integer }
+                                  models: { type: array, items: { type: string } }
+                                required: [count, models]
+                              capabilities:
+                                type: object
+                                properties:
+                                  reset: { type: boolean }
+                                  isolated: { type: boolean }
+                                  gpu: { type: boolean }
+                                required: [reset, isolated, gpu]
+                            required: [id, name, kind, default, available, capabilities]
                         capabilities:
                           type: object
                           properties:
@@ -3368,6 +3404,15 @@ components:
         image:
           type: string
           description: Extension. Container image for container providers.
+        place:
+          type: string
+          description: Extension (`sandbox` provider). Id of the Agentry Sandbox place to run on; the default place when absent.
+        gpus:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - const: all
+          description: Extension (`sandbox` provider). GPUs to give the sandbox, a count or `all`.
         unsupported_fields:
           type: array
           description: Extension. Template fields set to something the provider cannot apply; provisioning fails while any remain.
@@ -3462,6 +3507,15 @@ components:
         image:
           type: string
           description: Extension. Container image for container providers.
+        place:
+          type: string
+          description: Extension (`sandbox` provider). Id of the Agentry Sandbox place to run on; the default place when absent.
+        gpus:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - const: all
+          description: Extension (`sandbox` provider). GPUs to give the sandbox, a count or `all`.
     UpdateTemplateRequest:
       description: Fields to replace on a template; omitted fields keep their values.
       type: object
@@ -3537,6 +3591,15 @@ components:
         image:
           type: string
           description: Extension. Container image for container providers.
+        place:
+          type: string
+          description: Extension (`sandbox` provider). Id of the Agentry Sandbox place to run on; the default place when absent.
+        gpus:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - const: all
+          description: Extension (`sandbox` provider). GPUs to give the sandbox, a count or `all`.
     EnvironmentStatus:
       type: string
       description: The OpenAI Agents API environment statuses. Internally we also track `cleanup` (reported as `disconnected`) and `deleted` (reported as `expired`).
@@ -3634,6 +3697,11 @@ components:
           properties:
             state: { type: string, enum: [provisioning, running, stopped, failed, deleting, gone, unknown] }
             image: { type: string }
+            place: { type: string, description: Id of the place the sandbox runs on. }
+            gpus:
+              oneOf:
+                - { type: integer, minimum: 0 }
+                - { const: all }
             started_at: { type: [integer, "null"] }
             last_used_at: { type: [integer, "null"] }
         provider_metadata:
@@ -3674,6 +3742,15 @@ components:
           type: string
         image:
           type: string
+        provider:
+          type: string
+          description: Sandbox provider name; the template's, else the default.
+        name:
+          type: string
+          description: Display name, at most 80 characters.
+        place:
+          type: string
+          description: Extension. Id of the Agentry Sandbox place to create on (see `places` in `GET /agents/environments/providers`). Sandbox provider only; 400 for any other. Overrides the template's `place`.
       description: "`template_id` and `session_id` must belong to the caller."
     WriteEnvironmentFileRequest:
       description: The OpenAI Agents API file create params (`inline` with base64 `data`, or `file_id`), or the earlier `{path, content | content_base64}`. A `file_id` is accepted but answers 400 until Files API copying exists.

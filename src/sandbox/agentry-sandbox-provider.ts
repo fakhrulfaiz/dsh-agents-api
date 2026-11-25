@@ -26,7 +26,7 @@ export interface AgentrySandboxOptions {
 
 export interface AgentrySandboxProvider extends SandboxProvider {
   /** Whether the service answers and accepts the key, with the reason when not. */
-  availability(): Promise<{ available: true; version: string; default_image?: WireBackend['default_image'] } | { available: false; reason: string }>
+  availability(): Promise<{ available: true; version: string; default_image?: WireBackend['default_image']; places: SandboxPlaceRow[] } | { available: false; reason: string; places: SandboxPlaceRow[] }>
   /** The service client for one owner (start, stop, reset, envd). */
   api(owner: string): SandboxApi
   /** Workspace files with size and modification time, skipping `.git` and `node_modules` (at most 5000). */
@@ -41,6 +41,18 @@ export interface AgentrySandboxProvider extends SandboxProvider {
   remove(record: EnvironmentRecord, path: string): Promise<void>
   /** The absolute path of a workspace-relative path in the sandbox. */
   absolute(record: EnvironmentRecord, path: string): string
+}
+
+/** One Agentry Sandbox place as listed on the `sandbox` provider row. */
+export interface SandboxPlaceRow {
+  id: string
+  name: string
+  kind: string
+  default: boolean
+  available: boolean
+  reason?: string
+  gpus?: { count: number; models: string[] }
+  capabilities: { reset: boolean; isolated: boolean; gpu: boolean }
 }
 
 export interface WorkspaceEntry {
@@ -114,6 +126,8 @@ export function toServiceTemplate(t: EnvironmentTemplateConfig | undefined): Wir
   if (setup.length > 0) out.setup_commands = setup
   if (t.network) out.network = t.network.access !== 'disabled'
   if (t.resources !== undefined) out.resources = { ...t.resources }
+  if (t.place) out.place = t.place
+  if (t.gpus !== undefined) out.gpus = t.gpus
   // Template files are base64 (`inline`); `file_id` files need the Files API and are not applied here.
   // `/workspace/...` (the SDK's workspace) lands in the sandbox's real workspace.
   const inWorkspace = (path: string) => (path === '/workspace' || path.startsWith('/workspace/') ? path.slice('/workspace/'.length) : path)
@@ -141,18 +155,31 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
 
   return {
     kind: 'sandbox',
-    capabilities: { templateFields: ['image', 'packages', 'setup_commands', 'env', 'network', 'files', 'resources'], files: true, exec: true },
+    capabilities: { templateFields: ['image', 'packages', 'setup_commands', 'env', 'network', 'files', 'resources', 'gpus'], files: true, exec: true },
 
     api,
 
     async availability() {
       try {
-        const [backend] = await quickApi('agentry').backends()
-        if (!backend) return { available: false, reason: 'Agentry Sandbox has no backend' }
-        return backend.available ? { available: true, version: backend.version ?? 'unknown', ...(backend.default_image ? { default_image: backend.default_image } : {}) } : { available: false, reason: backend.reason ?? 'the sandbox backend is unavailable' }
+        const backends = await quickApi('agentry').backends()
+        const places: SandboxPlaceRow[] = backends.map((b) => ({
+          id: b.id,
+          name: b.name,
+          kind: b.kind,
+          default: b.default,
+          available: b.available,
+          ...(b.available ? {} : { reason: b.reason ?? 'the place is unavailable' }),
+          ...(b.gpus ? { gpus: b.gpus } : {}),
+          capabilities: { reset: b.capabilities.reset, isolated: b.capabilities.isolated, gpu: b.capabilities.gpu },
+        }))
+        const main = backends.find((b) => b.default) ?? backends[0]
+        if (!main) return { available: false, reason: 'Agentry Sandbox has no place', places }
+        const up = backends.find((b) => b.available)
+        if (!up) return { available: false, reason: main.reason ?? 'the sandbox place is unavailable', places }
+        return { available: true, version: (main.available ? main : up).version ?? 'unknown', ...(main.default_image ? { default_image: main.default_image } : {}), places }
       } catch (e) {
-        if (e instanceof SandboxApiError && e.status === 401) return { available: false, reason: 'Agentry Sandbox refused the configured key' }
-        return { available: false, reason: (e as Error).message }
+        if (e instanceof SandboxApiError && e.status === 401) return { available: false, reason: 'Agentry Sandbox refused the configured key', places: [] }
+        return { available: false, reason: (e as Error).message, places: [] }
       }
     },
 
@@ -162,7 +189,8 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
       const template = toServiceTemplate(input.template)
       if (input.image) template.image = input.image
       try {
-        const s = await api(owner).create({ name: input.name ?? environmentId, template, workspace_path: dir })
+        const place = input.place ?? input.template?.place
+        const s = await api(owner).create({ name: input.name ?? environmentId, template, workspace_path: dir, ...(place ? { place } : {}) })
         return { status: statusOf(s.state), workspacePath: dir, handle: { sandbox_id: s.id, workspace_directory: dir, image: s.image, owner } }
       } catch (e) {
         return { status: 'failed' as const, workspacePath: dir, error: (e as Error).message }
@@ -172,7 +200,7 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
     async describe(record) {
       try {
         const s = await quickApi(ownerOf(record)).get(meta(record).id)
-        return { state: s.state, image: s.image, started_at: s.started_at, last_used_at: s.last_used_at }
+        return { state: s.state, image: s.image, place: s.place, ...(s.gpus ? { gpus: s.gpus } : {}), started_at: s.started_at, last_used_at: s.last_used_at }
       } catch (e) {
         return { state: e instanceof SandboxApiError && e.status === 404 ? 'gone' : 'unknown', ...(record.provider_metadata['image'] ? { image: record.provider_metadata['image'] } : {}) }
       }

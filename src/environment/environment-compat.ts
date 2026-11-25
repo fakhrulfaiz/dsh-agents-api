@@ -55,6 +55,8 @@ export interface SdkEnvironment {
 export interface SandboxSummary {
   state: 'provisioning' | 'running' | 'stopped' | 'failed' | 'deleting' | 'gone' | 'unknown'
   image?: string
+  place?: string
+  gpus?: number | 'all'
   started_at?: number | null
   last_used_at?: number | null
 }

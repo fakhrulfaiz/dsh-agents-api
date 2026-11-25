@@ -1926,9 +1926,11 @@ export class AgentsGateway {
    */
   async provisionEnvironment(owner: OwnerId, raw: Record<string, unknown>, inline?: EnvironmentTemplateConfig): Promise<SdkEnvironment> {
     const fail = (message: string, code = 'bad_request'): never => { throw new AgentsApiRequestError(message, 400, code) }
-    const body = raw as { template_id?: string; session_id?: string; image?: string; provider?: string; name?: unknown }
+    const body = raw as { template_id?: string; session_id?: string; image?: string; provider?: string; name?: unknown; place?: unknown }
     if (body.name !== undefined && (typeof body.name !== 'string' || body.name.trim().length > 80)) fail('Field "name" must be a string of at most 80 characters')
+    if (body.place !== undefined && (typeof body.place !== 'string' || body.place.trim() === '')) fail('Field "place" must be a non-empty string')
     const input: CreateEnvironmentInput = {
+      ...(typeof body.place === 'string' ? { place: body.place.trim() } : {}),
       ...(typeof body.template_id === 'string' ? { template_id: body.template_id } : {}),
       ...(typeof body.session_id === 'string' ? { session_id: body.session_id } : {}),
       ...(typeof body.image === 'string' ? { image: body.image } : {}),
@@ -1952,6 +1954,7 @@ export class AgentsGateway {
     } catch (error: unknown) {
       fail(errorMessage(error))
     }
+    if (input.place !== undefined && provider.kind !== 'sandbox') fail(`sandbox provider "${provider.kind}" has no places; "place" applies to the sandbox provider only`)
     // A template the provider cannot fully apply is stored, but nothing is provisioned from it: never ignore fields silently.
     const unsupported = input.template === undefined ? [] : unsupportedFields(input.template, provider)
     if (unsupported.length > 0) fail(`sandbox provider "${provider.kind}" cannot apply template fields: ${unsupported.join(', ')}`, 'sandbox_template_unsupported')
