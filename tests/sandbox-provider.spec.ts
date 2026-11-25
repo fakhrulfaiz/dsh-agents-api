@@ -18,6 +18,7 @@ let root: string
 beforeEach(async () => {
   svc = await startTestService()
   root = await mkdtemp(join(tmpdir(), 'agentry-sbx-'))
+  shared = await mkdtemp(join(tmpdir(), 'agentry-shared-ws-'))
   files = new Map()
   // A tiny envd: /files read and write, and filesystem.ListDir.
   envd = http.createServer((req, res) => {
@@ -73,7 +74,8 @@ afterEach(async () => {
   await new Promise<void>((r) => envd.close(() => r()))
 })
 
-const provider = () => createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root })
+let shared: string
+const provider = () => createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root, sharedWorkspace: shared })
 const record = (handle: Record<string, string>): EnvironmentRecord => ({ id: 'env_1', object: 'environment', status: 'connected', provider: 'sandbox', provider_metadata: handle, created_at: 1 }) as EnvironmentRecord
 
 describe('sandbox environment provider', () => {
@@ -108,15 +110,23 @@ describe('sandbox environment provider', () => {
     const created = await p.create(OWNER, 'env_1', { template: { image: 'python:3.13', packages: { system: ['jq'], python: ['rich'] }, setup_commands: [{ command: 'echo hi' }], network: { access: 'disabled' } } })
     expect(created.status).toBe('connected')
     const placeholder = join(root, 'owner-a', 'sandbox-env_1')
-    expect(created.workspacePath).toBe('/workspace')
+    expect(created.workspacePath).toBe(shared)
     expect((await stat(placeholder)).isDirectory()).toBe(true)
-    expect(created.handle).toMatchObject({ workspace_directory: '/workspace', host_placeholder: placeholder, sandbox_id: expect.stringMatching(/^sbx_/), image: 'python:3.13' })
+    expect(created.handle).toMatchObject({ workspace_directory: shared, host_placeholder: placeholder, sandbox_id: expect.stringMatching(/^sbx_/), image: 'python:3.13' })
     const sbx = await svc.service.get('owner-a', created.handle!.sandbox_id!)
-    expect(sbx.template).toMatchObject({ image: 'python:3.13', packages: ['jq'], network: false, workspacePath: '/workspace', setupCommands: ['echo hi', "python3 -m pip install --user --break-system-packages 'rich' || python3 -m pip install --user 'rich'"] })
+    expect(sbx.template).toMatchObject({ image: 'python:3.13', packages: ['jq'], network: false, workspacePath: shared, setupCommands: ['echo hi', "python3 -m pip install --user --break-system-packages 'rich' || python3 -m pip install --user 'rich'"] })
     expect(await p.status(record(created.handle!))).toBe('connected')
     await p.destroy(record(created.handle!))
     await expect(svc.service.get('owner-a', created.handle!.sandbox_id!)).rejects.toThrow()
     await expect(stat(placeholder)).rejects.toThrow()
+  })
+
+  it('keeps the long mirrored mount path when the short workspace does not exist on the host', async () => {
+    const p = createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root, sharedWorkspace: join(root, 'no-such-folder') })
+    const created = await p.create(OWNER, 'env_2', {})
+    const placeholder = join(root, 'owner-a', 'sandbox-env_2')
+    expect(created.workspacePath).toBe(placeholder)
+    expect(created.handle).toMatchObject({ workspace_directory: placeholder, host_placeholder: placeholder })
   })
 
   it('reads, writes and lists workspace files through the sandbox', async () => {
