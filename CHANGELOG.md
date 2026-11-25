@@ -3,14 +3,13 @@
 All notable changes to `@agentry/api` are recorded here.
 Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
-## Unreleased
+## 0.2.0 — 2026-11-25
 
-- 2026-11-25: CI builds the image against agentry-sandbox `develop` on pushes to `develop` (`SANDBOX_REF`), and `main` for pull requests.
-- 2026-11-25: Agentry Sandbox places. `GET /agents/environments/providers` lists every place on the `sandbox` row (`places`: id, name, kind, default, available, reason, gpus, capabilities); the row is available when any place is, and `default_image` comes from the default place. `POST /agents/environments` accepts `place` (sandbox provider only, else 400); templates gain `place` and `gpus` (a count or `all`), and the sandbox provider's template fields include `gpus`. An environment's `sandbox` summary reports `place` and `gpus`.
-- 2026-11-25: A place's `capabilities` in `GET /agents/environments/providers` gains `keepFilesOnReset` (false for E2B: its reset deletes all files; resetting with `keep_workspace` on such a place answers 400).
+Agentry Sandbox places (Docker over SSH, SSH machines, E2B) with GPUs, and a readiness fix.
 
-## 0.1.1 — 2026-11-25
-
+- CI builds the image against agentry-sandbox `develop` on pushes to `develop` (`SANDBOX_REF`), and `main` for pull requests.
+- Agentry Sandbox places. `GET /agents/environments/providers` lists every place on the `sandbox` row (`places`: id, name, kind, default, available, reason, gpus, capabilities); the row is available when any place is, and `default_image` comes from the default place. `POST /agents/environments` accepts `place` (sandbox provider only, else 400); templates gain `place` and `gpus` (a count or `all`), and the sandbox provider's template fields include `gpus`. An environment's `sandbox` summary reports `place` and `gpus`.
+- A place's `capabilities` in `GET /agents/environments/providers` gains `keepFilesOnReset` (false for E2B: its reset deletes all files; resetting with `keep_workspace` on such a place answers 400).
 - Fixed: `GET /health` reported the API ready before its database was open, so health checks and Compose could send traffic during the seconds `/v1` still answered 503. It now answers 200 only once the store is open (503 `starting` / `failed` before), and the image's health check follows it.
 
 ## 2026-11-25 — readiness
