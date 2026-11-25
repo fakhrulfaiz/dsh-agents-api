@@ -1611,6 +1611,124 @@ paths:
         "409": { description: "The environment's provider has no lifecycle (`local`): `environment_not_startable`." }
         "429": { description: "An Agentry Sandbox limit was reached (`quota_exceeded`); the message says which." }
         "503": { description: The sandbox backend is not reachable. }
+  /v1/agents/environments/{environment_id}/terminals:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: openEnvironmentTerminal
+      summary: "Open an interactive shell (PTY) inside an Agentry Sandbox environment"
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { cols: { type: integer }, rows: { type: integer } } }
+      responses:
+        "200":
+          description: The terminal (`id`).
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { description: Environment not found. }
+        "409": { description: "The environment is not an Agentry Sandbox: `environment_no_terminal`." }
+        "429": { description: "Too many terminals open (`too_many_terminals`) or a sandbox limit." }
+        "502": { description: "The terminal could not start (`terminal_unavailable`)." }
+  /v1/agents/environments/{environment_id}/terminals/{terminal_id}/stream:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: terminal_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: streamEnvironmentTerminal
+      summary: "Terminal output as server-sent events: `output` (`data`: base64 bytes, the retained screen first) and `exit` (`code`)"
+      responses:
+        "200":
+          description: An SSE stream.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "404": { description: Environment or terminal not found. }
+  /v1/agents/environments/{environment_id}/terminals/{terminal_id}/input:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: terminal_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: sendEnvironmentTerminalInput
+      summary: "Type into a terminal (`data`: UTF-8 text, at most 64 KB)"
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, required: [data], properties: { data: { type: string } } }
+      responses:
+        "200":
+          description: Accepted.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { description: Environment or terminal not found. }
+        "409": { description: "The terminal has ended: `terminal_closed`." }
+        "413": { description: "Input too large." }
+  /v1/agents/environments/{environment_id}/terminals/{terminal_id}/resize:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: terminal_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: resizeEnvironmentTerminal
+      summary: "Resize a terminal"
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { cols: { type: integer }, rows: { type: integer } } }
+      responses:
+        "200":
+          description: Resized.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { description: Environment or terminal not found. }
+  /v1/agents/environments/{environment_id}/terminals/{terminal_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: terminal_id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      operationId: closeEnvironmentTerminal
+      summary: "Close a terminal"
+      responses:
+        "200":
+          description: Closed.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { description: Environment or terminal not found. }
   /v1/agents/environments/{environment_id}/stop:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"

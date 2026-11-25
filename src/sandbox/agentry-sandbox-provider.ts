@@ -153,6 +153,18 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
   }
   const ownerOf = (record: EnvironmentRecord) => record.provider_metadata['owner'] ?? ''
 
+  /** True when `place` (or the default place) is a shared machine, whose sandboxes need distinct workspace paths. */
+  async function sharesMachine(place: string | undefined): Promise<boolean> {
+    try {
+      const backends = await quickApi('agentry').backends()
+      const chosen = place ? backends.find((b) => b.id === place) : (backends.find((b) => b.default) ?? backends[0])
+      return chosen?.kind === 'ssh-machine'
+    } catch {
+      // Cannot tell: the unique long path works everywhere.
+      return true
+    }
+  }
+
   return {
     kind: 'sandbox',
     capabilities: { templateFields: ['image', 'packages', 'setup_commands', 'env', 'network', 'files', 'resources', 'gpus'], files: true, exec: true },
@@ -184,14 +196,17 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
     },
 
     async create(owner: OwnerId, environmentId: string, input: CreateEnvironmentInput) {
+      // The host placeholder is kept (cleaned up on delete); the disk itself mounts at /workspace so the model, the
+      // terminal and the tools all see one short path. A shared machine (ssh-machine) needs a unique mount path per sandbox.
       const dir = join(opts.workspacesRoot, directorySegment(owner, 'owner'), `sandbox-${environmentId}`)
       await mkdir(dir, { recursive: true })
       const template = toServiceTemplate(input.template)
       if (input.image) template.image = input.image
       try {
         const place = input.place ?? input.template?.place
-        const s = await api(owner).create({ name: input.name ?? environmentId, template, workspace_path: dir, ...(place ? { place } : {}) })
-        return { status: statusOf(s.state), workspacePath: dir, handle: { sandbox_id: s.id, workspace_directory: dir, image: s.image, owner } }
+        const mount = (await sharesMachine(place)) ? dir : '/workspace'
+        const s = await api(owner).create({ name: input.name ?? environmentId, template, workspace_path: mount, ...(place ? { place } : {}) })
+        return { status: statusOf(s.state), workspacePath: mount, handle: { sandbox_id: s.id, workspace_directory: mount, host_placeholder: dir, image: s.image, owner } }
       } catch (e) {
         return { status: 'failed' as const, workspacePath: dir, error: (e as Error).message }
       }
@@ -220,7 +235,7 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
     async destroy(record) {
       // An environment whose sandbox was never created (its create failed) has only the host placeholder to remove.
       if (!record.provider_metadata['sandbox_id']) {
-        const dir = record.provider_metadata['workspace_directory']
+        const dir = record.provider_metadata['host_placeholder'] ?? record.provider_metadata['workspace_directory']
         if (dir) await rmdir(dir).catch(() => {})
         return
       }
@@ -230,7 +245,7 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
       } catch (e) {
         if (!(e instanceof SandboxApiError && e.status === 404)) throw e
       }
-      await rmdir(dir).catch(() => {})
+      await rmdir(record.provider_metadata['host_placeholder'] ?? dir).catch(() => {})
     },
 
     async listFiles(record) {

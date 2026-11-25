@@ -7,14 +7,18 @@
  * service's limits (count, running at once, creates per hour, CPU and memory)
  * still apply and their refusals come back as the tool's error.
  */
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-system-prompt'
 import { runInEnvd, SandboxApiError } from '@agentry/sandbox/client'
 import type { OwnerId } from './auth/authenticator.ts'
 import type { SdkEnvironment } from './environment/environment-compat.ts'
 import type { EnvironmentRecord, EnvironmentTemplateConfig } from './environment-types.ts'
 import { AgentsApiRequestError } from './errors.ts'
 import type { AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
+import { forgetWorkspaceAlias, workspaceOf } from './sandbox/workspace-alias.ts'
 import type { Store } from './store/store.ts'
 
 export interface SandboxToolsDeps {
@@ -29,12 +33,47 @@ export interface SandboxToolsDeps {
   describe(record: EnvironmentRecord): Promise<SdkEnvironment>
   /** The environment this chat runs in, which the tools never delete. */
   currentEnvironmentId?: string
+  /** This chat's own working directory; `sandbox_pull` and `sandbox_push` copy files to and from it. */
+  cwd?: string
 }
 
-export const SANDBOX_TOOL_NAMES = ['sandbox_list', 'sandbox_templates', 'sandbox_create', 'sandbox_start', 'sandbox_stop', 'sandbox_exec', 'sandbox_delete'] as const
+export const SANDBOX_TOOL_NAMES = ['sandbox_list', 'sandbox_templates', 'sandbox_create', 'sandbox_start', 'sandbox_stop', 'sandbox_exec', 'sandbox_pull', 'sandbox_push', 'sandbox_delete'] as const
 const ASK_TOOLS = new Set<string>(['sandbox_create', 'sandbox_delete'])
 const OUT_MAX = 20_000
 const ERR_MAX = 8_000
+const COPY_MAX = 25 * 1024 * 1024
+
+/** Section name for the Agentry sandbox guidance on the agent scope. */
+export const AGENTRY_SANDBOX_SECTION = 'agentry:sandbox'
+
+/** Guidance shown while `sandbox_create` is visible. */
+export const AGENTRY_SANDBOX_GUIDANCE = [
+  'Sandboxes in this deployment:',
+  '- The sandbox_* tools manage the user\'s OTHER isolated Linux containers. Creating one does not move this chat into it: your normal tools (bash, files) still run where this chat runs. Say so plainly when it matters; a chat that should run entirely inside a sandbox is started from the Sandboxes page ("New chat").',
+  '- Run commands in a sandbox with sandbox_exec; it starts in the sandbox\'s workspace, /workspace. Put project files there (relative paths), not in ~: the user\'s Files list shows only the workspace, and ~ (/home/agent) is for installed software. The workspace and this chat\'s own workspace are different disks; nothing is shared.',
+  '- To show the user something made in a sandbox, copy it with sandbox_pull into this chat\'s workspace, then use `present` (files) or a Markdown image with the workspace-relative path. Never retype file contents or base64 through your own messages: it corrupts them. Use sandbox_push to send a workspace file in.',
+  '- Create a sandbox only when the user asks for one or the work needs its own software or isolation; delete it when done. Keep setup_commands trivial (no redirects into ~); verify with sandbox_exec afterwards.',
+  '- There is no way into a sandbox: no sshd, no published ports. Outbound works. When asked for SSH, say so and offer sandbox_exec first; a reverse tunnel only if the user asks.',
+  '- Verify a new sandbox with sandbox_exec before building on it. Global npm packages need NODE_PATH=$(npm root -g).',
+].join('\n')
+
+/** Register the sandbox guidance as an agent-scoped system-prompt section, empty while `sandbox_create` is hidden. */
+export function mountSandboxGuidance(agentCtx: Context): void {
+  if (typeof (agentCtx as { get?: unknown }).get !== 'function' || agentCtx.get('systemPrompt') === undefined) return
+  agentCtx.systemPrompt.section({
+    name: AGENTRY_SANDBOX_SECTION,
+    order: agentCtx.systemPrompt.getSectionOrder('TOOL_SCHEDULE') + 2,
+    text: ({ scope }) => agentCtx.tools.get('sandbox_create', scope) === undefined ? '' : AGENTRY_SANDBOX_GUIDANCE,
+  })
+}
+
+/** `path` inside `root`, or a refusal when it escapes it. */
+function inside(root: string, path: string): string {
+  const full = resolve(root, path)
+  const rel = relative(root, full)
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) throw new ToolRefusal(`"${path}" is outside this chat's workspace`)
+  return full
+}
 
 type Args = Record<string, unknown>
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined)
@@ -102,14 +141,14 @@ export function mountSandboxTools(agentCtx: Context, deps: SandboxToolsDeps): vo
   const { owner, store, provider } = deps
 
   /** The owner's sandbox environment `id`, or a refusal naming the problem. */
-  async function sandbox(id: unknown): Promise<EnvironmentRecord & { sandboxId: string; workspace: string }> {
+  async function sandbox(id: unknown, inWorkspace = false): Promise<EnvironmentRecord & { sandboxId: string; workspace: string }> {
     const record = typeof id === 'string' ? await store.environments.get(owner, id) : undefined
     if (!record) throw new ToolRefusal(`no sandbox "${String(id)}"; call sandbox_list for your sandboxes`)
     if (record.provider !== 'sandbox') throw new ToolRefusal(`"${record.id}" runs on this server, not in an isolated sandbox`)
     const sandboxId = record.provider_metadata['sandbox_id']
     const workspace = record.provider_metadata['workspace_directory'] ?? ''
     if (!sandboxId) throw new ToolRefusal(`this sandbox failed to set up${record.error ? `: ${record.error}` : ''}. Delete it with sandbox_delete and create it again`)
-    return { ...record, sandboxId, workspace }
+    return { ...record, sandboxId, workspace: workspace && inWorkspace ? await workspaceOf(sandboxId, provider.api(owner).envd(sandboxId), workspace) : workspace }
   }
 
   async function all(): Promise<EnvironmentRecord[]> {
@@ -186,7 +225,7 @@ export function mountSandboxTools(agentCtx: Context, deps: SandboxToolsDeps): vo
         timeout_seconds: { type: 'integer', minimum: 1, maximum: 600, description: 'Default 120.' },
       }, ['id', 'command']),
       async (args) => {
-        const r = await sandbox(args.id)
+        const r = await sandbox(args.id, true)
         const command = str(args.command)
         if (!command) throw new ToolRefusal('command is empty')
         const seconds = typeof args.timeout_seconds === 'number' ? Math.min(600, Math.max(1, Math.floor(args.timeout_seconds))) : 120
@@ -197,17 +236,58 @@ export function mountSandboxTools(agentCtx: Context, deps: SandboxToolsDeps): vo
       },
     ),
 
+    tool(
+      'sandbox_pull',
+      'Copy a file (up to 25 MB) from a sandbox into this chat\'s workspace so you can show it with `present`, read it or use it here. `from` is a path in the sandbox (absolute, ~/..., or relative to its workspace); `to` is a path relative to this chat\'s workspace (default: the file\'s name).',
+      object({ ...ID, from: { type: 'string', minLength: 1 }, to: { type: 'string' } }, ['id', 'from']),
+      async (args) => {
+        const r = await sandbox(args.id, true)
+        if (!deps.cwd) throw new ToolRefusal('this chat has no workspace to copy into')
+        const from = str(args.from)
+        if (!from) throw new ToolRefusal('from is empty')
+        const abs = from.startsWith('~/') ? `/home/agent/${from.slice(2)}` : from.startsWith('/') ? from : `${r.workspace.replace(/\/+$/, '')}/${from}`
+        const dest = inside(deps.cwd, str(args.to) ?? abs.split('/').pop() ?? 'file')
+        const bytes = await provider.api(owner).envd(r.sandboxId).readFile(abs, 'agent')
+        if (bytes.byteLength > COPY_MAX) throw new ToolRefusal(`${from} is ${String(bytes.byteLength)} bytes; the limit is ${String(COPY_MAX)}`)
+        await mkdir(dirname(dest), { recursive: true })
+        await writeFile(dest, bytes)
+        return { copied: relative(deps.cwd, dest), bytes: bytes.byteLength }
+      },
+    ),
+
+    tool(
+      'sandbox_push',
+      'Copy a file (up to 25 MB) from this chat\'s workspace into a sandbox. `from` is relative to this chat\'s workspace; `to` is a path in the sandbox (absolute, ~/..., or relative to its workspace; default: its workspace, same name).',
+      object({ ...ID, from: { type: 'string', minLength: 1 }, to: { type: 'string' } }, ['id', 'from']),
+      async (args) => {
+        const r = await sandbox(args.id, true)
+        if (!deps.cwd) throw new ToolRefusal('this chat has no workspace to copy from')
+        const from = str(args.from)
+        if (!from) throw new ToolRefusal('from is empty')
+        const source = inside(deps.cwd, from)
+        const size = (await stat(source).catch(() => undefined))?.size
+        if (size === undefined) throw new ToolRefusal(`no file "${from}" in this chat's workspace`)
+        if (size > COPY_MAX) throw new ToolRefusal(`${from} is ${String(size)} bytes; the limit is ${String(COPY_MAX)}`)
+        const target = str(args.to) ?? from.split('/').pop() ?? 'file'
+        const abs = target.startsWith('~/') ? `/home/agent/${target.slice(2)}` : target.startsWith('/') ? target : `${r.workspace.replace(/\/+$/, '')}/${target}`
+        await provider.api(owner).envd(r.sandboxId).writeFile(abs, await readFile(source), 'agent')
+        return { copied: abs, bytes: size }
+      },
+    ),
+
     tool('sandbox_delete', 'Delete a sandbox and every file in it (also one that failed to set up). The user is asked to approve it. The sandbox this chat runs in cannot be deleted from here.', object(ID, ['id']), async (args) => {
       const r = typeof args.id === 'string' ? await store.environments.get(owner, args.id) : undefined
       if (!r) throw new ToolRefusal(`no sandbox "${String(args.id)}"; call sandbox_list for your sandboxes`)
       if (r.provider !== 'sandbox') throw new ToolRefusal(`"${r.id}" runs on this server, not in an isolated sandbox`)
       if (r.id === deps.currentEnvironmentId) throw new ToolRefusal('that is the sandbox this chat runs in; delete it from the Sandboxes page instead')
       await deps.destroy(r)
+      forgetWorkspaceAlias(String(r.provider_metadata['sandbox_id'] ?? ''))
       await store.environments.delete(owner, r.id)
       return { id: r.id, deleted: true }
     }),
   ]
   for (const definition of tools) agentCtx.tools.register(definition)
+  mountSandboxGuidance(agentCtx)
 
   // Creating and deleting need the user's approval; the approval bridge turns this into a required action.
   if (typeof (agentCtx as { on?: unknown }).on !== 'function') return

@@ -103,18 +103,20 @@ describe('sandbox environment provider', () => {
     expect(await p.describe(r)).toMatchObject({ state: 'gone' })
   })
 
-  it('creates a sandbox mounted at a host placeholder path, reports status and destroys it', async () => {
+  it('creates a sandbox whose disk mounts at /workspace (host placeholder kept), reports status and destroys it', async () => {
     const p = provider()
     const created = await p.create(OWNER, 'env_1', { template: { image: 'python:3.13', packages: { system: ['jq'], python: ['rich'] }, setup_commands: [{ command: 'echo hi' }], network: { access: 'disabled' } } })
     expect(created.status).toBe('connected')
-    expect(created.workspacePath).toBe(join(root, 'owner-a', 'sandbox-env_1'))
-    expect((await stat(created.workspacePath)).isDirectory()).toBe(true)
-    expect(created.handle).toMatchObject({ workspace_directory: created.workspacePath, sandbox_id: expect.stringMatching(/^sbx_/), image: 'python:3.13' })
+    const placeholder = join(root, 'owner-a', 'sandbox-env_1')
+    expect(created.workspacePath).toBe('/workspace')
+    expect((await stat(placeholder)).isDirectory()).toBe(true)
+    expect(created.handle).toMatchObject({ workspace_directory: '/workspace', host_placeholder: placeholder, sandbox_id: expect.stringMatching(/^sbx_/), image: 'python:3.13' })
     const sbx = await svc.service.get('owner-a', created.handle!.sandbox_id!)
-    expect(sbx.template).toMatchObject({ image: 'python:3.13', packages: ['jq'], network: false, workspacePath: created.workspacePath, setupCommands: ['echo hi', "python3 -m pip install --user --break-system-packages 'rich' || python3 -m pip install --user 'rich'"] })
+    expect(sbx.template).toMatchObject({ image: 'python:3.13', packages: ['jq'], network: false, workspacePath: '/workspace', setupCommands: ['echo hi', "python3 -m pip install --user --break-system-packages 'rich' || python3 -m pip install --user 'rich'"] })
     expect(await p.status(record(created.handle!))).toBe('connected')
     await p.destroy(record(created.handle!))
     await expect(svc.service.get('owner-a', created.handle!.sandbox_id!)).rejects.toThrow()
+    await expect(stat(placeholder)).rejects.toThrow()
   })
 
   it('reads, writes and lists workspace files through the sandbox', async () => {

@@ -46,6 +46,8 @@ import { SandboxApiError } from '@agentry/sandbox/client'
 import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
 import { sweepStaged, type InstallDeps } from './skills/install.ts'
 import { SkillInstallApi } from './skills/routes.ts'
+import { TerminalError, TerminalHub } from './sandbox/terminals.ts'
+import { forgetWorkspaceAlias, workspaceOf } from './sandbox/workspace-alias.ts'
 import { DeliverablesCache } from './history/deliverables-cache.ts'
 import type { DeliverableEntry } from './history/deliverables.ts'
 import { mountSkillTools } from './skills/tools.ts'
@@ -213,6 +215,7 @@ export class AgentsGateway {
   private readonly skillsRoot: string
   private readonly skillInstallApi: SkillInstallApi
   /** Deliverables per session, reused until the session changes. */
+  private readonly terminals = new TerminalHub()
   private readonly deliverablesCache = new DeliverablesCache<DeliverableEntry>(500)
   private readonly skillsGithub: GithubDeps | undefined
   private readonly composio: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
@@ -328,6 +331,11 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents/environments/:environment_id/start', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'start') },
       { method: 'POST', pattern: '/agents/environments/:environment_id/stop', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'stop') },
       { method: 'POST', pattern: '/agents/environments/:environment_id/reset', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'reset') },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/terminals', handler: (req, res, _url, params, p) => this.openTerminal(req, res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/:environment_id/terminals/:terminal_id/stream', handler: (req, res, _url, params, p) => this.streamTerminal(req, res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/terminals/:terminal_id/input', handler: (req, res, _url, params, p) => this.terminalCall(req, res, params, p.owner, 'input') },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/terminals/:terminal_id/resize', handler: (req, res, _url, params, p) => this.terminalCall(req, res, params, p.owner, 'resize') },
+      { method: 'DELETE', pattern: '/agents/environments/:environment_id/terminals/:terminal_id', handler: (_req, res, _url, params, p) => this.terminalCall(undefined, res, params, p.owner, 'close') },
       { method: 'GET', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.getEnvironment(res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.deleteEnvironment(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/sessions', handler: (req, res, url, _params, p) => this.createSession(req, res, url, p.owner) },
@@ -1481,6 +1489,7 @@ export class AgentsGateway {
           owner,
           store: this.store,
           provider: sandboxProvider,
+          cwd,
           provision: (raw, inline) => this.provisionEnvironment(owner, raw, inline),
           destroy: (record) => this.destroyEnvironment(record),
           describe: (record) => this.environmentJson(owner, record),
@@ -2050,7 +2059,94 @@ export class AgentsGateway {
       json(res, status, { error: { type: 'invalid_request_error', code: e instanceof SandboxApiError ? e.code : 'sandbox_error', message: errorMessage(e) } })
       return
     }
+    if (action !== 'start') this.terminals.closeEnvironment(record.id)
+    if (action === 'reset') forgetWorkspaceAlias(sandboxId)
     await this.getEnvironment(res, params, owner)
+  }
+
+  /** The sandbox behind a terminal route's environment, or the error response already sent. */
+  private async terminalTarget(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<{ record: EnvironmentRecord; provider: AgentrySandboxProvider; sandboxId: string } | undefined> {
+    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!record) {
+      notFound(res, 'environment not found')
+      return undefined
+    }
+    const provider = this.sandboxes.get(record.provider) as Partial<AgentrySandboxProvider> | undefined
+    const sandboxId = record.provider_metadata['sandbox_id']
+    if (provider?.api === undefined || sandboxId === undefined) {
+      json(res, 409, { error: { type: 'invalid_request_error', code: 'environment_no_terminal', message: 'This environment has no terminal; only sandboxes do.' } })
+      return undefined
+    }
+    return { record, provider: provider as AgentrySandboxProvider, sandboxId }
+  }
+
+  private terminalError(res: ServerResponse, error: unknown): void {
+    if (error instanceof TerminalError) json(res, error.status, { error: { type: 'invalid_request_error', code: error.code, message: error.message } })
+    else if (error instanceof SandboxApiError) json(res, error.status >= 400 ? error.status : 502, { error: { type: 'invalid_request_error', code: error.code, message: errorMessage(error) } })
+    else json(res, 502, { error: { type: 'invalid_request_error', code: 'terminal_unavailable', message: errorMessage(error) } })
+  }
+
+  private async openTerminal(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const target = await this.terminalTarget(res, params, owner)
+    if (!target) return
+    const body = await readBody(req).catch(() => ({})) as { cols?: unknown; rows?: unknown }
+    try {
+      const api = target.provider.api(owner)
+      await api.start(target.sandboxId)
+      // The shell starts in the sandbox's workspace, like sandbox_exec and a chat on this environment; ~ holds installs.
+      const directory = target.record.provider_metadata['workspace_directory']
+      const envd = api.envd(target.sandboxId)
+      const workspace = directory ? await workspaceOf(target.sandboxId, envd, directory) : undefined
+      const id = await this.terminals.open(owner, target.record.id, envd, { ...(workspace ? { cwd: workspace } : {}), cols: body.cols, rows: body.rows })
+      json(res, 200, { id, object: 'environment.terminal', environment_id: target.record.id })
+    } catch (error) {
+      this.terminalError(res, error)
+    }
+  }
+
+  private async streamTerminal(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const environmentId = routeParam(params, 'environment_id')
+    if (!await this.store.environments.get(owner, environmentId)) {
+      notFound(res, 'environment not found')
+      return
+    }
+    let detach: (() => void) | undefined
+    try {
+      writeSSEHeaders(res)
+      const open = (): boolean => !res.writableEnded && !res.destroyed
+      detach = this.terminals.attach(owner, environmentId, routeParam(params, 'terminal_id'), (event) => {
+        if (!open()) return
+        if (event.kind === 'output') writeEvent(res, 'output', { data: Buffer.from(event.data).toString('base64') })
+        else writeEvent(res, 'exit', { code: event.code })
+      })
+    } catch (error) {
+      if (!res.headersSent) this.terminalError(res, error)
+      else res.end()
+      return
+    }
+    const ping = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n') }, 20_000)
+    req.on('close', () => {
+      clearInterval(ping)
+      detach?.()
+    })
+  }
+
+  private async terminalCall(req: IncomingMessage | undefined, res: ServerResponse, params: Record<string, string>, owner: OwnerId, action: 'input' | 'resize' | 'close'): Promise<void> {
+    const environmentId = routeParam(params, 'environment_id')
+    if (!await this.store.environments.get(owner, environmentId)) {
+      notFound(res, 'environment not found')
+      return
+    }
+    const id = routeParam(params, 'terminal_id')
+    try {
+      const body = req ? await readBody(req).catch(() => ({})) as { data?: unknown; cols?: unknown; rows?: unknown } : {}
+      if (action === 'input') await this.terminals.input(owner, environmentId, id, body.data)
+      else if (action === 'resize') await this.terminals.resize(owner, environmentId, id, body.cols, body.rows)
+      else this.terminals.close(owner, environmentId, id)
+      json(res, 200, { id, object: 'environment.terminal', ...(action === 'close' ? { deleted: true } : {}) })
+    } catch (error) {
+      this.terminalError(res, error)
+    }
   }
 
   private async deleteEnvironment(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -2090,6 +2186,8 @@ export class AgentsGateway {
    * removed one) has no backend to clean: log it and let the caller drop the record.
    */
   private async destroyEnvironment(record: EnvironmentRecord): Promise<void> {
+    this.terminals.closeEnvironment(record.id)
+    forgetWorkspaceAlias(record.provider_metadata['sandbox_id'] ?? '')
     const provider = this.sandboxes.get(record.provider)
     if (provider === undefined) {
       this.ctx.logger.warn(`agents-api: environment ${record.id} uses sandbox provider "${record.provider}", which is not registered; removing the record without cleaning a backend`)
