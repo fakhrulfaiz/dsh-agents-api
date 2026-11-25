@@ -17,6 +17,7 @@ export type TemplateField =
   | 'capability_directories'
   | 'setup_commands'
   | 'image'
+  | 'resources'
 
 /** What a provider supports; clients read this from `GET /agents/environments/providers`. */
 export interface SandboxCapabilities {

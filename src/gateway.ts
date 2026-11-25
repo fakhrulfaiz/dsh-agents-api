@@ -40,15 +40,21 @@ import { fileIdsFromInput, overlayAgent, parseApprovalResponse, userTextFromInpu
 import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
 import { mountAgentInstructions } from './mount-instructions.ts'
 import { AGENTRY_PRESET_ID } from './preset.ts'
+import { copyIntoSandboxUploads, MAX_ARTIFACT_BYTES, providerRows, type AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
+import { sandboxStartErrorIn, type SandboxPresets } from './sandbox/presets.ts'
+import { SandboxApiError } from '@agentry/sandbox/client'
 import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
 import { sweepStaged, type InstallDeps } from './skills/install.ts'
 import { SkillInstallApi } from './skills/routes.ts'
+import { DeliverablesCache } from './history/deliverables-cache.ts'
+import type { DeliverableEntry } from './history/deliverables.ts'
 import { mountSkillTools } from './skills/tools.ts'
 import { effectiveGrants, validateAppGrants } from './composio-grants.ts'
 import { DEFAULT_APPROVAL_VERBS, mountComposio } from './mount-composio.ts'
 import type { GithubDeps } from './skills/github.ts'
 import { resolveAgentSkills, validateSkillSelection, type BuiltinSkill } from './skills/resolve.ts'
 import { mountAgentTools } from './mount-agent-tools.ts'
+import { mountSandboxTools } from './mount-sandbox-tools.ts'
 import { mountScheduleGuidance } from './mount-schedule-guidance.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
@@ -78,7 +84,7 @@ import { absoluteFilePath, parseFileListQuery, parseFileWrite, selectFilePage, t
 import { normalizeTemplateConfig, parseTemplateInput, toSdkTemplate, unsupportedFields } from './environment/template-compat.ts'
 import type { SandboxProvider } from './sandbox/contract.ts'
 import type { SandboxRegistry } from './sandbox/registry.ts'
-import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, OAISandboxEnvironment } from './environment-types.ts'
+import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, EnvironmentTemplateConfig, OAISandboxEnvironment } from './environment-types.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SubagentState } from './session-registry.ts'
 import {
@@ -126,6 +132,8 @@ export interface Route {
 export interface GatewayOptions {
   /** Sandbox providers for `/agents/environments`, by name, with a default. */
   sandboxes: SandboxRegistry
+  /** Per-sandbox agent presets; sessions on Agentry Sandbox environments mount theirs. Absent: such sessions cannot start. */
+  sandboxPresets?: SandboxPresets
   /** Root of `<owner>/<session>/` default session workspaces. */
   workspacesRoot: string
   /** The bundled runtime payload's `runtime.json`, for `GET /agents/environments/runtimes`; absent means none. */
@@ -191,6 +199,7 @@ export class AgentsGateway {
   /** Resumes in flight, so two requests do not resume one session twice. */
   private readonly resuming = new Map<string, Promise<void>>()
   private readonly sandboxes: SandboxRegistry
+  private readonly sandboxPresets: SandboxPresets | undefined
   private readonly runtimeInfoPath: string | undefined
   private readonly workspacesRoot: string
   private readonly history: SessionHistory
@@ -203,6 +212,8 @@ export class AgentsGateway {
   /** Installed-skills folder. */
   private readonly skillsRoot: string
   private readonly skillInstallApi: SkillInstallApi
+  /** Deliverables per session, reused until the session changes. */
+  private readonly deliverablesCache = new DeliverablesCache<DeliverableEntry>(500)
   private readonly skillsGithub: GithubDeps | undefined
   private readonly composio: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
   /** Refresh hooks of live sessions' Agentry skill providers, by owner. */
@@ -237,6 +248,7 @@ export class AgentsGateway {
   ) {
     if (store !== undefined) this.attachStore(store)
     this.sandboxes = options.sandboxes
+    this.sandboxPresets = options.sandboxPresets
     this.runtimeInfoPath = options.runtimeInfoPath
     this.workspacesRoot = options.workspacesRoot
     this.history = options.history
@@ -307,12 +319,15 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents/environments/templates/:template_id', handler: (req, res, _url, params, p) => this.updateTemplate(req, res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/environments/templates/:template_id', handler: (_req, res, _url, params, p) => this.deleteTemplate(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/runtimes', handler: async (_req, res) => { json(res, 200, await readRuntimeInfo(this.runtimeInfoPath)) } },
-      { method: 'GET', pattern: '/agents/environments/providers', handler: async (_req, res) => { json(res, 200, { object: 'list', data: this.sandboxes.list().map(({ name, ...rest }) => ({ object: 'sandbox.provider', name, ...rest })) }) } },
+      { method: 'GET', pattern: '/agents/environments/providers', handler: async (_req, res) => { json(res, 200, { object: 'list', data: await providerRows(this.sandboxes) }) } },
       { method: 'POST', pattern: '/agents/environments', handler: (req, res, _url, _params, p) => this.createEnvironment(req, res, p.owner) },
       { method: 'GET', pattern: '/agents/environments', handler: (_req, res, url, _params, p) => this.listEnvironments(res, url, p.owner) },
       { method: 'POST', pattern: '/agents/environments/:environment_id/files', handler: (req, res, _url, params, p) => this.writeEnvironmentFile(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/:environment_id/files/*path', handler: (_req, res, _url, params, p) => this.readEnvironmentFile(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/:environment_id/files', handler: (_req, res, url, params, p) => this.listEnvironmentFiles(res, url, params, p.owner) },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/start', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'start') },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/stop', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'stop') },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/reset', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'reset') },
       { method: 'GET', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.getEnvironment(res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.deleteEnvironment(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/sessions', handler: (req, res, url, _params, p) => this.createSession(req, res, url, p.owner) },
@@ -653,7 +668,9 @@ export class AgentsGateway {
       }
       if (error instanceof SessionCreateError) {
         this.ctx.logger.warn(`agents-api: session create failed: ${errorMessage(error)}`)
-        json(res, 500, { error: { type: 'server_error', message: 'The session could not be created', code: error.code } })
+        // Development aid: AGENTRY_DEBUG_ERRORS=1 returns the cause (it can name host paths, so never in production).
+        const detail = process.env['AGENTRY_DEBUG_ERRORS'] === '1' ? { detail: errorMessage((error as { cause?: unknown }).cause ?? error) } : {}
+        json(res, 500, { error: { type: 'server_error', message: 'The session could not be created', code: error.code, ...detail } })
         return
       }
       throw error
@@ -788,9 +805,14 @@ export class AgentsGateway {
         sessionId,
         meta: { cwd },
         agentOptions,
-        setup: this.buildAgentSetup(resolved, pending, cwd, owner),
+        setup: this.buildAgentSetup(resolved, pending, cwd, owner, environment),
       })
       this.handles.set(sessionId, handle)
+      // Sandbox sessions start in full access: the container is the boundary (the agent has sudo there), and
+      // DSH's in-container confinement would set no_new_privs and break sudo. The user can still switch modes.
+      if (await this.sandboxEnvironmentOf(owner, environment)) {
+        (this.ctx.agents.get(sessionId) as { session?: { append(type: string, data: unknown): void } } | undefined)?.session?.append('sandbox/mode', { mode: 'danger-full-access' })
+      }
       this.pendingBySession.set(sessionId, pending)
       await this.store.sessions.insert({
         id: sessionId,
@@ -821,6 +843,8 @@ export class AgentsGateway {
       }
       if (error instanceof StoreUnavailableError) throw error
       if (error instanceof AgentsApiMcpConfigError) throw new AgentsApiRequestError(error.message, 400, 'bad_request')
+      const sandboxDown = sandboxStartErrorIn(error)
+      if (sandboxDown !== undefined) throw new AgentsApiRequestError(sandboxDown.message, 503, 'sandbox_unavailable')
       throw new SessionCreateError(error)
     }
     return { sessionId, projector, base, resolved }
@@ -966,6 +990,7 @@ export class AgentsGateway {
       return
     }
     await this.discardSession(owner, sessionId)
+    this.deliverablesCache.delete(sessionId)
     json(res, 200, { id: sessionId, object: 'agent.session.deleted', deleted: true })
   }
 
@@ -1321,6 +1346,7 @@ export class AgentsGateway {
       root: this.skillsRoot,
       reserved: () => new Set(this.builtinSkills().map(b => b.name)),
       invalidate: owner => { this.skillInvalidations.invalidate(owner) },
+      builtins: () => this.builtinSkills(),
     }
   }
 
@@ -1376,18 +1402,42 @@ export class AgentsGateway {
   }
 
   /**
+   * Mount the session's preset: `agentry`, or for a session on an Agentry
+   * Sandbox environment that sandbox's preset (every tool runs inside it),
+   * held for the agent's lifetime.
+   */
+  private async mountSessionPreset(agentCtx: Context, owner: OwnerId, environment: OAIEnvironmentConfig | undefined): Promise<void> {
+    const environmentId = environment?.type === 'sandbox' ? environment.environment_id : undefined
+    const record = environmentId === undefined ? undefined : await this.store.environments.get(owner, environmentId)
+    if (environmentId !== undefined && record === undefined) throw new Error(`environment ${environmentId} no longer exists; this session cannot run`)
+    if (record === undefined || record.provider === 'local') {
+      await mountDefaultPreset(agentCtx)
+      return
+    }
+    // Never fall back to the host for a non-local environment: an unroutable session fails.
+    const sandboxId = record.provider_metadata['sandbox_id']
+    if (sandboxId === undefined) throw new Error(`environment ${record.id} has no sandbox (${record.status}${record.error ? `: ${record.error}` : ''}); this session cannot run`)
+    if (this.sandboxPresets === undefined) throw new Error('Agentry Sandbox sessions need an agent preset registry')
+    const workspace = record.provider_metadata['workspace_directory']
+    if (workspace === undefined) throw new Error(`environment ${record.id} has no workspace path`)
+    const lease = await this.sandboxPresets.acquire(owner, sandboxId, workspace)
+    ;(agentCtx as { effect?: (fn: () => () => void) => void }).effect?.(() => () => { void lease[Symbol.asyncDispose]() })
+    await mountDefaultPreset(agentCtx, lease.presetId)
+  }
+
+  /**
    * Agent composition shared by create and resume.
    * @param resolved - session agent.
    * @param pending - the session's parked function calls.
    * @param cwd - session working directory.
    * @returns the `agents.create` / `agents.resume` setup callback.
    */
-  private buildAgentSetup(resolved: OAIAgent, pending: PendingFunctionCalls, cwd: string, owner: OwnerId): AgentSetup {
+  private buildAgentSetup(resolved: OAIAgent, pending: PendingFunctionCalls, cwd: string, owner: OwnerId, environment?: OAIEnvironmentConfig): AgentSetup {
     const functionTools = resolved.tools.filter(
       (tool): tool is OAIFunctionTool => tool.type === 'function',
     )
     return async (agentCtx) => {
-      await mountDefaultPreset(agentCtx)
+      await this.mountSessionPreset(agentCtx, owner, environment)
       this.mountAgentrySkills(agentCtx, resolved.id, owner)
       mountAgentInstructions(agentCtx, resolved.instructions, resolved.name)
       // Mounted before the mask so an agent's `host_tools` can hide the agent tools.
@@ -1415,6 +1465,19 @@ export class AgentsGateway {
           }
         },
       })
+      // The user's isolated sandboxes, when Agentry Sandbox is configured.
+      const sandboxProvider = this.sandboxes.get('sandbox') as AgentrySandboxProvider | undefined
+      if (sandboxProvider?.api !== undefined) {
+        mountSandboxTools(agentCtx, {
+          owner,
+          store: this.store,
+          provider: sandboxProvider,
+          provision: (raw, inline) => this.provisionEnvironment(owner, raw, inline),
+          destroy: (record) => this.destroyEnvironment(record),
+          describe: (record) => this.environmentJson(owner, record),
+          ...(environment?.type === 'sandbox' && typeof environment['environment_id'] === 'string' ? { currentEnvironmentId: environment['environment_id'] } : {}),
+        })
+      }
       mountSkillTools(agentCtx, {
         owner,
         deps: this.installDeps(),
@@ -1454,7 +1517,7 @@ export class AgentsGateway {
       const handle = await this.ctx.agents.resume({
         resumeSessionId: SessionId(row.id),
         agentOptions: await this.agentOptionsFor(config.agent),
-        setup: this.buildAgentSetup(config.agent, pending, cwd, row.ownerId),
+        setup: this.buildAgentSetup(config.agent, pending, cwd, row.ownerId, config.environment),
       })
       if (await this.store.sessions.get(row.id, 'any') === undefined) {
         // Deleted while the resume was in flight: undo it.
@@ -1607,6 +1670,7 @@ export class AgentsGateway {
       const provider = this.sandboxes.get(record.provider)
       if (provider === undefined) throw bad(`sandbox provider "${record.provider}" is not available`, 'bad_request')
       needsExec(provider)
+      if (record.status === 'failed') throw new AgentsApiRequestError(`environment ${record.id} failed${record.error ? `: ${record.error}` : ''}; create a new one`, 409, 'environment_failed')
       const directory = record.provider_metadata['workspace_directory']
       if (directory === undefined) throw bad(`environment ${record.id} has no host workspace`, 'sandbox_exec_unavailable')
       return { cwd: directory, environment: { type: 'sandbox', environment_id: record.id } }
@@ -1633,6 +1697,10 @@ export class AgentsGateway {
       created = await provider.create(owner, id, { session_id: sessionId, template: config })
     } catch (error: unknown) {
       throw bad(errorMessage(error), 'bad_request')
+    }
+    if (created.status === 'failed') {
+      await provider.destroy({ id, object: 'environment', status: 'failed', provider: provider.kind, provider_metadata: { ...created.handle }, created_at: 0 } as EnvironmentRecord).catch(() => {})
+      throw new AgentsApiRequestError(`the sandbox could not be created${created.error ? `: ${created.error}` : ''}`, 409, 'environment_failed')
     }
     const record: EnvironmentRecord = {
       id,
@@ -1831,54 +1899,66 @@ export class AgentsGateway {
   }
 
   private async createEnvironment(req: IncomingMessage, res: ServerResponse, owner: OwnerId): Promise<void> {
-    const body = await readBody(req) as { template_id?: string; session_id?: string; image?: string }
+    try {
+      json(res, 201, await this.provisionEnvironment(owner, await readBody(req)))
+    } catch (error: unknown) {
+      if (error instanceof AgentsApiRequestError) {
+        writeRequestError(res, error)
+        return
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Creates an environment for `owner` (the create route and the agent's `sandbox_create`): the requested
+   * provider, else the template's, else the default. `inline` is template config used when no template is named.
+   * @returns the environment's wire form. Throws AgentsApiRequestError (400) for a bad request.
+   */
+  async provisionEnvironment(owner: OwnerId, raw: Record<string, unknown>, inline?: EnvironmentTemplateConfig): Promise<SdkEnvironment> {
+    const fail = (message: string, code = 'bad_request'): never => { throw new AgentsApiRequestError(message, 400, code) }
+    const body = raw as { template_id?: string; session_id?: string; image?: string; provider?: string; name?: unknown }
+    if (body.name !== undefined && (typeof body.name !== 'string' || body.name.trim().length > 80)) fail('Field "name" must be a string of at most 80 characters')
     const input: CreateEnvironmentInput = {
       ...(typeof body.template_id === 'string' ? { template_id: body.template_id } : {}),
       ...(typeof body.session_id === 'string' ? { session_id: body.session_id } : {}),
       ...(typeof body.image === 'string' ? { image: body.image } : {}),
+      ...(typeof body.name === 'string' && body.name.trim() !== '' ? { name: body.name.trim() } : {}),
     }
     let templateProvider: string | undefined
     if (input.template_id !== undefined) {
       const template = await this.store.templates.get(owner, input.template_id)
-      if (template === undefined) {
-        badRequest(res, `template not found: ${input.template_id}`)
-        return
-      }
+      if (template === undefined) return fail(`template not found: ${input.template_id}`)
       input.template = template.config
       templateProvider = template.provider
+    } else if (inline !== undefined) {
+      input.template = inline
     }
-    if (input.session_id !== undefined && await this.store.sessions.get(input.session_id, owner) === undefined) {
-      badRequest(res, `session not found: ${input.session_id}`)
-      return
-    }
-    // The template's provider, else the default. A provider that is not registered (for example one that was removed) answers 400.
-    let provider: SandboxProvider
+    if (input.session_id !== undefined && await this.store.sessions.get(input.session_id, owner) === undefined) fail(`session not found: ${input.session_id}`)
+    // The requested provider, else the template's, else the default. A provider that is not registered (for example one that was removed) answers 400.
+    let provider!: SandboxProvider
     try {
-      provider = templateProvider !== undefined ? this.sandboxes.require(templateProvider) : this.sandboxes.default()
+      const requested = typeof body.provider === 'string' && body.provider.trim() !== '' ? body.provider.trim() : templateProvider
+      provider = requested !== undefined ? this.sandboxes.require(requested) : this.sandboxes.default()
     } catch (error: unknown) {
-      badRequest(res, errorMessage(error))
-      return
+      fail(errorMessage(error))
     }
     // A template the provider cannot fully apply is stored, but nothing is provisioned from it: never ignore fields silently.
     const unsupported = input.template === undefined ? [] : unsupportedFields(input.template, provider)
-    if (unsupported.length > 0) {
-      writeRequestError(res, new AgentsApiRequestError(`sandbox provider "${provider.kind}" cannot apply template fields: ${unsupported.join(', ')}`, 400, 'sandbox_template_unsupported'))
-      return
-    }
+    if (unsupported.length > 0) fail(`sandbox provider "${provider.kind}" cannot apply template fields: ${unsupported.join(', ')}`, 'sandbox_template_unsupported')
     const id = `env_${randomUUID().replaceAll('-', '')}`
-    let created: Awaited<ReturnType<SandboxProvider['create']>>
+    let created!: Awaited<ReturnType<SandboxProvider['create']>>
     try {
       created = await provider.create(owner, id, input)
     } catch (error: unknown) {
-      badRequest(res, errorMessage(error))
-      return
+      fail(errorMessage(error))
     }
     const record: EnvironmentRecord = {
       id,
       object: 'environment',
       status: created.status,
       provider: provider.kind,
-      provider_metadata: provider.kind === 'local' ? { workspace_directory: created.workspacePath } : { ...created.handle },
+      provider_metadata: { ...(provider.kind === 'local' ? { workspace_directory: created.workspacePath } : { ...created.handle }), ...(input.name !== undefined ? { name: input.name } : {}) },
       created_at: Math.floor(Date.now() / 1000),
       ...(input.template_id !== undefined ? { template_id: input.template_id } : {}),
       ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
@@ -1892,7 +1972,7 @@ export class AgentsGateway {
       })
       throw error
     }
-    json(res, 201, await this.environmentJson(owner, record))
+    return this.environmentJson(owner, record)
   }
 
   private async listEnvironments(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
@@ -1929,6 +2009,36 @@ export class AgentsGateway {
       ...(error !== undefined ? { error } : status === 'failed' && record.error !== undefined ? { error: record.error } : {}),
     }
     json(res, 200, await this.environmentJson(owner, await this.store.environments.update(owner, record.id, next) ?? next))
+  }
+
+  /**
+   * Start, stop or reset an environment's sandbox (Agentry Sandbox only; `local` has no lifecycle).
+   * Answers the environment as `GET` would, or the service's refusal with its status (429 quota, 503 down).
+   */
+  private async environmentAction(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId, action: 'start' | 'stop' | 'reset'): Promise<void> {
+    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!record) {
+      notFound(res, 'environment not found')
+      return
+    }
+    const provider = this.sandboxes.get(record.provider) as Partial<AgentrySandboxProvider> | undefined
+    const sandboxId = record.provider_metadata['sandbox_id']
+    if (provider?.api === undefined || sandboxId === undefined) {
+      json(res, 409, { error: { type: 'invalid_request_error', code: 'environment_not_startable', message: 'This environment does not start or stop.' } })
+      return
+    }
+    const body = action === 'reset' ? await readBody(req).catch(() => ({})) : {}
+    const api = provider.api(owner)
+    try {
+      if (action === 'start') await api.start(sandboxId)
+      else if (action === 'stop') await api.stop(sandboxId)
+      else await api.reset(sandboxId, { keepWorkspace: (body as { keep_workspace?: unknown }).keep_workspace !== false })
+    } catch (e: unknown) {
+      const status = e instanceof SandboxApiError && e.status >= 400 ? e.status : 502
+      json(res, status, { error: { type: 'invalid_request_error', code: e instanceof SandboxApiError ? e.code : 'sandbox_error', message: errorMessage(e) } })
+      return
+    }
+    await this.getEnvironment(res, params, owner)
   }
 
   private async deleteEnvironment(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -1973,13 +2083,21 @@ export class AgentsGateway {
       this.ctx.logger.warn(`agents-api: environment ${record.id} uses sandbox provider "${record.provider}", which is not registered; removing the record without cleaning a backend`)
       return
     }
+    const sandboxId = record.provider_metadata['sandbox_id']
+    if (sandboxId !== undefined) await this.sandboxPresets?.evict(sandboxId)
     await provider.destroy(record)
   }
 
   /** The wire form of an environment: the SDK `agent.environment`, with the resources of its template when it still exists. */
   private async environmentJson(owner: OwnerId, record: EnvironmentRecord): Promise<SdkEnvironment> {
-    const template = record.template_id === undefined ? undefined : await this.store.templates.get(owner, record.template_id)
-    return toSdkEnvironment(record, template)
+    const provider = this.sandboxes.get(record.provider) as Partial<AgentrySandboxProvider> | undefined
+    const [template, sandbox] = await Promise.all([
+      record.template_id === undefined ? undefined : this.store.templates.get(owner, record.template_id),
+      typeof provider?.describe === 'function' ? provider.describe(record) : undefined,
+    ])
+    const out = toSdkEnvironment(record, template)
+    const name = record.provider_metadata['name']
+    return { ...out, ...(name !== undefined ? { name } : {}), ...(sandbox !== undefined ? { sandbox } : {}) }
   }
 
   /** The provider behind a record, or a 400 answer when it is not registered. */
@@ -2069,6 +2187,16 @@ export class AgentsGateway {
   private async listArtifacts(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
     if (!await this.requireSession(res, owner, sessionId)) return
+    // A sandbox session's files live in the sandbox, whatever artifact store is configured.
+    const sandbox = await this.sandboxOfSession(owner, sessionId)
+    if (sandbox !== undefined) {
+      try {
+        json(res, 200, { object: 'list', data: await sandbox.provider.listEntries(sandbox.record) })
+      } catch (e: unknown) {
+        json(res, 503, { error: { type: 'server_error', code: 'sandbox_unavailable', message: errorMessage(e) } })
+      }
+      return
+    }
     if (this.artifacts !== undefined) {
       json(res, 200, { object: 'list', data: await listS3Artifacts(this.artifacts, sessionId) })
       return
@@ -2080,11 +2208,17 @@ export class AgentsGateway {
 
   private async listDeliverables(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const sessionId = routeParam(params, 'session_id')
-    if (!await this.requireSession(res, owner, sessionId)) return
-    const workspace = this.sessionRegistry.get(sessionId)?.workspace ?? await this.history.workspace(sessionId)
-    const root = workspace === undefined ? undefined : `${workspace.replace(/\/+$/, '')}/`
-    const data = (await this.history.deliverables(sessionId)).map(entry =>
-      root !== undefined && entry.path.startsWith(root) ? { ...entry, path: entry.path.slice(root.length) } : entry)
+    const row = await this.requireSession(res, owner, sessionId)
+    if (!row) return
+    // A running session can present more files at any moment; otherwise the log is fixed until the row changes.
+    const live = this.sessionRegistry.getOAISession(sessionId)?.status
+    const version = live === 'in_progress' || live === 'requires_action' ? undefined : `${String(row.updatedAt.getTime())}:${row.status}`
+    const data = await this.deliverablesCache.get(sessionId, version, async () => {
+      const workspace = this.sessionRegistry.get(sessionId)?.workspace ?? await this.history.workspace(sessionId)
+      const root = workspace === undefined ? undefined : `${workspace.replace(/\/+$/, '')}/`
+      return (await this.history.deliverables(sessionId)).map(entry =>
+        root !== undefined && entry.path.startsWith(root) ? { ...entry, path: entry.path.slice(root.length) } : entry)
+    })
     json(res, 200, { object: 'list', data })
   }
 
@@ -2097,7 +2231,21 @@ export class AgentsGateway {
       return
     }
     let body: Awaited<ReturnType<typeof getS3Artifact>>
-    if (this.artifacts !== undefined) {
+    const sandbox = await this.sandboxOfSession(owner, sessionId)
+    if (sandbox !== undefined) {
+      try {
+        const size = await sandbox.provider.fileSize(sandbox.record, rawPath)
+        if (size !== undefined && size > MAX_ARTIFACT_BYTES) {
+          json(res, 413, { error: { type: 'invalid_request_error', code: 'file_too_large', message: `artifacts over ${String(MAX_ARTIFACT_BYTES / 1024 / 1024)} MB are not served` } })
+          return
+        }
+        body = size === undefined ? undefined : Buffer.from(await sandbox.provider.readFile(sandbox.record, rawPath))
+      } catch (e: unknown) {
+        if (/invalid workspace path/.test(errorMessage(e))) { badRequest(res, 'artifact path escapes the session workspace'); return }
+        json(res, 503, { error: { type: 'server_error', code: 'sandbox_unavailable', message: errorMessage(e) } })
+        return
+      }
+    } else if (this.artifacts !== undefined) {
       body = await getS3Artifact(this.artifacts, sessionId, rawPath)
     } else {
       const workspace = await this.workspaceOf(res, sessionId)
@@ -2225,7 +2373,33 @@ export class AgentsGateway {
   private async attachFiles(owner: OwnerId, sessionId: string, fileIds: readonly string[], agent: OAIAgent): Promise<AttachedFiles> {
     const cwd = this.sessionRegistry.get(sessionId)?.workspace ?? await this.history.workspace(sessionId)
     if (cwd === undefined) throw new AgentsApiRequestError(`Session "${sessionId}" has no workspace`, 409, 'uploads_unsafe')
-    return this.ingest.attach({ owner, sessionId, cwd, ids: fileIds, supportsImages: () => this.routeAcceptsImages(agent) })
+    const sandbox = await this.sandboxOfSession(owner, sessionId)
+    return this.ingest.attach({
+      owner, sessionId, cwd, ids: fileIds, supportsImages: () => this.routeAcceptsImages(agent),
+      ...(sandbox === undefined ? {} : { copy: (name: string, source: AsyncIterable<Uint8Array>) => copyIntoSandboxUploads(sandbox.provider, sandbox.record, name, source) }),
+    })
+  }
+
+  /** Whether a session environment is an Agentry Sandbox environment. */
+  private async sandboxEnvironmentOf(owner: OwnerId, environment: OAIEnvironmentConfig | undefined): Promise<boolean> {
+    if (environment?.type !== 'sandbox' || environment.environment_id === undefined) return false
+    const record = await this.store.environments.get(owner, environment.environment_id)
+    return record?.provider === 'sandbox' && record.provider_metadata['sandbox_id'] !== undefined
+  }
+
+  /**
+   * The Agentry Sandbox a session runs in, when its environment is one: its workspace lives
+   * there, not on host disk (the host path is an empty placeholder).
+   */
+  private async sandboxOfSession(owner: OwnerId, sessionId: string): Promise<{ provider: AgentrySandboxProvider; record: EnvironmentRecord } | undefined> {
+    const row = await this.store.sessions.get(sessionId, owner)
+    const environment = row === undefined ? undefined : configOf(row).environment
+    if (environment?.type !== 'sandbox' || environment.environment_id === undefined) return undefined
+    const record = await this.store.environments.get(owner, environment.environment_id)
+    if (record === undefined || record.provider_metadata['sandbox_id'] === undefined) return undefined
+    const provider = this.sandboxes.get(record.provider) as Partial<AgentrySandboxProvider> | undefined
+    if (typeof provider?.listEntries !== 'function') return undefined
+    return { provider: provider as AgentrySandboxProvider, record }
   }
 
   /**

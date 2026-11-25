@@ -9,9 +9,15 @@ import type { OwnerId } from '../auth/authenticator.ts'
 import type { Route } from '../gateway.ts'
 import { json, notFound, readBody } from '../http.ts'
 import { SkillNameTakenError } from '../store/store.ts'
-import { activateSkill, deleteSkill, editSkill, type InstallDeps, parseTarget, replaceSkill, skillManifest, SkillTargetNotFoundError, stageSkill, toWireInstalled, usedBy } from './install.ts'
+import { readFile, stat } from 'node:fs/promises'
+import { join, resolve, sep } from 'node:path'
+import { skillDir } from './disk.ts'
+import { activateSkill, listFolder, deleteSkill, editSkill, type InstallDeps, parseTarget, replaceSkill, skillManifest, SkillTargetNotFoundError, stageSkill, toWireInstalled, usedBy } from './install.ts'
 import { DEFAULT_GITHUB, fetchSkillFromGithub, SkillImportError, type GithubDeps } from './github.ts'
 import { packageFromEditor, readSkillZip, SKILL_LIMITS, SkillInvalidError, SkillTooLargeError } from './package.ts'
+
+/** Largest file the viewer returns. */
+const VIEW_MAX_BYTES = 256 * 1024
 
 /** Multipart framing allowance over the zip's own bytes. */
 const FRAMING_BYTES = 64 * 1024
@@ -88,6 +94,8 @@ export class SkillInstallApi {
   routes(): Route[] {
     return [
       { method: 'GET', pattern: '/agents/skills/installed', handler: (_req, res, url, _params, p) => this.list(res, url, p.owner) },
+      { method: 'GET', pattern: '/agents/skills/view/:name', handler: (_req, res, _url, params, p) => this.view(res, params['name'] ?? '', p.owner) },
+      { method: 'GET', pattern: '/agents/skills/view/:name/files/*path', handler: (_req, res, _url, params, p) => this.viewFile(res, params['name'] ?? '', params['path'] ?? '', p.owner) },
       { method: 'POST', pattern: '/agents/skills', handler: (req, res, _url, _params, p) => this.create(req, res, p.owner) },
       { method: 'POST', pattern: '/agents/skills/import', handler: (req, res, _url, _params, p) => this.importSkill(req, res, p.owner) },
       { method: 'POST', pattern: '/agents/skills/:skill_id/update', handler: (_req, res, _url, params, p) => this.update(res, params['skill_id'] ?? '', p.owner) },
@@ -96,6 +104,63 @@ export class SkillInstallApi {
       { method: 'POST', pattern: '/agents/skills/:skill_id', handler: (req, res, _url, params, p) => this.edit(req, res, params['skill_id'] ?? '', p.owner) },
       { method: 'DELETE', pattern: '/agents/skills/:skill_id', handler: (_req, res, _url, params, p) => this.remove(res, params['skill_id'] ?? '', p.owner) },
     ]
+  }
+
+  /**
+   * The folder of a skill the caller may read by name: one of their installed skills, else an Agentry built-in.
+   * @returns the folder and what kind of skill it is, or `undefined`.
+   */
+  private async folderOf(name: string, owner: OwnerId): Promise<{ dir: string; kind: 'builtin' | 'library' | 'private'; description: string; id?: string } | undefined> {
+    const row = (await this.deps.store.skills.list(owner)).find(r => r.name === name)
+    if (row !== undefined) return { dir: skillDir(this.deps.root, row), kind: row.scope === 'agent' ? 'private' : 'library', description: row.description, id: row.id }
+    const builtin = this.deps.builtins?.().find(b => b.name === name)
+    return builtin === undefined ? undefined : { dir: builtin.dir, kind: 'builtin', description: builtin.description }
+  }
+
+  private async view(res: ServerResponse, name: string, owner: OwnerId): Promise<void> {
+    const folder = await this.folderOf(name, owner)
+    if (folder === undefined) { notFound(res, `Skill "${name}" has no viewable files`); return }
+    json(res, 200, {
+      name,
+      description: folder.description,
+      kind: folder.kind,
+      ...(folder.id ? { id: folder.id } : {}),
+      files: await listFolder(folder.dir),
+      skill_md: await readFile(join(folder.dir, 'SKILL.md'), 'utf8').catch(() => ''),
+    })
+  }
+
+  private async viewFile(res: ServerResponse, name: string, rawPath: string, owner: OwnerId): Promise<void> {
+    const path = rawPath.replace(/^\/+/u, '')
+    const segments = path.split('/')
+    if (path === '' || path.includes('\\') || path.includes('\0') || segments.some(s => s === '..' || s === '.' || s === '')) {
+      fail(res, 400, 'bad_request', 'path must stay inside the skill folder')
+      return
+    }
+    const folder = await this.folderOf(name, owner)
+    if (folder === undefined) { notFound(res, `Skill "${name}" has no viewable files`); return }
+    const root = resolve(folder.dir)
+    const target = resolve(root, ...segments)
+    if (!target.startsWith(root + sep)) { fail(res, 400, 'bad_request', 'path must stay inside the skill folder'); return }
+    let bytes: Buffer
+    try {
+      const info = await stat(target)
+      if (!info.isFile()) { notFound(res, `No file "${path}" in skill "${name}"`); return }
+      if (info.size > VIEW_MAX_BYTES) { fail(res, 413, 'file_too_large', 'files over 256 KB are not shown'); return }
+      bytes = await readFile(target)
+    } catch {
+      notFound(res, `No file "${path}" in skill "${name}"`)
+      return
+    }
+    let content: string
+    try {
+      content = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+      if (content.includes('\0')) throw new Error('binary')
+    } catch {
+      fail(res, 415, 'not_text', 'this file is not text')
+      return
+    }
+    json(res, 200, { path, bytes: bytes.length, content })
   }
 
   private async list(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {

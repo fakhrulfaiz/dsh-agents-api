@@ -12,6 +12,7 @@ import { mintEventId } from './bridge.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { applySessionUpdate } from './session-resource.ts'
 import type { StatusChange, StoredSessionItem, WireProjector, WireStep } from './history/projector.ts'
+import { ItemTimer } from './history/item-timer.ts'
 import type {
   OAIAgentSession,
   OAIRequiredAction,
@@ -56,6 +57,8 @@ export class SessionRegistry {
   private readonly sessions = new Map<string, RegisteredSessionState>()
   private readonly subscribers = new Map<string, Set<SessionListener>>()
   private readonly subagents = new Map<string, SubagentState>()
+  /** Item timers of live children, by the same key as `subagents`. */
+  readonly #childTimers = new Map<string, ItemTimer>()
 
   /**
    * Track a session.
@@ -134,7 +137,10 @@ export class SessionRegistry {
   delete(id: string): boolean {
     this.subscribers.delete(id)
     for (const key of [...this.subagents.keys()]) {
-      if (key.startsWith(`${id}\0`)) this.subagents.delete(key)
+      if (key.startsWith(`${id}\0`)) {
+        this.subagents.delete(key)
+        this.#childTimers.delete(key)
+      }
     }
     return this.sessions.delete(id)
   }
@@ -392,6 +398,21 @@ export class SessionRegistry {
    * @param parentId - parent session id.
    * @param childId - child session id.
    */
+  /**
+   * The child's item timer (step starts and open tool calls), made on first use.
+   * @param parentId - parent session id.
+   * @param childId - child session id.
+   */
+  childTimer(parentId: string, childId: string): ItemTimer {
+    const key = `${parentId}\0${childId}`
+    let timer = this.#childTimers.get(key)
+    if (!timer) {
+      timer = new ItemTimer()
+      this.#childTimers.set(key, timer)
+    }
+    return timer
+  }
+
   listChildItems(parentId: string, childId: string): StoredSessionItem[] | undefined {
     return this.subagents.get(`${parentId}\0${childId}`)?.items
   }

@@ -11,6 +11,8 @@ export interface CreateEnvironmentInput {
   template_id?: string
   session_id?: string
   image?: string
+  /** Extension: a display name (at most 80 characters). */
+  name?: string
   /** Config of the template named by `template_id`, resolved by the caller within the owner's templates. */
   template?: EnvironmentTemplateConfig
 }

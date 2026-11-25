@@ -1,0 +1,18 @@
+{
+  "name": "dsh-profile-agents",
+  "private": true,
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "@agentry/api",
+        "@deepseek-ai/dsh-experimental-plugin-market-bundle"
+      ],
+      "patchReload": "live"
+    }
+  },
+  "dependencies": {
+    "@agentry/api": "link:/opt/agentry-plugin/node_modules/@agentry/api"
+  }
+}

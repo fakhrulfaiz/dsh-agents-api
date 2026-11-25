@@ -6,7 +6,7 @@ import { connectRequestFrom } from './connect-request.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { ATTACHMENT_NOTE_PREFIX } from './files/note.ts'
 import { typeFromExtension } from './files/sniff.ts'
-import { parseToolArguments, textFromContent } from './input.ts'
+import { parseToolArguments, textFromContent, toOAIUsage } from './input.ts'
 import type {
   OAICommandExecutionItem,
   OAIInputFilePart,
@@ -166,7 +166,26 @@ function userContentParts(content: unknown): Array<OAIMessageItem['content'][num
  * @param turnId - current Agents API turn id for this session.
  * @returns items to append, in log order.
  */
-export function itemsFromEvent(event: SessionEvent, turnId: string): OAISessionItem[] {
+/** First streamed reasoning or text token of an assistant attempt, epoch ms. */
+function firstTokenAt(stream: Array<{ type: string; time0?: number }> | undefined): number | undefined {
+  let first: number | undefined
+  for (const rec of stream ?? []) {
+    if ((rec.type === 'reasoning-chunks' || rec.type === 'text-chunks' || rec.type === 'tool-call-chunks') && typeof rec.time0 === 'number') {
+      first = first === undefined ? rec.time0 : Math.min(first, rec.time0)
+    }
+  }
+  return first
+}
+
+/** What the projector knows beyond the event itself. */
+export interface ItemContext {
+  /** When the event's step started (its `step/start`), epoch ms; absent when not in the log. */
+  stepStartedAt?: number
+}
+
+export function itemsFromEvent(event: SessionEvent, turnId: string, context: ItemContext = {}): OAISessionItem[] {
+  const step = typeof (event.data as { step?: unknown }).step === 'number' ? (event.data as { step: number }).step : undefined
+  const stepField = step === undefined ? {} : { step }
   if (event.type === 'user/message') {
     const data = event.data as { content?: unknown; source?: { kind?: string } }
     if (data.source?.kind === 'schedule') return scheduledPromptItems(event.seq, textFromContent(data.content), turnId)
@@ -179,6 +198,7 @@ export function itemsFromEvent(event: SessionEvent, turnId: string): OAISessionI
       content: userContentParts(data.content),
       status: 'completed',
       turn_id: turnId,
+      timing: { completed_at_ms: event.time },
     }
     return [item]
   }
@@ -186,9 +206,18 @@ export function itemsFromEvent(event: SessionEvent, turnId: string): OAISessionI
   if (event.type === 'assistant/message') {
     const data = event.data as {
       message?: { content?: unknown }
-      stream?: Array<{ type: string; texts?: string[] }>
+      stream?: Array<{ type: string; texts?: string[]; time0?: number }>
+      usage?: Parameters<typeof toOAIUsage>[0]
     }
     const items: OAISessionItem[] = []
+    const firstToken = firstTokenAt(data.stream)
+    const started = context.stepStartedAt ?? firstToken
+    const timing = {
+      ...(started === undefined ? {} : { started_at_ms: started }),
+      ...(firstToken === undefined ? {} : { first_token_at_ms: firstToken }),
+      completed_at_ms: event.time,
+    }
+    const usage = toOAIUsage(data.usage)
     if (data.stream) {
       for (const rec of data.stream) {
         if (rec.type === 'reasoning-chunks' && Array.isArray(rec.texts)) {
@@ -200,6 +229,8 @@ export function itemsFromEvent(event: SessionEvent, turnId: string): OAISessionI
               summary: [{ type: 'summary_text', text: rText }],
               status: 'completed',
               turn_id: turnId,
+              ...stepField,
+              timing,
             }
             items.push(rItem)
           }
@@ -214,6 +245,9 @@ export function itemsFromEvent(event: SessionEvent, turnId: string): OAISessionI
       content: [{ type: 'output_text', text }],
       status: 'completed',
       turn_id: turnId,
+      ...stepField,
+      ...(usage === null ? {} : { usage }),
+      timing,
     }
     items.push(msgItem)
     return items
@@ -237,6 +271,8 @@ export function itemsFromEvent(event: SessionEvent, turnId: string): OAISessionI
         status: 'completed',
         turn_id: turnId,
         ...(typeof args.cwd === 'string' ? { cwd: args.cwd } : {}),
+        ...stepField,
+        timing: { started_at_ms: event.time },
       }
       return [cmdItem]
     }
@@ -248,6 +284,8 @@ export function itemsFromEvent(event: SessionEvent, turnId: string): OAISessionI
       arguments: args,
       status: 'in_progress',
       turn_id: turnId,
+      ...stepField,
+      timing: { started_at_ms: event.time },
     }
     return [fnItem]
   }
@@ -284,6 +322,7 @@ export function itemsFromEvent(event: SessionEvent, turnId: string): OAISessionI
       status: isError ? 'failed' : 'completed',
       turn_id: turnId,
       ...(isError ? { error: output || 'tool failed' } : {}),
+      timing: { completed_at_ms: event.time },
     }
     const connect = isError ? undefined : connectRequestFrom(output)
     if (connect !== undefined) fnOutItem.connect_request = connect

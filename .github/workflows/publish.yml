@@ -1,0 +1,98 @@
+# Releases the Agentry API image after a merge to main (the develop → main pull request, which CI checked).
+# The version is package.json "version". A version already released (git tag v<version> exists)
+# is never published again: the run skips with a warning. Otherwise it:
+#   1. pushes ghcr.io/<owner>/agentry-api:<version>-<sha>, :<version> and :latest
+#   2. tags the commit v<version> and creates the GitHub Release (notes: the "## <version>"
+#      section of CHANGELOG.md, else generated from the commits), with docker/compose.yaml
+#      (pinned to <version>) and docker/agentry-api.env.example attached
+# Run it with docker/compose.yaml (see docker/README.md).
+name: Publish release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # the tag and the release
+  packages: write # the image
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version and image
+        id: meta
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          version=$(node -p "require('./package.json').version")
+          sha=$(git rev-parse --short HEAD)
+          image="ghcr.io/$owner/agentry-api"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "::warning file=package.json::Version $version is already released (tag v$version); nothing published. Bump package.json on develop to release."
+            echo "Skipped: $version is already released." >> "$GITHUB_STEP_SUMMARY"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "release=true"
+            echo "dsh=$(cat dsh.pin)"
+            echo "version=$version"
+            echo "tags<<EOF"
+            echo "$image:$version-$sha"
+            echo "$image:$version"
+            echo "$image:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - if: steps.meta.outputs.release == 'true'
+        uses: docker/setup-buildx-action@v3
+      - if: steps.meta.outputs.release == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: steps.meta.outputs.release == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: DSH_TAG=${{ steps.meta.outputs.dsh }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.agentry.dsh=${{ steps.meta.outputs.dsh }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Tag and GitHub Release
+        if: steps.meta.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          image_line="Image: \`ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agentry-api:$VERSION\`"
+          scripts/ci/release-notes.sh "$VERSION" > section.md
+          if [ -s section.md ]; then
+            { cat section.md; echo; echo "$image_line"; } > notes.md
+            notes=(--notes-file notes.md)
+          else
+            notes=(--generate-notes --notes "$image_line")
+          fi
+          # The compose file pinned to this version, and the settings template, for running
+          # the image without the repository (see docker/).
+          sed "s/AGENTRY_API_TAG:-latest}/AGENTRY_API_TAG:-$VERSION}/" docker/compose.yaml > compose.yaml
+          grep -q "AGENTRY_API_TAG:-$VERSION}" compose.yaml
+          cp docker/agentry-api.env.example agentry-api.env.example
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" "${notes[@]}" compose.yaml agentry-api.env.example
+          echo "Released v$VERSION: image and GitHub Release." >> "$GITHUB_STEP_SUMMARY"

@@ -6,6 +6,7 @@
 
 import { materializeAgent, updatedAgent } from './agent-records.ts'
 import type { OwnerId } from './auth/authenticator.ts'
+import { AGENT_COLOR_NAMES, AGENT_ICON_NAMES } from './agent-avatar.ts'
 import { validateAppGrants } from './composio-grants.ts'
 import { validateHostTools } from './host-tools.ts'
 import { validateMountableTools } from './mount-function-tools.ts'
@@ -32,6 +33,10 @@ export interface AgentInput {
   subagents?: number
   /** Composio app slugs the agent may use (each with all its tools); clamped to the caller's own grant. */
   apps?: string[]
+  /** Avatar icon name (`AGENT_ICON_NAMES`), saved as `metadata.icon`. */
+  icon?: string
+  /** Avatar colour (`AGENT_COLOR_NAMES`), saved as `metadata.color`. */
+  color?: string
   /** Skill selection; checked against the built-ins and the owner's library by the caller. */
   skills?: AgentSkillSelection
 }
@@ -50,7 +55,9 @@ export class AgentInputError extends Error {
  * @returns an error message, or `undefined` when the input is valid.
  */
 export function validateAgentInput(input: Partial<AgentInput>, visibleTools: ReadonlySet<string>): string | undefined {
-  const { name, instructions, toolsAllow, apps, subagents } = input
+  const { name, instructions, toolsAllow, apps, subagents, icon, color } = input
+  if (icon !== undefined && !AGENT_ICON_NAMES.includes(icon)) return `icon must be one of: ${AGENT_ICON_NAMES.join(', ')}`
+  if (color !== undefined && !AGENT_COLOR_NAMES.includes(color)) return `color must be one of: ${AGENT_COLOR_NAMES.join(', ')}`
   if (name !== undefined && (name.trim() === '' || name.length > NAME_MAX)) return `name must be 1 to ${NAME_MAX} characters`
   if (instructions !== undefined && instructions.length > INSTRUCTIONS_MAX) return `instructions must be at most ${INSTRUCTIONS_MAX} characters`
   for (const tool of toolsAllow ?? []) {
@@ -76,6 +83,8 @@ export function toAgentParams(input: AgentInput & { model: string }, existing?: 
   const metadata = { ...existing?.metadata }
   // Grants replace the legacy `metadata.connectors` hint.
   if (input.apps !== undefined) delete metadata.connectors
+  if (input.icon !== undefined) metadata.icon = input.icon
+  if (input.color !== undefined) metadata.color = input.color
   const multi = input.subagents !== undefined ? { enabled: true, max_concurrent_subagents: input.subagents } : existing?.multi_agent
   return {
     model: input.model,

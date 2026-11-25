@@ -37,6 +37,16 @@ function harness(names: string[], who = 'a', extra: Record<string, unknown> = {}
   return { call, registered, rows, ask: (name: string, args: unknown) => handler!({ name, arguments: args }, async () => ({ kind: 'allow' })) }
 }
 
+describe('agent tools: avatar', () => {
+  it('saves a chosen icon and colour in metadata and refuses unknown ones', async () => {
+    const { call, rows } = harness(['read_file'])
+    expect((await call('agent_create', { name: 'Mail', icon: 'spaceship' })).error).toMatch(/icon/)
+    expect((await call('agent_create', { name: 'Mail', color: 'mauve' })).error).toMatch(/color/)
+    expect(await call('agent_create', { name: 'Mail', icon: 'mail', color: 'teal' })).toMatchObject({ name: 'Mail' })
+    expect(rows.get('a')![0]!.metadata).toMatchObject({ icon: 'mail', color: 'teal' })
+  })
+})
+
 describe('agent tools: apps and skills', () => {
   it('apps become grants clamped to the calling agent', async () => {
     const { call, rows } = harness(['read_file'], 'a', { callerGrants: { gmail: ['GMAIL_FETCH_EMAILS'] } })

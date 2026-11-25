@@ -203,6 +203,97 @@ paths:
           $ref: "#/components/responses/NotFound"
         "502":
           description: "`skill_import_failed`: GitHub could not be reached, or has no such repository or ref."
+  /v1/agents/skills/view/{name}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: View a skill's files
+      description: One of the caller's installed skills (by name), else an Agentry built-in. Bundled Host skills answer 404.
+      tags:
+        - Agents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  description:
+                    type: string
+                  kind:
+                    type: string
+                    enum: [builtin, library, private]
+                  id:
+                    type: string
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        path:
+                          type: string
+                        bytes:
+                          type: integer
+                      required: [path, bytes]
+                  skill_md:
+                    type: string
+                required: [name, description, kind, files, skill_md]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/agents/skills/view/{name}/files/{path}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: path
+        in: path
+        required: true
+        description: File path inside the skill folder; may contain `/`.
+        schema:
+          type: string
+    get:
+      summary: Read one skill file as text
+      description: Text files up to 256 KB. A path leaving the folder answers 400, a larger file 413, a binary file 415.
+      tags:
+        - Agents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  path:
+                    type: string
+                  bytes:
+                    type: integer
+                  content:
+                    type: string
+                required: [path, bytes, content]
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: "`file_too_large`."
+        "415":
+          description: "`not_text`."
   /v1/agents/skills/installed:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -1463,6 +1554,73 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/environments/{environment_id}/start:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: startEnvironment
+      summary: "Start an Agentry Sandbox environment"
+      responses:
+        "200":
+          description: The environment, as `GET` answers it.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { description: Environment not found. }
+        "409": { description: "The environment's provider has no lifecycle (`local`): `environment_not_startable`." }
+        "429": { description: "An Agentry Sandbox limit was reached (`quota_exceeded`); the message says which." }
+        "503": { description: The sandbox backend is not reachable. }
+  /v1/agents/environments/{environment_id}/stop:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: stopEnvironment
+      summary: "Stop an Agentry Sandbox environment (installed software and files are kept)"
+      responses:
+        "200":
+          description: The environment, as `GET` answers it.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { description: Environment not found. }
+        "409": { description: "The environment's provider has no lifecycle (`local`): `environment_not_startable`." }
+        "429": { description: "An Agentry Sandbox limit was reached (`quota_exceeded`); the message says which." }
+        "503": { description: The sandbox backend is not reachable. }
+  /v1/agents/environments/{environment_id}/reset:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: resetEnvironment
+      summary: "Rebuild an Agentry Sandbox environment from its template"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                keep_workspace: { type: boolean, default: true, description: Keep the workspace files when rebuilding. }
+      responses:
+        "200":
+          description: The environment, as `GET` answers it.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { description: Environment not found. }
+        "409": { description: "The environment's provider has no lifecycle (`local`): `environment_not_startable`." }
+        "429": { description: "An Agentry Sandbox limit was reached (`quota_exceeded`); the message says which." }
+        "503": { description: The sandbox backend is not reachable. }
   /v1/agents/environments/{environment_id}/files:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -2597,6 +2755,22 @@ components:
         - completed
         - failed
         - cancelled
+    ItemTiming:
+      type: object
+      description: >-
+        Agentry extension: when the Session log recorded an item, in epoch
+        milliseconds. Each field is present only when the log has it; a running
+        tool call has no completed_at_ms yet.
+      properties:
+        started_at_ms:
+          type: integer
+          description: An assistant step's start (its request was sent), or when a tool was called.
+        first_token_at_ms:
+          type: integer
+          description: An assistant step's first streamed token.
+        completed_at_ms:
+          type: integer
+          description: When the item finished (reply settled, tool answered, message logged).
     TokenUsage:
       type: object
       properties:
@@ -3431,6 +3605,17 @@ components:
         provider:
           type: string
           description: Extension. Name of the sandbox provider that backs the environment, for example `local`.
+        name:
+          type: string
+          description: Extension. Display name given at create.
+        sandbox:
+          type: object
+          description: "Extension (Agentry Sandbox environments): the sandbox's live state. `gone` once the sandbox no longer exists; `unknown` when the service did not answer."
+          properties:
+            state: { type: string, enum: [provisioning, running, stopped, failed, deleting, gone, unknown] }
+            image: { type: string }
+            started_at: { type: [integer, "null"] }
+            last_used_at: { type: [integer, "null"] }
         provider_metadata:
           type: object
           description: Extension. Provider-owned handle; `workspace_directory` for `local`.
@@ -4046,6 +4231,15 @@ components:
           $ref: "#/components/schemas/ItemStatus"
         turn_id:
           type: string
+        step:
+          type: integer
+          minimum: 1
+          description: "Agentry extension: the assistant step (1-based within its turn) that produced or called this item."
+        usage:
+          $ref: "#/components/schemas/TokenUsage"
+          description: "Agentry extension: token usage of the assistant step, when the provider reported it."
+        timing:
+          $ref: "#/components/schemas/ItemTiming"
         subagent_id:
           type: string
       required:
@@ -4075,6 +4269,12 @@ components:
           $ref: "#/components/schemas/ToolCallStatus"
         turn_id:
           type: string
+        step:
+          type: integer
+          minimum: 1
+          description: "Agentry extension: the assistant step (1-based within its turn) that produced or called this item."
+        timing:
+          $ref: "#/components/schemas/ItemTiming"
         subagent_id:
           type: string
       required:
@@ -4104,6 +4304,8 @@ components:
           $ref: "#/components/schemas/ToolCallStatus"
         turn_id:
           type: string
+        timing:
+          $ref: "#/components/schemas/ItemTiming"
         subagent_id:
           type: string
         connect_request:
@@ -4179,6 +4381,12 @@ components:
           $ref: "#/components/schemas/ToolCallStatus"
         turn_id:
           type: string
+        step:
+          type: integer
+          minimum: 1
+          description: "Agentry extension: the assistant step (1-based within its turn) that produced or called this item."
+        timing:
+          $ref: "#/components/schemas/ItemTiming"
         subagent_id:
           type: string
       required:
@@ -4210,6 +4418,12 @@ components:
           $ref: "#/components/schemas/ItemStatus"
         turn_id:
           type: string
+        step:
+          type: integer
+          minimum: 1
+          description: "Agentry extension: the assistant step (1-based within its turn) that produced or called this item."
+        timing:
+          $ref: "#/components/schemas/ItemTiming"
         subagent_id:
           type: string
       required:

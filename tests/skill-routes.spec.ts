@@ -31,14 +31,14 @@ const twoOwners = {
   authenticate: (req: { headers: Record<string, string | string[] | undefined> }) => Promise.resolve({ ok: true, principal: { owner: ownerId(String(req.headers['x-owner'] ?? 'test')), roles: new Set(['agentry-user']) } as unknown as Principal }),
 }
 
-async function start(github?: { apiBase: string; codeloadBase: string; fetch: typeof fetch }) {
+async function start(github?: { apiBase: string; codeloadBase: string; fetch: typeof fetch }, builtinDir = '/b') {
   const store = new MemoryStore()
   await store.ensureOwner(ownerId('test'))
   await store.ensureOwner(ownerId('other'))
   const root = await mkdtemp(join(tmpdir(), 'skill-routes-'))
   const ctx = { logger: { warn: vi.fn() }, get: () => undefined, agents: { get: () => undefined } } as unknown as Context
   const base = testGatewayOptions(createLocalProvider(join(root, 'ws')), new FakeSessionQuery())
-  const options = { ...base, workspacesRoot: join(root, 'ws'), skills: () => undefined, skillsTtlMs: 0, skillsRoot: join(root, 'skills'), builtinSkills: () => [{ name: 'create-agent', description: 'Agents', dir: '/b' }], ...(github ? { skillsGithub: github } : {}) }
+  const options = { ...base, workspacesRoot: join(root, 'ws'), skills: () => undefined, skillsTtlMs: 0, skillsRoot: join(root, 'skills'), builtinSkills: () => [{ name: 'create-agent', description: 'Agents', dir: builtinDir }], ...(github ? { skillsGithub: github } : {}) }
   const api = new AgentsGateway(ctx, twoOwners as never, '/v1', store, new SessionRegistry(), options)
   const server = createServer((req, res) => { void api.handle(req, res) })
   servers.push(server)
@@ -171,5 +171,39 @@ describe('GitHub import routes', () => {
     expect(down.status).toBe(502)
     expect(((await down.json()) as { error: { code: string } }).error.code).toBe('skill_import_failed')
     expect((await post('/import', { repo: 'bad', path: 's', scope: 'library' })).status).toBe(400)
+  })
+})
+
+describe('skill view routes', () => {
+  async function builtin() {
+    const dir = await mkdtemp(join(tmpdir(), 'builtin-'))
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    await writeFile(join(dir, 'SKILL.md'), md('create-agent'))
+    await mkdir(join(dir, 'scripts'))
+    await writeFile(join(dir, 'scripts', 'run.sh'), 'echo hi\n')
+    await writeFile(join(dir, 'logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 1]))
+    return dir
+  }
+
+  it('views a built-in: files, SKILL.md, and one script as text', async () => {
+    const { get } = await start(undefined, await builtin())
+    const view = await (await get('/view/create-agent')).json() as { kind: string; files: { path: string }[]; skill_md: string }
+    expect(view.kind).toBe('builtin')
+    expect(view.files.map(f => f.path)).toEqual(['SKILL.md', 'logo.png', 'scripts/run.sh'])
+    expect(view.skill_md).toContain('Do create-agent.')
+    const file = await (await get('/view/create-agent/files/scripts/run.sh')).json() as { path: string; content: string }
+    expect(file).toMatchObject({ path: 'scripts/run.sh', content: 'echo hi\n' })
+  })
+
+  it('views an installed skill by name, and refuses traversal, binaries and unknown names', async () => {
+    const { post, get } = await start(undefined, await builtin())
+    await post('', { name: 'notes', description: 'd', body: 'Write notes.', scope: 'library' })
+    const view = await (await get('/view/notes')).json() as { kind: string; id: string }
+    expect(view.kind).toBe('library')
+    expect(view.id).toMatch(/^skill_/u)
+    expect((await get('/view/create-agent/files/..%2F..%2Fetc%2Fpasswd')).status).toBe(400)
+    expect((await get('/view/create-agent/files/logo.png')).status).toBe(415)
+    expect((await get('/view/office-docx')).status).toBe(404)
+    expect((await get('/view/notes', 'other')).status).toBe(404)
   })
 })

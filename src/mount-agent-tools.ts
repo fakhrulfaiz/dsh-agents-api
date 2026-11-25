@@ -21,6 +21,7 @@ import {
 } from './agent-service.ts'
 import type { OwnerId } from './auth/authenticator.ts'
 import type { Store } from './store/store.ts'
+import { AGENT_COLOR_NAMES, AGENT_ICON_NAMES } from './agent-avatar.ts'
 import { clampGrants, effectiveGrants } from './composio-grants.ts'
 import type { AgentAppGrants, OAIAgent } from './types.ts'
 
@@ -60,6 +61,8 @@ const editable = {
   tools_allow: { type: 'array', items: { type: 'string' }, description: 'Host tool names the agent may use; from agent_tools. Omit to leave tools unchanged.' },
   subagents: { type: 'integer', minimum: 1, maximum: MAX_SUBAGENTS, description: 'Most subagents at once. Omit for none.' },
   apps: { type: 'array', items: { type: 'string' }, description: 'Connected app names the agent may use, such as gmail. Limited to the apps this chat may use. An empty list allows none.' },
+  icon: { type: 'string', enum: [...AGENT_ICON_NAMES], description: 'Avatar icon that fits the agent\'s job. Pick one when creating an agent.' },
+  color: { type: 'string', enum: [...AGENT_COLOR_NAMES], description: 'Avatar colour.' },
   skills: {
     type: 'object',
     description: 'Skills the agent uses: built-in names and library skill ids. Omit to keep the default (all built-ins).',
@@ -95,6 +98,10 @@ function inputFrom(args: Args): Partial<AgentInput> {
   if (toolsAllow !== undefined) input.toolsAllow = toolsAllow
   if (typeof args.subagents === 'number') input.subagents = args.subagents
   if (apps !== undefined) input.apps = apps
+  const icon = str(args.icon)
+  const color = str(args.color)
+  if (icon !== undefined) input.icon = icon
+  if (color !== undefined) input.color = color
   const skills = args.skills as { builtin?: unknown; library?: unknown } | undefined
   const builtin = strs(skills?.builtin)
   const library = strs(skills?.library)

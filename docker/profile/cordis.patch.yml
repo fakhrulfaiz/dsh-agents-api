@@ -1,0 +1,3 @@
+# Your patch layer for this profile, applied after every bundle layer (a YAML array of
+# loader patch entries). Created once on the data volume; the image never overwrites it.
+[]

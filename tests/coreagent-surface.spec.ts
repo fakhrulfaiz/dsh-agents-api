@@ -289,8 +289,8 @@ describe('sessions on hosted environments', () => {
     const out = await (await fetch(`${root}/v1/agents/environments/providers`)).json() as { object: string; data: unknown[] }
     expect(out.object).toBe('list')
     expect(out.data).toEqual([
-      { object: 'sandbox.provider', name: 'local', default: true, capabilities: { templateFields: ['files'], files: true, exec: true } },
-      { object: 'sandbox.provider', name: 'files-only', default: false, capabilities: { templateFields: ['files'], files: true, exec: false } },
+      { object: 'sandbox.provider', name: 'local', default: true, capabilities: { templateFields: ['files'], files: true, exec: true }, available: true },
+      { object: 'sandbox.provider', name: 'files-only', default: false, capabilities: { templateFields: ['files'], files: true, exec: false }, available: true },
     ])
   })
 

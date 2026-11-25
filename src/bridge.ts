@@ -39,10 +39,15 @@ export function bridgeChildSessionEvent(
     registry.openChildTurn(parentId, childId)
     return
   }
+  const timer = registry.childTimer(parentId, childId)
+  if (timer.note(event)) return
   const turn = registry.getCurrentChildTurn(parentId, childId)
   const turnId = turn?.id ?? 'turn_default'
-  const projected = itemsFromEvent(event, turnId).map(item => ({ ...item, subagent_id: childId }))
+  const projected = itemsFromEvent(event, turnId, timer.context(event)).map(item => ({ ...item, subagent_id: childId }))
   if (projected.length > 0) registry.appendChildItems(parentId, childId, projected)
+  // The stored copies are what a result must end, so the timer tracks those.
+  const stored = projected.length === 0 ? [] : (registry.listChildItems(parentId, childId) ?? []).slice(-projected.length)
+  timer.settle(event, stored)
   if (event.type !== 'turn/end') return
   const data = event.data as { reason?: { kind: string; error?: { message?: string; code?: string } } }
   if (data.reason?.kind === 'error') {
