@@ -1,8 +1,15 @@
 # Agentry API in Docker
 
-One image holds DeepSeek Harness at the pinned tag (`dsh.pin`), this plugin (the `agents` profile:
-`dsh-base`, `dsh-web-app`, `@agentry/api`, the plugin-market bundle) and the Office runtime. No
-configuration is baked in.
+One image holds DeepSeek Harness at the pinned version (`dsh.pin`), this plugin (the `agents`
+profile: `dsh-base`, `dsh-web-app`, `@agentry/api`, the plugin-market bundle) and the Office
+runtime. No configuration is baked in.
+
+**How it stays small (about 1.5 GB).** The build stage clones DeepSeek Harness at the tag and
+builds it, because the plugin compiles against it and the Office runtime is prepared from its
+scripts; that stage is thrown away. The image that ships installs DSH as published on npm
+(`@deepseek-ai/dsh@<version>`, built packages only, the same release as the tag), the plugin from
+its `npm pack` tarball with only its runtime dependencies, and the Office runtime. A copy of the
+built source tree instead made it 3.2 GB.
 
 ## Run the published image
 
@@ -35,8 +42,10 @@ and set `AGENTRY_PUBLIC_URL`.
 
 **Agentry Web** on the same machine reaches it at `http://host.docker.internal:3080`.
 
-**Agentry Sandbox** chats need the sandbox service to see the same workspace paths as the API
-(see the sandbox guide); running both in containers is not covered yet.
+**Agentry Sandbox** works from the container too: set `AGENTRY_SANDBOX_URL` (e.g.
+`http://host.docker.internal:3090` for the service on this machine) and `AGENTRY_SANDBOX_KEY`.
+Nothing is shared on disk: each sandbox keeps its workspace in its own Docker volume, mounted
+inside the sandbox at the API's path name, and every file goes through envd.
 
 ## Build it yourself
 
@@ -45,7 +54,9 @@ docker build --build-arg DSH_TAG=$(cat dsh.pin) -t agentry-api .
 ```
 
 The build clones DeepSeek Harness (public) at the tag and Agentry Sandbox (public, `SANDBOX_REF`,
-default `main`) for its client, and takes about 8 minutes the first time (DSH is cached after).
+default `main`) for its client, and takes about 8–12 minutes the first time (the DSH layers are
+cached after, locally and in CI through the GitHub Actions cache). `dsh.pin` must name a version
+that is also published on npm (`dsh-v0.2.2-rc.1` → `@deepseek-ai/dsh@0.2.2-rc.1`).
 
 ## CI
 

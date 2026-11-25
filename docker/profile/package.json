@@ -13,6 +13,6 @@
     }
   },
   "dependencies": {
-    "@agentry/api": "link:/opt/dsh-agents-api"
+    "@agentry/api": "link:/opt/agentry-plugin/node_modules/@agentry/api"
   }
 }

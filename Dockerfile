@@ -29,12 +29,22 @@ RUN git clone https://github.com/fakhrulfaiz/agentry-sandbox.git agentry-sandbox
 COPY . /opt/dsh-agents-api
 RUN cd dsh-agents-api && pnpm install --frozen-lockfile && DSH_ROOT=/opt/dsh pnpm build
 
+# The plugin as its published form (package.json "files"), for the runtime stage.
+RUN cd dsh-agents-api && npm pack --pack-destination /opt >/dev/null && mv /opt/agentry-api-*.tgz /opt/agentry-api.tgz
+
 FROM node:24.19.0-bookworm-slim
+ARG DSH_TAG
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git tini procps \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=build --chown=node:node /opt/dsh /opt/dsh
-COPY --from=build --chown=node:node /opt/dsh-agents-api /opt/dsh-agents-api
+# DeepSeek Harness as published on npm at the pinned version (dsh-v0.2.2-rc.1 -> 0.2.2-rc.1): the
+# built packages only, without the source tree, its dev dependencies and the build toolchain.
+RUN npm install -g "@deepseek-ai/dsh@${DSH_TAG#dsh-v}" --no-fund --no-audit && npm cache clean --force
+# The plugin with its own runtime dependencies; its @deepseek-ai peers are the host's (above).
+COPY --from=build /opt/agentry-api.tgz /tmp/agentry-api.tgz
+RUN mkdir -p /opt/agentry-plugin && cd /opt/agentry-plugin \
+ && npm install --omit=dev --legacy-peer-deps --no-fund --no-audit /tmp/agentry-api.tgz \
+ && rm /tmp/agentry-api.tgz && npm cache clean --force
 COPY --from=build --chown=node:node /opt/office-runtime /opt/office-runtime
 COPY --chown=node:node docker/profile /opt/agentry/profile
 COPY --chown=node:node docker/entrypoint.sh /opt/agentry/entrypoint.sh
