@@ -50,6 +50,8 @@ jobs:
         with:
           context: .
           push: false
-          build-args: DSH_TAG=${{ steps.pin.outputs.tag }}
+          build-args: |
+            DSH_TAG=${{ steps.pin.outputs.tag }}
+            SANDBOX_REF=${{ github.event_name == 'push' && 'develop' || 'main' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
