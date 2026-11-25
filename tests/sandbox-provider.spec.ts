@@ -178,7 +178,7 @@ describe('sandbox environment provider', () => {
 describe('places', () => {
   const backend = (over: Record<string, unknown>) => ({
     id: 'local', name: 'This computer', default: true, kind: 'docker', available: true, version: '1',
-    capabilities: { persistent: true, reset: true, isolated: true, network: true, resources: true, gpu: false, envdBuiltIn: false, runsAsRoot: true, templateFields: [] },
+    capabilities: { persistent: true, reset: true, keepFilesOnReset: true, isolated: true, network: true, resources: true, gpu: false, envdBuiltIn: false, runsAsRoot: true, templateFields: [] },
     default_image: { name: 'img:1' }, ...over,
   })
   const stub = async (rows: unknown[]) => {
@@ -189,16 +189,17 @@ describe('places', () => {
 
   it('providerRows lists every Agentry Sandbox place, default first', async () => {
     const { providerRows } = await import('../src/sandbox/agentry-sandbox-provider.ts')
-    const s = await stub([backend({}), backend({ id: 'gpu1', name: 'GPU box', kind: 'docker-ssh', default: false, gpus: { count: 2, models: ['A100'] }, capabilities: { ...backend({}).capabilities, gpu: true } }), backend({ id: 'down', name: 'Down', default: false, available: false, reason: 'ssh refused' })])
+    const s = await stub([backend({}), backend({ id: 'gpu1', name: 'GPU box', kind: 'docker-ssh', default: false, gpus: { count: 2, models: ['A100'] }, capabilities: { ...backend({}).capabilities, gpu: true } }), backend({ id: 'e2b1', name: 'E2B', kind: 'e2b', default: false, capabilities: { ...backend({}).capabilities, keepFilesOnReset: false } }), backend({ id: 'down', name: 'Down', default: false, available: false, reason: 'ssh refused' })])
     try {
       const provider = createAgentrySandboxProvider({ url: s.url, key: 'k', workspacesRoot: root })
       const rows = await providerRows({ list: () => [{ name: 'sandbox', capabilities: {}, default: false }], get: () => provider })
       expect(rows[0]).toMatchObject({ name: 'sandbox', available: true, default_image: { name: 'img:1' } })
       const places = (rows[0] as unknown as { places: Record<string, unknown>[] }).places
-      expect(places.map((p) => p['id'])).toEqual(['local', 'gpu1', 'down'])
-      expect(places[0]).toMatchObject({ id: 'local', default: true, available: true, capabilities: { reset: true, isolated: true, gpu: false } })
+      expect(places.map((p) => p['id'])).toEqual(['local', 'gpu1', 'e2b1', 'down'])
+      expect(places[0]).toMatchObject({ id: 'local', default: true, available: true, capabilities: { reset: true, keepFilesOnReset: true, isolated: true, gpu: false } })
+      expect(places[2]).toMatchObject({ capabilities: { keepFilesOnReset: false } })
       expect(places[1]).toMatchObject({ gpus: { count: 2, models: ['A100'] }, capabilities: { gpu: true } })
-      expect(places[2]).toMatchObject({ available: false, reason: 'ssh refused' })
+      expect(places[3]).toMatchObject({ available: false, reason: 'ssh refused' })
     } finally { s.close() }
   })
 

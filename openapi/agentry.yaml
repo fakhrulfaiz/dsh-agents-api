@@ -1289,9 +1289,10 @@ paths:
                                 type: object
                                 properties:
                                   reset: { type: boolean }
+                                  keepFilesOnReset: { type: boolean }
                                   isolated: { type: boolean }
                                   gpu: { type: boolean }
-                                required: [reset, isolated, gpu]
+                                required: [reset, keepFilesOnReset, isolated, gpu]
                             required: [id, name, kind, default, available, capabilities]
                         capabilities:
                           type: object

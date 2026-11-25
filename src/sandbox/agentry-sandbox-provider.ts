@@ -52,7 +52,7 @@ export interface SandboxPlaceRow {
   available: boolean
   reason?: string
   gpus?: { count: number; models: string[] }
-  capabilities: { reset: boolean; isolated: boolean; gpu: boolean }
+  capabilities: { reset: boolean; keepFilesOnReset: boolean; isolated: boolean; gpu: boolean }
 }
 
 export interface WorkspaceEntry {
@@ -170,7 +170,7 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
           available: b.available,
           ...(b.available ? {} : { reason: b.reason ?? 'the place is unavailable' }),
           ...(b.gpus ? { gpus: b.gpus } : {}),
-          capabilities: { reset: b.capabilities.reset, isolated: b.capabilities.isolated, gpu: b.capabilities.gpu },
+          capabilities: { reset: b.capabilities.reset, keepFilesOnReset: b.capabilities.keepFilesOnReset, isolated: b.capabilities.isolated, gpu: b.capabilities.gpu },
         }))
         const main = backends.find((b) => b.default) ?? backends[0]
         if (!main) return { available: false, reason: 'Agentry Sandbox has no place', places }
