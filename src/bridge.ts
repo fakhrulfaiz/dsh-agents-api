@@ -43,7 +43,7 @@ export function bridgeChildSessionEvent(
   if (timer.note(event)) return
   const turn = registry.getCurrentChildTurn(parentId, childId)
   const turnId = turn?.id ?? 'turn_default'
-  const projected = itemsFromEvent(event, turnId, timer.context(event)).map(item => ({ ...item, subagent_id: childId }))
+  const projected = itemsFromEvent(event, turnId, { ...timer.context(event), sessionId: parentId }).map(item => ({ ...item, subagent_id: childId }))
   if (projected.length > 0) registry.appendChildItems(parentId, childId, projected)
   // The stored copies are what a result must end, so the timer tracks those.
   const stored = projected.length === 0 ? [] : (registry.listChildItems(parentId, childId) ?? []).slice(-projected.length)

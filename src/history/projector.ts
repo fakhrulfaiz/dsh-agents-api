@@ -196,7 +196,7 @@ export class WireProjector {
     if (this.#timer.note(event)) return { frames }
 
     const turnId = this.currentTurnId ?? NO_TURN_ID
-    const projected = itemsFromEvent(event, turnId, this.#timer.context(event))
+    const projected = itemsFromEvent(event, turnId, { ...this.#timer.context(event), sessionId: this.base.sessionId })
     this.#timer.settle(event, projected)
     const known = projected.length > 0 || event.type === 'turn/end' || event.type === 'assistant/message'
     if (!known) return { frames }

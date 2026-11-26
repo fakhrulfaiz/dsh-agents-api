@@ -487,8 +487,24 @@ export interface OAIFunctionCallOutputItem {
   turn_id: string
   /** Agentry extension: a sign-in link for a connected app found in the output; clients show a Connect button. */
   connect_request?: ConnectRequest
+  /** Agentry extension: images the tool returned (screenshots, `read_image`), in order; absent when there are none. */
+  images?: OAIOutputImagePart[]
   /** Agentry extension: see `OAIItemTiming`. */
   timing?: OAIItemTiming
+}
+
+/** Agentry extension: one image a tool returned, served by `GET /agents/files/{file_id}/content`. */
+export interface OAIOutputImagePart {
+  type: 'output_image'
+  /** Id for `GET /agents/files/{file_id}/content`; the same in live and replayed items. */
+  file_id?: string
+  /** Display name, when the tool gave one. */
+  filename?: string
+  media_type: string
+  bytes: number
+  /** Pixel size of the stored image. */
+  width?: number
+  height?: number
 }
 
 /** Saved MCP tool call. */
