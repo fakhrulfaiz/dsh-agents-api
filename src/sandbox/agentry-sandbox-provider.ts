@@ -2,13 +2,15 @@
  * The `sandbox` environment provider: environments that live in the Agentry
  * Sandbox service (Docker now, other backends later).
  *
- * DSH checks a session's working directory on this host, so every sandbox
- * gets an empty placeholder directory `<workspacesRoot>/<owner>/sandbox-<envId>`
- * and the service mounts the sandbox's workspace at that same absolute path
- * inside the container: paths are identical on both sides and nothing is
- * translated. Files are read and written through envd (as `agent`).
+ * A sandbox's workspace disk mounts at `/workspace` inside it. The folder need
+ * not exist on this host: a sandbox session's working directory is checked
+ * inside the sandbox (src/working-directory.ts). A sandbox on a shared machine
+ * (an ssh-machine place) mounts at its unique path
+ * `<workspacesRoot>/<owner>/sandbox-<envId>` instead (an empty placeholder of
+ * that name is kept on this host). Files are read and written through envd
+ * (as `agent`).
  */
-import { mkdir, rmdir, stat } from 'node:fs/promises'
+import { mkdir, rmdir } from 'node:fs/promises'
 import { join, posix } from 'node:path'
 import { createSandboxApi, SandboxApiError, type SandboxApi, type WireBackend, type WireSandbox, type WireTemplate } from '@agentry/sandbox/client'
 import type { OwnerId } from '../auth/authenticator.ts'
@@ -22,7 +24,7 @@ export interface AgentrySandboxOptions {
   url: string
   key: string
   workspacesRoot: string
-  /** The short in-sandbox workspace path (default `/workspace`). A sandbox mounts its disk there only when this folder also exists on the API host (DSH checks a session's working directory on the host); otherwise it uses the long mirrored path. */
+  /** The in-sandbox workspace path (default `/workspace`). Sandboxes on a shared machine (an ssh-machine place) use their unique host placeholder path instead. */
   sharedWorkspace?: string
 }
 
@@ -206,9 +208,7 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
       if (input.image) template.image = input.image
       try {
         const place = input.place ?? input.template?.place
-        const shared = opts.sharedWorkspace ?? '/workspace'
-        const hostHasShared = await stat(shared).then((info) => info.isDirectory(), () => false)
-        const mount = !hostHasShared || (await sharesMachine(place)) ? dir : shared
+        const mount = (await sharesMachine(place)) ? dir : (opts.sharedWorkspace ?? '/workspace')
         const s = await api(owner).create({ name: input.name ?? environmentId, template, workspace_path: mount, ...(place ? { place } : {}) })
         return { status: statusOf(s.state), workspacePath: mount, handle: { sandbox_id: s.id, workspace_directory: mount, host_placeholder: dir, image: s.image, owner } }
       } catch (e) {

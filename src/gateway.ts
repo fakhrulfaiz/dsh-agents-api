@@ -1694,10 +1694,6 @@ export class AgentsGateway {
       if (record.status === 'failed') throw new AgentsApiRequestError(`environment ${record.id} failed${record.error ? `: ${record.error}` : ''}; create a new one`, 409, 'environment_failed')
       const directory = record.provider_metadata['workspace_directory']
       if (directory === undefined) throw bad(`environment ${record.id} has no host workspace`, 'sandbox_exec_unavailable')
-      // DSH checks a session's working directory on this host too, so a short workspace such as /workspace must exist here as well.
-      if (!(await stat(directory).then((info) => info.isDirectory(), () => false))) {
-        throw bad(`this sandbox's workspace is ${directory}, which must also exist as a folder on the Agentry API host. Create it there (for example: sudo mkdir ${directory} && sudo chown "$USER" ${directory}) or create a new sandbox, which then uses a path that exists.`, 'sandbox_workspace_missing')
-      }
       return { cwd: directory, environment: { type: 'sandbox', environment_id: record.id } }
     }
     const templateId = spec.type === 'sandbox' ? spec.template_id : typeof spec.environment_template_id === 'string' ? spec.environment_template_id : undefined

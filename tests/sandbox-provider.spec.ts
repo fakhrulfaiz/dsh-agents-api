@@ -121,12 +121,11 @@ describe('sandbox environment provider', () => {
     await expect(stat(placeholder)).rejects.toThrow()
   })
 
-  it('keeps the long mirrored mount path when the short workspace does not exist on the host', async () => {
+  it('mounts at /workspace even when the API host has no such folder (it is checked inside the sandbox)', async () => {
     const p = createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root, sharedWorkspace: join(root, 'no-such-folder') })
     const created = await p.create(OWNER, 'env_2', {})
-    const placeholder = join(root, 'owner-a', 'sandbox-env_2')
-    expect(created.workspacePath).toBe(placeholder)
-    expect(created.handle).toMatchObject({ workspace_directory: placeholder, host_placeholder: placeholder })
+    expect(created.workspacePath).toBe(join(root, 'no-such-folder'))
+    expect(created.handle).toMatchObject({ workspace_directory: join(root, 'no-such-folder'), host_placeholder: join(root, 'owner-a', 'sandbox-env_2') })
   })
 
   it('reads, writes and lists workspace files through the sandbox', async () => {

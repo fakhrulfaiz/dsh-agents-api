@@ -1,9 +1,9 @@
 /**
- * `/workspace` inside a sandbox. The sandbox's workspace disk is mounted at a path that mirrors the host's
- * placeholder folder (DSH checks a session's working directory on the host, so both sides use the same
- * absolute path). That path is long and shows the host's layout, so everything the user and the sandbox
- * tools see goes through `/workspace`, a symlink to it made by root on first use. Sessions that DSH runs
- * inside the sandbox still use the mirrored path.
+ * `/workspace` inside a sandbox. New sandboxes mount their workspace disk at `/workspace` directly and need
+ * no alias. Older sandboxes (made while DSH checked the working directory on the host) and sandboxes on a
+ * shared machine mount it at a long path that mirrors a host placeholder folder; for those, everything the
+ * user and the sandbox tools see goes through `/workspace`, a symlink to that path made by root on first use.
+ * Sessions that DSH runs inside such a sandbox still use the long path.
  */
 import { runInEnvd, sq, type EnvdClient } from '@agentry/sandbox/client'
 

@@ -20,6 +20,9 @@
     "./sandbox-runtime": {
       "default": "./lib/sandbox-runtime.js"
     },
+    "./working-directory": {
+      "default": "./lib/working-directory.js"
+    },
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
@@ -66,6 +69,7 @@
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-user-approval": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-user-questions": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-working-directory": ">=0.2.2-rc.1",
     "@deepseek-ai/schemastery": ">=0.0.1-0"
   },
   "peerDependenciesMeta": {

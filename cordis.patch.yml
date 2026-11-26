@@ -54,6 +54,17 @@
   config:
     maxTimeoutMs: 120000
 
+# The host-level working directory, except that a sandbox session's folder is
+# checked inside its sandbox (by the dsh-working-directory its preset mounts),
+# not on this host, so `/workspace` need not exist here. Every other session is
+# handled exactly as DSH's own service does (src/working-directory.ts).
+- id: working-directory
+  disabled: true
+
+- insert:
+    - id: agentry-working-directory
+      name: '@agentry/api/working-directory'
+
 # ── Agentry identity ─────────────────────────────────────────────────────────
 # Agentry presents as a general-purpose agent: no DeepSeek Harness opener, no
 # DSH GUI developer context. The persona lives in the Agentry preset below
