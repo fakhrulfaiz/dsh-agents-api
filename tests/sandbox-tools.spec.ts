@@ -60,7 +60,7 @@ describe('sandbox tools', () => {
     const res = await call('sandbox_templates') as { templates: { id: string; name: string; image?: string; packages: { python?: string[] } }[] }
     expect(res.templates.map((t) => t.id)).toEqual(['tpl_builtin_data_science', 'tpl_builtin_web_scraping', 'tpl_builtin_web_browser', 'tpl_builtin_node_typescript', 'tpl_builtin_offline'])
     expect(res.templates[0]).toMatchObject({ name: 'Data science', packages: { python: ['matplotlib', 'seaborn', 'scipy', 'scikit-learn'] } })
-    expect(res.templates.find((t) => t.id === 'tpl_builtin_web_browser')).toMatchObject({ name: 'Web browser', image: BROWSER_SANDBOX_IMAGE })
+    expect(res.templates.find((t) => t.id === 'tpl_builtin_web_browser')).toMatchObject({ name: 'Web and browser', image: BROWSER_SANDBOX_IMAGE })
   })
 
   it('registers the nine tools', () => {

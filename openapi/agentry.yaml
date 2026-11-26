@@ -2577,7 +2577,7 @@ paths:
         Frames are capped at `browser.liveFps` a second (default 4). Events:
         - `frame`: `{ data: base64 JPEG, url, title, width, height, timestamp }` (a new reader first gets the last frame).
         - `idle`: `{ reason }`, nothing to show: `not_started` (no browser open yet, or the sandbox is not running),
-          `no_browser` (the sandbox image has no browser; use the built-in Web browser template), `browser_off`
+          `no_browser` (the sandbox image has no browser; use the built-in Web and browser template), `browser_off`
           (the agent's `browser` is off), `not_sandbox` (the chat does not run in a sandbox).
         - `error`: `{ code: too_many_live_views, message }` when the owner already has 4 live views open; the stream ends.
       responses:

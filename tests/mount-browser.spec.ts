@@ -100,7 +100,7 @@ describe('mountBrowserGuidance', () => {
     const { agentCtx, text } = scope([])
     mountBrowserGuidance(agentCtx, 'sandbox')
     expect(text()).toBe(BROWSER_MISSING_NOTICE)
-    expect(text()).toContain('Web browser')
+    expect(text()).toContain('Web and browser')
     expect(text()).toContain('agentry-sandbox-browser:1')
   })
 })

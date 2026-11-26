@@ -9,7 +9,7 @@ A read-only, live view of a sandbox chat's browser, for the web app's Browser ta
 - `frame`: `{ data, url, title, width, height, timestamp }`, `data` a base64 JPEG (quality 60, at most 1280x960). A new reader first gets the last frame.
 - `idle`: `{ reason }` while there is nothing to show:
   - `not_started`: no browser open yet (Playwright MCP starts Chromium on the first browser tool call), or the sandbox is not running;
-  - `no_browser`: the sandbox has no `playwright-mcp` (standard image; use the built-in **Web browser** template);
+  - `no_browser`: the sandbox has no `playwright-mcp` (standard image; use the built-in **Web and browser** template);
   - `browser_off`: the session agent's `browser` is off (no relay is started);
   - `not_sandbox`: the chat runs on the server (no relay is started).
 - `error`: `{ code: "too_many_live_views" }` when the owner already has 4 live views; the stream ends.
