@@ -151,6 +151,6 @@ describe('route order', () => {
     const h = await start()
     const { body } = await h.upload('alice', 'a.txt', 'x', 'text/plain')
     expect(body['object']).toBe('file')
-    expect((await h.request('alice', 'GET', '/agents/files')).body?.['error']).toMatchObject({ message: 'Agent "files" not found' })
+    expect((await h.request('alice', 'GET', '/agents/files')).body).toMatchObject({ object: 'list' })
   })
 })

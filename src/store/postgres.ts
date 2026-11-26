@@ -208,6 +208,19 @@ function fileCollection(pool: pg.Pool): FileCollection {
         [owner, ids],
       )
     },
+    async list(owner, q) {
+      const result = await pool.query<FileDbRow>(
+        `with after_row as (select created_at, id from files where owner_id = $1 and id = $2)
+         select ${FILE_COLUMNS} from files
+         where owner_id = $1
+           and ($4::text is null or status = $4)
+           and (not exists (select 1 from after_row) or (created_at, id) < (select created_at, id from after_row))
+         order by created_at desc, id desc
+         limit $3`,
+        [owner, q.after ?? null, q.limit + 1, q.status ?? null],
+      )
+      return { data: result.rows.slice(0, q.limit).map(fileFromDb), hasMore: result.rows.length > q.limit }
+    },
     async listForSession(owner, sessionId) {
       const result = await pool.query<FileDbRow>(
         `select ${FILE_COLUMNS} from files where owner_id = $1 and session_id = $2 and status = 'attached' and attachment_id is not null order by attached_at, id`,
@@ -344,6 +357,19 @@ export async function openPostgresStore(url: string, onIdleClientError?: (error:
         const row = result.rows[0]
         return row === undefined ? undefined : sessionFromDb(row)
       },
+      async mergeMetadata(id, owner, patch) {
+        // One statement: the merge happens on the stored value, not on a copy the caller read earlier. Metadata values are strings, so stripping nulls only removes deleted keys.
+        const result = await pool.query<SessionDbRow>(
+          `update sessions set
+             body = jsonb_set(body, '{metadata}', jsonb_strip_nulls(coalesce(body->'metadata', '{}'::jsonb) || $3::jsonb)),
+             updated_at = clock_timestamp()
+           where id = $1 and ($2::text is null or owner_id = $2) and body <> '{}'::jsonb
+           returning ${SESSION_COLUMNS}`,
+          [id, owner === 'any' ? null : owner, JSON.stringify(patch)],
+        )
+        const row = result.rows[0]
+        return row === undefined ? undefined : sessionFromDb(row)
+      },
       async get(id, owner) {
         const result = await pool.query<SessionDbRow>(
           `select ${SESSION_COLUMNS} from sessions where id = $1 and ($2::text is null or owner_id = $2)`,
@@ -369,6 +395,7 @@ export async function openPostgresStore(url: string, onIdleClientError?: (error:
              and ($4::timestamptz is null or created_at >= $4)
              and ($5::timestamptz is null or created_at < $5)
              and ($6::timestamptz is null or (created_at, id) < ($6, $7::text))
+             and ($9::jsonb is null or body->'metadata' @> $9::jsonb)
            order by created_at desc, id desc
            limit $8`,
           [
@@ -380,6 +407,7 @@ export async function openPostgresStore(url: string, onIdleClientError?: (error:
             after?.createdAt ?? null,
             after?.id ?? null,
             q.limit + 1,
+            q.metadata === undefined || Object.keys(q.metadata).length === 0 ? null : JSON.stringify(q.metadata),
           ],
         )
         const data = result.rows.slice(0, q.limit).map(sessionFromDb)

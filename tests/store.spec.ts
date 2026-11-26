@@ -198,6 +198,22 @@ describe.each(harnesses)('Store contract (%s)', (_name, harness) => {
     await expect(store.files.insert(fileRow('file_x', ownerId('nobody')))).rejects.toThrow()
   })
 
+  it('files: list is owner-scoped, newest first, paged and filtered by status', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    await store.ensureOwner(B)
+    for (const [i, id] of ['file_l1', 'file_l2', 'file_l3'].entries()) await store.files.insert(fileRow(id, A, { createdAt: new Date(Date.UTC(2026, 10, 10, 10, i)) }))
+    await store.files.insert(fileRow('file_lb', B))
+    await store.files.claim(A, ['file_l2'], 'sess_1')
+    const first = await store.files.list(A, { limit: 2 })
+    expect(first.data.map(row => row.id)).toEqual(['file_l3', 'file_l2'])
+    expect(first.hasMore).toBe(true)
+    const rest = await store.files.list(A, { limit: 2, after: 'file_l2' })
+    expect(rest.data.map(row => row.id)).toEqual(['file_l1'])
+    expect(rest.hasMore).toBe(false)
+    expect((await store.files.list(A, { limit: 10, status: 'attached' })).data.map(row => row.id)).toEqual(['file_l2'])
+  })
+
   it('files: claim is all or nothing and a second claim of the same file loses', async () => {
     const store = await harness.fresh()
     await store.ensureOwner(A)
@@ -300,6 +316,34 @@ describe.each(harnesses)('Store contract (%s)', (_name, harness) => {
     const next: SessionConfig = { ...body, metadata: {} }
     expect((await store.sessions.update('sess_n', A, { body: next }))?.body).toEqual(next)
     expect((await store.sessions.update('sess_b', A, { status: 'failed' }))?.body).toEqual(body)
+  })
+
+  it('sessions.mergeMetadata merges and deletes keys atomically, and sessions.list filters by metadata', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    await store.ensureOwner(B)
+    const body = (metadata: Record<string, string>): SessionConfig => ({
+      agent: materializeAgent({ model: 'deepseek-chat' }),
+      environment: { type: 'none' },
+      metadata,
+      vault_ids: [],
+    })
+    await store.sessions.insert(sessionRow('sess_m1', A, { body: body({ title: 'T' }), createdAt: new Date(1000) }))
+    await store.sessions.insert(sessionRow('sess_m2', A, { body: body({}), createdAt: new Date(2000) }))
+    await store.sessions.insert(sessionRow('sess_m3', B, { body: body({ starred: 'true' }), createdAt: new Date(3000) }))
+    await store.sessions.insert(sessionRow('sess_nobody', A, { createdAt: new Date(4000) }))
+    await Promise.all([
+      store.sessions.mergeMetadata('sess_m1', A, { starred: 'true' }),
+      store.sessions.mergeMetadata('sess_m1', A, { color: 'red' }),
+    ])
+    expect((await store.sessions.get('sess_m1', A))?.body?.metadata).toEqual({ title: 'T', starred: 'true', color: 'red' })
+    expect((await store.sessions.mergeMetadata('sess_m1', A, { color: null }))?.body?.metadata).toEqual({ title: 'T', starred: 'true' })
+    expect(await store.sessions.mergeMetadata('sess_m1', B, { x: 'y' })).toBeUndefined()
+    expect(await store.sessions.mergeMetadata('sess_nobody', A, { x: 'y' })).toBeUndefined()
+    const ids = async (metadata: Record<string, string>) => (await store.sessions.list({ owner: A, metadata, limit: 10 })).data.map(row => row.id)
+    expect(await ids({ starred: 'true' })).toEqual(['sess_m1'])
+    expect(await ids({ starred: 'true', title: 'T' })).toEqual(['sess_m1'])
+    expect(await ids({ starred: 'false' })).toEqual([])
   })
 
   it('sessions.list filters by owner, agent, status, and time, newest first, in disjoint cursor pages', async () => {

@@ -87,6 +87,8 @@ export interface SessionListQuery {
   status?: string
   from?: Date
   to?: Date
+  /** Keep only sessions whose metadata has every one of these keys with these values. */
+  metadata?: Record<string, string>
   cursor?: string
   limit: number
 }
@@ -146,6 +148,13 @@ export interface FileCollection {
    * @returns the rows of `owner` among `ids`, in no particular order; unknown and foreign ids are absent.
    */
   getMany(owner: OwnerId, ids: readonly string[]): Promise<FileRow[]>
+  /**
+   * Page of the owner's files, newest first (`created_at`, then `id`).
+   * @param owner - calling principal.
+   * @param q - `after` is the last id of the previous page (an id the owner does not hold starts from the top); `limit` is the page size; `status` keeps one status.
+   * @returns up to `limit` rows and whether more follow.
+   */
+  list(owner: OwnerId, q: { after?: string; limit: number; status?: FileRow['status'] }): Promise<{ data: FileRow[]; hasMore: boolean }>
   /**
    * Remove a `staged` row.
    * @param id - file id.
@@ -288,6 +297,15 @@ export interface Store {
      */
     update(id: string, owner: OwnerId | 'any', patch: SessionIndexPatch): Promise<SessionIndexRow | undefined>
     /**
+     * Merge keys into the session's stored metadata in one atomic step, so two
+     * concurrent merges cannot drop each other's keys.
+     * @param id - session id.
+     * @param owner - calling principal, or `'any'`.
+     * @param patch - keys to set; a `null` value deletes the key.
+     * @returns the updated row, or `undefined` when missing, owned by someone else, or without a stored setup.
+     */
+    mergeMetadata(id: string, owner: OwnerId | 'any', patch: Record<string, string | null>): Promise<SessionIndexRow | undefined>
+    /**
      * @param id - session id.
      * @param owner - calling principal, or `'any'`.
      * @returns the row, or `undefined` when missing or owned by someone else.
@@ -420,6 +438,7 @@ function guardFiles(files: FileCollection): FileCollection {
     markAttached: guard(files.markAttached.bind(files)),
     release: guard(files.release.bind(files)),
     listForSession: guard(files.listForSession.bind(files)),
+    list: guard(files.list.bind(files)),
     deleteForSession: guard(files.deleteForSession.bind(files)),
     expireStaged: guard(files.expireStaged.bind(files)),
     stagedIds: guard(files.stagedIds.bind(files)),
@@ -459,6 +478,7 @@ export function guardStore(store: Store): Store {
     sessions: {
       insert: guard(sessions.insert.bind(sessions)),
       update: guard(sessions.update.bind(sessions)),
+      mergeMetadata: guard(sessions.mergeMetadata.bind(sessions)),
       get: guard(sessions.get.bind(sessions)),
       delete: guard(sessions.delete.bind(sessions)),
       list: guard(sessions.list.bind(sessions)),

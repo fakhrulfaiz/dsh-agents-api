@@ -29,6 +29,7 @@ import {
   json,
   listQuery,
   matchRoute,
+  metadataFilter,
   normalizePath,
   notFound,
   paginate,
@@ -71,6 +72,7 @@ import { toolImageSource } from './files/tool-images.ts'
 import { openAttached, type AttachmentsPort } from './files/attached.ts'
 import { AttachmentIngest, type AttachedFiles } from './files/ingest.ts'
 import { FilesApi, uploadedFileSource, type FilesRuntime } from './files/api.ts'
+import type { FileSource, ServedFile } from './files/content.ts'
 import { SkillsApi, type SkillTarget } from './skills.ts'
 import { SessionRegistry } from './session-registry.ts'
 import { WireProjector, type ProjectionBase } from './history/projector.ts'
@@ -89,7 +91,7 @@ import { absoluteFilePath, parseFileListQuery, parseFileWrite, selectFilePage, t
 import { normalizeTemplateConfig, parseTemplateInput, toSdkTemplate, unsupportedFields } from './environment/template-compat.ts'
 import type { SandboxProvider } from './sandbox/contract.ts'
 import type { SandboxRegistry } from './sandbox/registry.ts'
-import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, EnvironmentTemplateConfig, OAISandboxEnvironment } from './environment-types.ts'
+import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, EnvironmentTemplateConfig, OAISandboxEnvironment, TemplateFileInput } from './environment-types.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SubagentState } from './session-registry.ts'
 import {
@@ -228,6 +230,8 @@ export class AgentsGateway {
   private readonly commandsAllow: ReadonlySet<string> | undefined
   private readonly commandsApi: CommandsApi
   private readonly ingest: AttachmentIngest
+  /** Where uploaded bytes are read from (also used to copy template `file_id` files). */
+  private fileSources: FileSource[] = []
   private readonly commands: () => CommandService | undefined
   /** Sessions with a command executing, so a second one is refused instead of interleaving. */
   private readonly commandsRunning = new Set<string>()
@@ -305,14 +309,16 @@ export class AgentsGateway {
       attachments,
       warn: message => this.ctx.logger.warn(message),
     })
+    const uploaded = uploadedFileSource({
+      store: () => this.store,
+      staging: options.files?.staging,
+      attached: row => openAttached(row, attachments()),
+    })
+    this.fileSources = [uploaded]
     const filesApi = new FilesApi({
       store: () => this.store,
       runtime: options.files,
-      sources: [uploadedFileSource({
-        store: () => this.store,
-        staging: options.files?.staging,
-        attached: row => openAttached(row, attachments()),
-      }), toolImageSource({
+      sources: [uploaded, toolImageSource({
         imageRefs: async (owner, sessionId) => {
           if (await this.store.sessions.get(sessionId, owner) === undefined) return undefined
           const children = this.sessionRegistry.listSubagents(sessionId)
@@ -892,9 +898,11 @@ export class AgentsGateway {
   private async listSessions(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
     const query = listQuery(url)
     const after = query.after === undefined ? undefined : await this.store.sessions.get(query.after, owner)
+    const metadata = metadataFilter(url)
     const page = await this.store.sessions.list({
       owner,
       limit: query.limit,
+      ...(metadata === undefined ? {} : { metadata }),
       ...(after === undefined ? {} : { cursor: encodeSessionCursor(after.createdAt, after.id) }),
     })
     json(res, 200, {
@@ -958,8 +966,14 @@ export class AgentsGateway {
     if (next === undefined) {
       throw new AgentsApiRequestError('Field "agent.model" cannot be null or empty', 400, 'bad_request')
     }
+    const merge = body.metadata_merge
+    if (merge !== undefined && (merge === null || typeof merge !== 'object' || Object.values(merge).some(value => value !== null && typeof value !== 'string'))) {
+      throw new AgentsApiRequestError('Field "metadata_merge" must map keys to strings or null', 400, 'bad_request')
+    }
+    // A merge-only update skips the whole-row write below, which would overwrite a concurrent merge with this request's stale copy.
+    if (body.agent === undefined && body.metadata === undefined && merge !== undefined) return this.mergeSessionMetadata(row, owner, merge)
     if (next.agent.model !== current.agent.model || next.agent.reasoning?.effort !== current.agent.reasoning?.effort) {
-      await this.applyLiveModel(row, next.agent)
+      await this.applyLiveModel(row, next.agent, current.agent.model)
     }
     const updated = await this.store.sessions.update(row.id, owner, {
       model: next.agent.model,
@@ -967,7 +981,21 @@ export class AgentsGateway {
       body: next,
     })
     if (!updated) return undefined
-    return this.sessionRegistry.applyConfig(row.id, next) ?? sessionFromRow(updated)
+    const settled = this.sessionRegistry.applyConfig(row.id, next) ?? sessionFromRow(updated)
+    return merge === undefined ? settled : this.mergeSessionMetadata(row, owner, merge)
+  }
+
+  /**
+   * Merge metadata keys into a session (`null` deletes a key) and refresh the live projection.
+   * @param row - the session's index row.
+   * @param owner - calling principal.
+   * @param merge - keys to set or delete.
+   * @returns the updated resource, or `undefined` when the row disappeared or has no stored setup.
+   */
+  private async mergeSessionMetadata(row: SessionIndexRow, owner: OwnerId, merge: Record<string, string | null>): Promise<OAIAgentSession | undefined> {
+    const updated = await this.store.sessions.mergeMetadata(row.id, owner, merge)
+    if (updated?.body == null) return undefined
+    return this.sessionRegistry.applyConfig(row.id, updated.body) ?? sessionFromRow(updated)
   }
 
   /**
@@ -976,9 +1004,10 @@ export class AgentsGateway {
    * running is unchanged.
    * @param row - the session's index row, used to resume the agent when it is not live.
    * @param agent - the agent configuration after the update.
-   * @throws AgentsApiRequestError 409 `session_setting_not_live` when no live agent exists, the route or effort is unsupported, or the selection cannot be recorded.
+   * @param modelBefore - the model before the update; a model that is not offered is refused only when it differs from this.
+   * @throws AgentsApiRequestError 409 `session_setting_not_live` when no live agent exists, the model is not offered, the route or effort is unsupported, or the selection cannot be recorded.
    */
-  private async applyLiveModel(row: SessionIndexRow, agent: OAIAgent): Promise<void> {
+  private async applyLiveModel(row: SessionIndexRow, agent: OAIAgent, modelBefore: string): Promise<void> {
     const notLive = (message: string): AgentsApiRequestError => new AgentsApiRequestError(message, 409, 'session_setting_not_live')
     try {
       await this.ensureLive(row)
@@ -987,11 +1016,13 @@ export class AgentsGateway {
     }
     const live = this.ctx.agents.get(SessionId(row.id))
     if (live === undefined) throw notLive(`Session "${row.id}" has no running agent`)
-    const provider = await providerForModel(
+    const found = await lookUpModel(
       this.ctx,
       agent.model,
       live.model.current()?.provider ?? this.ctx.agentDefaultModel.currentSelection().provider,
     )
+    if (found.known === false && agent.model !== modelBefore) throw notLive(`Model "${agent.model}" is not offered by any configured provider`)
+    const provider = found.provider
     const effort = agent.reasoning?.effort
     const route = { provider, model: agent.model, ...(effort == null ? {} : { reasoningEffort: ReasoningEffortId(effort) }) }
     try {
@@ -1739,7 +1770,7 @@ export class AgentsGateway {
     const id = `env_${randomUUID().replaceAll('-', '')}`
     let created: Awaited<ReturnType<SandboxProvider['create']>>
     try {
-      created = await provider.create(owner, id, { session_id: sessionId, template: config })
+      created = await provider.create(owner, id, { session_id: sessionId, template: await this.inlineFileRefs(owner, config) })
     } catch (error: unknown) {
       throw bad(errorMessage(error), 'bad_request')
     }
@@ -1775,13 +1806,13 @@ export class AgentsGateway {
         const text = userTextFromInput(evt.input)
         const fileIds = fileIdsFromInput(evt.input)
         await this.ingest.validate(owner, fileIds)
-        if (evt.model != null || evt.reasoning?.effort != null) {
+        if (evt.model != null || evt.reasoning?.effort !== undefined) {
           const fresh = await this.store.sessions.get(sessionId, owner)
           if (fresh === undefined) throw new AgentsApiRequestError(`Session "${sessionId}" not found`, 404, 'resource_not_found')
           await this.changeSettings(fresh, owner, {
             agent: {
               ...(evt.model == null ? {} : { model: evt.model }),
-              ...(evt.reasoning?.effort == null ? {} : { reasoning: { effort: evt.reasoning.effort } }),
+              ...(evt.reasoning?.effort === undefined ? {} : { reasoning: { effort: evt.reasoning.effort } }),
             },
           })
         }
@@ -1979,6 +2010,35 @@ export class AgentsGateway {
    * provider, else the template's, else the default. `inline` is template config used when no template is named.
    * @returns the environment's wire form. Throws AgentsApiRequestError (400) for a bad request.
    */
+  /**
+   * Replace a template's `file_id` files by inline copies of the owner's uploaded bytes, so every provider
+   * receives only inline files. The upload stays reusable (it is read, not claimed).
+   * @param owner - environment owner.
+   * @param config - template config.
+   * @returns the config with inline files only.
+   * @throws AgentsApiRequestError 400 `file_not_found` when an id is not one of the owner's files.
+   */
+  private async inlineFileRefs<T extends EnvironmentTemplateConfig>(owner: OwnerId, config: T): Promise<T> {
+    if (!config.files?.some(file => file.type === 'file_id')) return config
+    const files: TemplateFileInput[] = []
+    for (const file of config.files) {
+      if (file.type !== 'file_id') {
+        files.push(file)
+        continue
+      }
+      let served: ServedFile | undefined
+      for (const source of this.fileSources) {
+        served = await source.open(owner, file.file_id)
+        if (served !== undefined) break
+      }
+      if (served === undefined) throw new AgentsApiRequestError(`file "${file.path}": file not found: ${file.file_id}`, 400, 'file_not_found')
+      const chunks: Buffer[] = []
+      for await (const chunk of served.body()) chunks.push(Buffer.from(chunk))
+      files.push({ type: 'inline', path: file.path, data: Buffer.concat(chunks).toString('base64') })
+    }
+    return { ...config, files }
+  }
+
   async provisionEnvironment(owner: OwnerId, raw: Record<string, unknown>, inline?: EnvironmentTemplateConfig): Promise<SdkEnvironment> {
     const fail = (message: string, code = 'bad_request'): never => { throw new AgentsApiRequestError(message, 400, code) }
     const body = raw as { template_id?: string; session_id?: string; image?: string; provider?: string; name?: unknown; place?: unknown }
@@ -2016,7 +2076,7 @@ export class AgentsGateway {
     const id = `env_${randomUUID().replaceAll('-', '')}`
     let created!: Awaited<ReturnType<SandboxProvider['create']>>
     try {
-      created = await provider.create(owner, id, input)
+      created = await provider.create(owner, id, input.template === undefined ? input : { ...input, template: await this.inlineFileRefs(owner, input.template) })
     } catch (error: unknown) {
       fail(errorMessage(error))
     }
@@ -2615,8 +2675,21 @@ export class AgentsGateway {
  * @param fallback - `agentDefaultModel` provider.
  */
 async function providerForModel(ctx: Context, model: string, fallback: string): Promise<string> {
+  return (await lookUpModel(ctx, model, fallback)).provider
+}
+
+/**
+ * Find the provider that lists a model, and whether the model is known at all.
+ * `known` is `false` only when every provider's list was read and none had the
+ * model; it is `undefined` when the lists cannot say (no `llm` service, or a
+ * provider failed to list).
+ * @param ctx - host context.
+ * @param model - model id.
+ * @param fallback - `agentDefaultModel` provider.
+ */
+async function lookUpModel(ctx: Context, model: string, fallback: string): Promise<{ provider: string; known: boolean | undefined }> {
   const get = (ctx as { get?: (name: string) => unknown }).get
-  if (typeof get !== 'function') return fallback
+  if (typeof get !== 'function') return { provider: fallback, known: undefined }
   let llm: {
     listProviders?: () => ReadonlyArray<{ id: string }>
     listModels?: (provider: string) => Promise<ReadonlyArray<{ id: string }>>
@@ -2624,23 +2697,25 @@ async function providerForModel(ctx: Context, model: string, fallback: string): 
   try {
     llm = get.call(ctx, 'llm') as typeof llm
   } catch {
-    return fallback
+    return { provider: fallback, known: undefined }
   }
   if (llm === undefined || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
-    return fallback
+    return { provider: fallback, known: undefined }
   }
   const ids = llm.listProviders().map(provider => provider.id)
   const ordered = ids.includes(fallback) ? [fallback, ...ids.filter(id => id !== fallback)] : ids
+  let complete = ordered.length > 0
   for (const provider of ordered) {
     let models: ReadonlyArray<{ id: string }>
     try {
       models = await llm.listModels(provider)
     } catch {
+      complete = false
       continue
     }
-    if (models.some(row => row.id === model)) return provider
+    if (models.some(row => row.id === model)) return { provider, known: true }
   }
-  return fallback
+  return { provider: fallback, known: complete ? false : undefined }
 }
 
 /**

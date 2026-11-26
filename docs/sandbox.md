@@ -12,7 +12,7 @@ Environments, templates and environment files follow the OpenAI Agents API as th
 | Environment | `agent.environment`, `type` `self_hosted` (local provider) or `openai_hosted` (any other), `status` `pending` `connected` `disconnected` `expired` `failed` |
 | File | `agent.environment.file`, absolute `/workspace/...` path, `size_bytes`; list is a token page (`limit`, `order`, `page`, `path`; `data`, `has_more`, `next`) |
 
-A template field the chosen provider cannot apply is **stored and listed** (`unsupported_fields`), never dropped. Provisioning it answers 400 `sandbox_template_unsupported`. A file referenced by `file_id` is accepted but answers 400 until Files API copying exists.
+A template field the chosen provider cannot apply is **stored and listed** (`unsupported_fields`), never dropped. Provisioning it answers 400 `sandbox_template_unsupported`. A file referenced by `file_id` is copied from the owner's uploads (`POST /agents/files`) into the workspace when the environment is provisioned; the upload stays reusable, and an id that is not the owner's answers 400.
 
 ## Using a provider
 

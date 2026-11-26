@@ -768,6 +768,61 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+    get:
+      summary: List uploaded files, newest first
+      description: The caller's own staged and attached files. `after` is the last id of the previous page; `order` is ignored (newest first).
+      tags:
+        - Files
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/After"
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - staged
+              - attached
+          description: Keep only files in this status.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FileObject"
+                  first_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  last_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  has_more:
+                    type: boolean
+                required:
+                  - object
+                  - data
+                  - first_id
+                  - last_id
+                  - has_more
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
   /v1/agents/files/{file_id}/content:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -1951,6 +2006,16 @@ paths:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/After"
         - $ref: "#/components/parameters/Order"
+        - name: metadata
+          in: query
+          required: false
+          style: deepObject
+          explode: true
+          schema:
+            type: object
+            additionalProperties:
+              type: string
+          description: "Agentry extension. `metadata[key]=value` keeps only sessions whose metadata has that key with that exact value; several keys must all match. Applies before paging, so every page is complete."
       responses:
         "200":
           description: OK
@@ -4290,11 +4355,12 @@ components:
             model:
               type: string
               minLength: 1
-              description: Retargets the live agent from the next model step. `null` and the empty string are rejected.
+              description: Retargets the live agent from the next model step. `null` and the empty string are rejected. A model that no configured provider offers answers 409 `session_setting_not_live` and nothing is stored.
             reasoning:
               type: object
               properties:
                 effort:
+                  description: "`null` clears the stored effort back to the agent's default."
                   oneOf:
                     - $ref: "#/components/schemas/ReasoningEffort"
                     - type: "null"
@@ -4308,6 +4374,14 @@ components:
               additionalProperties:
                 type: string
             - type: "null"
+          description: Replaces the whole metadata map (OpenAI-compatible). Concurrent writers can drop each other's keys; use `metadata_merge` to change single keys.
+        metadata_merge:
+          type: object
+          additionalProperties:
+            oneOf:
+              - type: string
+              - type: "null"
+          description: "Agentry extension. Sets the given keys and leaves the others; a `null` value deletes the key. The merge is atomic in the store, so concurrent merges of different keys both survive. Applied after `metadata` when both are sent."
     Turn:
       type: object
       properties:
@@ -4764,11 +4838,12 @@ components:
             $ref: "#/components/schemas/InputMessage"
         model:
           type: string
-          description: Switch the session model from the next model step, before this message is queued.
+          description: Switch the session model from the next model step, before this message is queued. A model that no configured provider offers answers 409 `session_setting_not_live` and the message is not sent.
         reasoning:
           type: object
           properties:
             effort:
+              description: "`null` clears the stored effort back to the agent's default."
               oneOf:
                 - $ref: "#/components/schemas/ReasoningEffort"
                 - type: "null"

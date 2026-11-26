@@ -92,7 +92,15 @@ export function applySessionUpdate(config: SessionConfig, params: UpdateSessionP
   if (patch?.service_tier !== undefined) agent = { ...agent, updated_at: now, service_tier: patch.service_tier }
   if (patch?.reasoning !== undefined) {
     const effort = patch.reasoning.effort
-    agent = { ...agent, updated_at: now, reasoning: { ...agent.reasoning, ...(effort === undefined ? {} : { effort }) } }
+    if (effort === null) {
+      // `effort: null` clears the stored effort back to the agent's default.
+      const { reasoning: _cleared, ...without } = agent
+      agent = { ...without, updated_at: now }
+    } else if (effort !== undefined) {
+      agent = { ...agent, updated_at: now, reasoning: { ...agent.reasoning, effort } }
+    } else {
+      agent = { ...agent, updated_at: now }
+    }
   }
   return {
     ...config,
