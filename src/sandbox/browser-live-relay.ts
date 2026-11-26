@@ -8,9 +8,19 @@
  * - `{"type":"idle","reason":"not_started"}` while no browser (or no page) is there;
  *   `"reason":"no_browser"` when the sandbox has no Playwright MCP at all (its image lacks the browser).
  *
- * Read-only: it never sends input to the page. Each frame is acknowledged
- * only after `AGENTRY_LIVE_INTERVAL_MS`, so Chromium sends at most one frame
- * per interval. Closing stdin ends it.
+ * Each frame is acknowledged only after `AGENTRY_LIVE_INTERVAL_MS`, so
+ * Chromium sends at most one frame per interval; a frame byte-identical to the
+ * one before is not written. Closing stdin ends it.
+ *
+ * Input (take-over): stdin takes JSON lines (`RELAY_COMMAND_SOURCE`):
+ * `{"type":"input","commands":[{"method","params"}]}` runs the commands on the
+ * page it shows, only `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`,
+ * `Input.insertText` and `Emulation.setDeviceMetricsOverride`; and
+ * `{"type":"control","on":false,"resized":true,"restore":{"width","height"}}`
+ * puts the page back to the size it had before the user's resize when they
+ * hand control back (clearing the override instead would drop Playwright's
+ * viewport too). Anything else is ignored, so stdin never
+ * becomes a general DevTools channel.
  *
  * Configuration (environment): `AGENTRY_LIVE_CDP_PORT` (required),
  * `AGENTRY_LIVE_QUALITY`, `AGENTRY_LIVE_MAX_WIDTH`, `AGENTRY_LIVE_MAX_HEIGHT`,
@@ -25,6 +35,33 @@ export const RELAY_ENV = {
   maxHeight: 'AGENTRY_LIVE_MAX_HEIGHT',
   intervalMs: 'AGENTRY_LIVE_INTERVAL_MS',
 } as const
+
+/**
+ * The relay's stdin command parser, as JavaScript source (it is part of the relay program and tested on its
+ * own): `relayCommands(line)` returns the CDP commands to run on the shown page, never anything outside the
+ * allowed methods, at most 100 a line.
+ */
+export const RELAY_COMMAND_SOURCE = String.raw`
+function relayCommands(line) {
+  let msg
+  try { msg = JSON.parse(line) } catch { return [] }
+  if (!msg || typeof msg !== 'object') return []
+  if (msg.type === 'control') {
+    if (msg.on !== false || msg.resized !== true) return []
+    const r = msg.restore
+    if (r && Number.isInteger(r.width) && Number.isInteger(r.height) && r.width > 0 && r.height > 0) {
+      return [{ method: 'Emulation.setDeviceMetricsOverride', params: { width: r.width, height: r.height, deviceScaleFactor: 1, mobile: false } }]
+    }
+    return [{ method: 'Emulation.clearDeviceMetricsOverride', params: {} }]
+  }
+  if (msg.type !== 'input' || !Array.isArray(msg.commands)) return []
+  const allowed = ['Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'Emulation.setDeviceMetricsOverride']
+  return msg.commands
+    .filter((c) => c && typeof c === 'object' && allowed.includes(c.method) && c.params && typeof c.params === 'object' && !Array.isArray(c.params))
+    .slice(0, 100)
+    .map((c) => ({ method: c.method, params: c.params }))
+}
+`
 
 /** The relay program (plain JavaScript for Node 22 or later: global `fetch` and `WebSocket`). */
 export const BROWSER_LIVE_RELAY_SCRIPT = String.raw`
@@ -41,6 +78,19 @@ const idle = () => { if (live !== false) { live = false; out({ type: 'idle', rea
 const fs = require('node:fs')
 const path = require('node:path')
 const hasBrowser = () => (env.PATH || '/usr/local/bin:/usr/bin:/bin').split(':').some((dir) => { try { fs.accessSync(path.join(dir, 'playwright-mcp'), fs.constants.X_OK); return true } catch { return false } })
+${RELAY_COMMAND_SOURCE}
+let run = undefined
+let inbuf = ''
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', (chunk) => {
+  inbuf += chunk
+  let at
+  while ((at = inbuf.indexOf('\n')) >= 0) {
+    const line = inbuf.slice(0, at)
+    inbuf = inbuf.slice(at + 1)
+    for (const c of relayCommands(line)) if (run) run(c)
+  }
+})
 process.stdin.on('end', () => { process.exit(0) })
 process.stdin.resume()
 
@@ -64,6 +114,8 @@ async function watch() {
   let seq = 0
   let active = undefined
   let chain = Promise.resolve()
+  let lastData = ''
+  run = (c) => { if (active) send(c.method, c.params, active.sessionId).catch(() => {}) }
   const newest = () => { let best; for (const p of pages.values()) if (!best || p.seq > best.seq) best = p; return best }
   const follow = () => {
     chain = chain.then(async () => {
@@ -73,6 +125,7 @@ async function watch() {
       if (!want) { idle(); return }
       const { sessionId } = await send('Target.attachToTarget', { targetId: want.targetId, flatten: true })
       active = { targetId: want.targetId, sessionId }
+      lastData = ''
       await send('Page.startScreencast', { format: 'jpeg', quality, maxWidth, maxHeight, everyNthFrame: 1 }, sessionId)
     }).catch(() => {})
   }
@@ -109,11 +162,13 @@ async function watch() {
         if (!active || session !== active.sessionId) return
         const page = pages.get(active.targetId) || {}
         const meta = params.metadata || {}
+        if (params.data === lastData) return
+        lastData = params.data
         live = true
         out({ type: 'frame', data: params.data, url: page.url || '', title: page.title || '', width: meta.deviceWidth, height: meta.deviceHeight, ts: Date.now() })
       }
     }
-    ws.onclose = () => { for (const p of pending.values()) p.reject(new Error('closed')); pending.clear(); resolve() }
+    ws.onclose = () => { run = undefined; for (const p of pending.values()) p.reject(new Error('closed')); pending.clear(); resolve() }
     ws.onerror = () => {}
   })
 }

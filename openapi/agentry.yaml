@@ -2574,8 +2574,13 @@ paths:
         the page the agent last opened or navigated (Chrome DevTools on the sandbox's loopback). It starts
         with the first reader, is shared by every reader of the session, and stops about 10 s after the
         last one leaves, or when the environment is stopped, reset or deleted (the stream then ends).
-        Frames are capped at `browser.liveFps` a second (default 4). Events:
+        Frames are capped at `browser.liveFps` a second (default 10, at most 15); a frame identical to the
+        last one is not sent. Events:
         - `frame`: `{ data: base64 JPEG, url, title, width, height, timestamp }` (a new reader first gets the last frame).
+          `width` and `height` are the page's size in CSS pixels; input coordinates use the same units.
+        - `control`: `{ controlled: true, since }` when the user takes control (also sent to a new reader while
+          they have it), `{ controlled: false, reason }` when it ends: `released`, `idle` (5 minutes without input),
+          `left` (no reader for a few seconds), `taken` (another tab took it), `closed` (the view ended).
         - `idle`: `{ reason }`, nothing to show: `not_started` (no browser open yet, or the sandbox is not running),
           `no_browser` (the sandbox image has no browser; use the built-in Web and browser template), `browser_off`
           (the agent's `browser` is off), `not_sandbox` (the chat does not run in a sandbox).
@@ -2587,6 +2592,102 @@ paths:
             text/event-stream:
               schema: { type: string }
         "404": { description: Session not found. }
+  /v1/agents/sessions/{session_id}/browser/control:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: session_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: controlSessionBrowser
+      summary: "Take control of the chat's browser from the agent, or hand it back"
+      description: |
+        `take` needs a live view of the session open (`GET .../browser/live`) on a sandbox chat whose agent has
+        the browser. While the user has control the agent's browser tool calls wait; a call that waited and
+        any browser action after the hand-back (other than a snapshot, screenshot, console or network read)
+        answer "The user used the browser and handed it back; look at the page again before continuing." until
+        the agent looks again. Only one grant at a time: another `take` answers 409 `browser_control_held`
+        unless `force` is true. Control ends after 5 minutes without input, a few seconds after the last live
+        view closes, or with the view. `release` with a `control_id` ends only that grant; releasing with no
+        control is fine.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [take, release] }
+                force: { type: boolean, description: "take: take over a grant held by another tab." }
+                control_id: { type: string, description: "release: the grant to end." }
+      responses:
+        "200":
+          description: The control state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, session_id, controlled]
+                properties:
+                  object: { const: session.browser_control }
+                  session_id: { type: string }
+                  controlled: { type: boolean }
+                  control_id: { type: string, description: "take: pass it to `input` and `release`." }
+                  since: { type: integer, description: "take: when control started (ms since the epoch)." }
+                  idle_timeout_seconds: { type: integer }
+        "400": { description: "`action` is not take or release." }
+        "404": { description: Session not found. }
+        "409": { description: "`browser_unavailable` (no browser in this chat), `browser_not_live` (no live view open), `browser_control_held`." }
+  /v1/agents/sessions/{session_id}/browser/input:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: session_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: sendSessionBrowserInput
+      summary: "Send the user's mouse, keyboard and page-size input to the browser while they have control"
+      description: |
+        At most 50 events a request and 120 a second per session. Coordinates are the page's CSS pixels (the
+        live frame's `width` and `height`). Events become Chrome DevTools input commands, sent through the relay
+        inside the sandbox; the DevTools port is never exposed. Modifier bits: Alt 1, Ctrl 2, Meta 4, Shift 8.
+        - `{ type: mouse, action: move|down|up, x, y, button?: left|middle|right, buttons?, click_count?, modifiers? }`
+        - `{ type: wheel, x, y, delta_x, delta_y, modifiers? }`
+        - `{ type: key, action: down|up, key, code?, key_code?, text?, modifiers? }` (`text` makes the key type it, for example `"\r"` for Enter)
+        - `{ type: text, text }` (inserted as typed text, up to 2000 characters)
+        - `{ type: resize, width, height }` (the page's size, 320-1920 by 240-1440; restored on hand-back)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [control_id, events]
+              properties:
+                control_id: { type: string }
+                events:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items: { type: object }
+      responses:
+        "200":
+          description: Sent.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, accepted]
+                properties:
+                  object: { const: session.browser_input }
+                  accepted: { type: integer }
+        "400": { description: Malformed events. }
+        "404": { description: Session not found. }
+        "409": { description: "`not_in_control`: take control first (or another tab took it)." }
+        "429": { description: "`input_rate_limited`." }
   /v1/agents/sessions/{session_id}/artifacts:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"

@@ -50,6 +50,8 @@ import { SkillInstallApi } from './skills/routes.ts'
 import { builtinTemplate, BUILTIN_TEMPLATES, isBuiltinTemplateId } from './environment/builtin-templates.ts'
 import { TerminalError, TerminalHub } from './sandbox/terminals.ts'
 import { BrowserLiveError, BrowserLiveHub, startRelay, type LiveEvent, type RelayProcess } from './sandbox/browser-live.ts'
+import { parseInputEvents } from './sandbox/browser-input.ts'
+import { browserLookNote, browserToolGate, type BrowserGateDecision } from './sandbox/browser-control.ts'
 import { forgetWorkspaceAlias, workspaceOf } from './sandbox/workspace-alias.ts'
 import { DeliverablesCache } from './history/deliverables-cache.ts'
 import type { DeliverableEntry } from './history/deliverables.ts'
@@ -179,7 +181,7 @@ export interface GatewayOptions {
   sandboxHasBrowser?: (envd: EnvdClient) => Promise<boolean>
   /** The sandbox stdio bridge program (tests); default `lib/sandbox-stdio-bridge.js`. */
   browserBridgePath?: string
-  /** Most frames a second the live browser view sends (`browser.liveFps`, default 4). */
+  /** Most frames a second the live browser view sends (`browser.liveFps`, default 10, at most 15). */
   browserLiveFps?: number
   /** Starts the live-view relay in a sandbox (tests); default `startRelay`. */
   startBrowserRelay?: (envd: EnvdClient, port: number, intervalMs: number) => RelayProcess
@@ -369,7 +371,7 @@ export class AgentsGateway {
       }
     })
     this.browserBridgePath = options.browserBridgePath
-    this.browserLive = new BrowserLiveHub({ minIntervalMs: Math.round(1000 / Math.min(10, Math.max(1, options.browserLiveFps ?? 4))) })
+    this.browserLive = new BrowserLiveHub({ minIntervalMs: Math.round(1000 / Math.min(15, Math.max(1, options.browserLiveFps ?? 10))) })
     this.startBrowserRelay = options.startBrowserRelay ?? startRelay
     this.skillInstallApi = new SkillInstallApi(this.installDeps(), options.skillsGithub)
     const skillsApi = new SkillsApi({
@@ -472,6 +474,8 @@ export class AgentsGateway {
       { method: 'GET', pattern: '/agents/sessions/:session_id/renders/pdf/*path', handler: (req, res, _url, params, p) => renderOfficePdf(this.officeRender, req, res, p.owner, routeParam(params, 'session_id'), params['path'] ?? '') },
       { method: 'GET', pattern: '/agents/sessions/:session_id/deliverables', handler: (_req, res, _url, params, p) => this.listDeliverables(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/browser/live', handler: (req, res, _url, params, p) => this.streamBrowserLive(req, res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/sessions/:session_id/browser/control', handler: (req, res, _url, params, p) => this.browserControl(req, res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/sessions/:session_id/browser/input', handler: (req, res, _url, params, p) => this.browserInput(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts', handler: (_req, res, _url, params, p) => this.listArtifacts(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id/items', handler: (_req, res, _url, params, p) => this.listSubagentTurnItems(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id', handler: (_req, res, _url, params, p) => this.getSubagentTurn(res, params, p.owner) },
@@ -2587,6 +2591,7 @@ export class AgentsGateway {
       if (res.writableEnded || res.destroyed) return
       if (event.kind === 'frame') writeEvent(res, 'frame', { data: event.data, url: event.url, title: event.title, width: event.width ?? null, height: event.height ?? null, timestamp: event.ts })
       else if (event.kind === 'idle') writeEvent(res, 'idle', { reason: event.reason })
+      else if (event.kind === 'control') writeEvent(res, 'control', event.controlled ? { controlled: true, since: event.since } : { controlled: false, reason: event.reason })
       else res.end()
     }
     let detach: (() => void) | undefined
@@ -2617,6 +2622,76 @@ export class AgentsGateway {
       clearInterval(ping)
       detach?.()
     })
+  }
+
+  /**
+   * `POST /agents/sessions/{id}/browser/control` with `action` `take` (optional `force`) or `release`
+   * (optional `control_id`): the user takes control of the chat's browser from the agent, or hands it back.
+   * Taking needs an open live view of a sandbox chat whose agent has the browser.
+   */
+  private async browserControl(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const sessionId = routeParam(params, 'session_id')
+    const row = await this.requireSession(res, owner, sessionId)
+    if (!row) return
+    const body = await readBody(req)
+    const action = body['action']
+    if (action === 'release') {
+      const controlId = typeof body['control_id'] === 'string' ? body['control_id'] : undefined
+      this.browserLive.releaseControl(owner, sessionId, controlId)
+      json(res, 200, { object: 'session.browser_control', session_id: sessionId, controlled: this.browserLive.controlled(sessionId) })
+      return
+    }
+    if (action !== 'take') {
+      badRequest(res, 'action must be "take" or "release"')
+      return
+    }
+    if (await this.sandboxOfSession(owner, sessionId) === undefined || browserMode(configOf(row).agent, this.browserDefault) === 'off') {
+      json(res, 409, { error: { type: 'invalid_request_error', code: 'browser_unavailable', message: 'This chat has no browser to control.' } })
+      return
+    }
+    try {
+      const grant = this.browserLive.takeControl(owner, sessionId, body['force'] === true)
+      json(res, 200, {
+        object: 'session.browser_control', session_id: sessionId, controlled: true,
+        control_id: grant.controlId, since: grant.since, idle_timeout_seconds: Math.round(grant.idleTimeoutMs / 1000),
+      })
+    } catch (error) {
+      if (!(error instanceof BrowserLiveError)) throw error
+      json(res, error.status, { error: { type: 'invalid_request_error', code: error.code, message: error.message } })
+    }
+  }
+
+  /**
+   * `POST /agents/sessions/{id}/browser/input` with `control_id` and `events` (at most 50): the user's mouse,
+   * wheel, keys, text and page size, in the page's CSS pixels, sent to the page through the relay.
+   */
+  private async browserInput(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const sessionId = routeParam(params, 'session_id')
+    const row = await this.requireSession(res, owner, sessionId)
+    if (!row) return
+    const body = await readBody(req)
+    const events = parseInputEvents(body['events'])
+    if (typeof events === 'string') {
+      badRequest(res, events)
+      return
+    }
+    try {
+      this.browserLive.input(owner, sessionId, typeof body['control_id'] === 'string' ? body['control_id'] : '', events)
+      json(res, 200, { object: 'session.browser_input', accepted: events.length })
+    } catch (error) {
+      if (!(error instanceof BrowserLiveError)) throw error
+      json(res, error.status, { error: { type: 'invalid_request_error', code: error.code, message: error.message } })
+    }
+  }
+
+  /** The pre-execute decision for a browser tool call while the user may have control (`browser-control.ts`). */
+  browserToolGate(sessionId: string, name: string, signal?: AbortSignal): Promise<BrowserGateDecision> {
+    return browserToolGate(this.browserLive, sessionId, name, signal)
+  }
+
+  /** The note to put in front of a browser look's result right after a hand-back, if any. */
+  browserLookNote(sessionId: string, name: string, isError: boolean): string | undefined {
+    return browserLookNote(this.browserLive, sessionId, name, isError)
   }
 
   private async terminalCall(req: IncomingMessage | undefined, res: ServerResponse, params: Record<string, string>, owner: OwnerId, action: 'input' | 'resize' | 'close'): Promise<void> {

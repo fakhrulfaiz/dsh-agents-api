@@ -199,7 +199,7 @@ export interface Config extends RuntimeConfigInput {
   browser?: {
     /** What agents whose `browser` field is absent or null get: `auto` (when the chat's sandbox has the browser), `on` or `off`; `true`/`false` mean on/off (default `auto`). */
     default?: 'auto' | 'on' | 'off' | boolean
-    /** Most frames a second the live browser view (`/agents/sessions/{id}/browser/live`) sends, 1 to 10 (default 4). */
+    /** Most frames a second the live browser view (`/agents/sessions/{id}/browser/live`) sends, 1 to 15 (default 10). */
     liveFps?: number
   }
   /** Slash-command catalog served by `GET /agents/commands`. */
@@ -290,8 +290,8 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
   }).default({ cacheTtlSeconds: 60, allow: [...DEFAULT_COMMANDS_ALLOW] }),
   browser: z.object({
     default: z.union([z.boolean(), z.const('auto'), z.const('on'), z.const('off')]).default('auto'),
-    liveFps: z.number().default(4),
-  }).default({ default: 'auto', liveFps: 4 }),
+    liveFps: z.number().default(10),
+  }).default({ default: 'auto', liveFps: 10 }),
   composio: z.object({
     serverLabel: z.string().default('composio'),
     approvalVerbs: z.array(z.string()).default([...DEFAULT_APPROVAL_VERBS]),
@@ -526,6 +526,23 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     const id = exec.agent?.session?.id
     if (id !== undefined) await gateway.changesSettled(String(id))
     return next()
+  }) as never)
+  // While the user has control of a chat's browser (live view take-over), its browser tools wait; after a
+  // hand-back the agent is told to look at the page again (src/sandbox/browser-control.ts).
+  ctx.on('tools/pre-execute', (async (exec: { name: string; signal?: AbortSignal; agent?: { session?: { id?: unknown } } }, next: () => Promise<unknown>) => {
+    const id = exec.agent?.session?.id
+    if (id === undefined || !exec.name.startsWith('mcp__browser__')) return next()
+    const decision = await gateway.browserToolGate(String(id), exec.name, exec.signal)
+    return decision.kind === 'allow' ? next() : decision
+  }) as never)
+  ctx.on('tools/post-execute', (async (exec: { name: string; agent?: { session?: { id?: unknown } } }, result: { isError?: boolean; content?: ReadonlyArray<{ type?: string }> }, next: () => Promise<{ kind: string; content?: unknown }>) => {
+    const decision = await next()
+    const id = exec.agent?.session?.id
+    if (id === undefined || decision.kind !== 'accept' || !exec.name.startsWith('mcp__browser__')) return decision
+    const note = gateway.browserLookNote(String(id), exec.name, result.isError === true)
+    if (note === undefined) return decision
+    const content = Array.isArray(decision.content) ? decision.content as unknown[] : [...(result.content ?? [])]
+    return { ...decision, content: [{ type: 'text', text: note }, ...content] }
   }) as never)
   ctx.on('commands/change', () => {
     gateway.invalidateCommands()

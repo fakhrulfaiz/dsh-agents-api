@@ -52,6 +52,8 @@ async function start() {
   await store.sessions.insert(row('sess_off', sandboxEnv, false))
   await store.sessions.insert(row('sess_auto', sandboxEnv, null))
   await store.sessions.insert(row('sess_local', { type: 'local' } as unknown as SessionConfig['environment'], true))
+  await store.ensureOwner(ownerId('other'))
+  await store.sessions.insert({ ...row('sess_theirs', sandboxEnv, true), ownerId: ownerId('other') })
   const registry = new SandboxRegistry('local')
   registry.register(createLocalProvider(join(tmpdir(), 'agentry-live-spec-envs')))
   const envd = { fake: 'envd' }
@@ -64,7 +66,7 @@ async function start() {
   const server = createServer((req, res) => { void api.handle(req, res) })
   servers.push(server)
   await new Promise<void>((resolve) => { server.listen(0, '127.0.0.1', resolve) })
-  return { base: `http://127.0.0.1:${String((server.address() as AddressInfo).port)}/v1/agents/sessions`, relays, startBrowserRelay, envd }
+  return { base: `http://127.0.0.1:${String((server.address() as AddressInfo).port)}/v1/agents/sessions`, relays, startBrowserRelay, envd, api }
 }
 
 /** Reads SSE events until `count` arrive, then aborts the request. */
@@ -136,5 +138,94 @@ describe('browser live route', () => {
   it('hides unknown sessions', async () => {
     const { base } = await start()
     expect((await fetch(`${base}/sess_nope/browser/live`)).status).toBe(404)
+  })
+})
+
+/** Keeps a live view open, collecting its events, until `close()`. */
+async function watch(url: string) {
+  const abort = new AbortController()
+  const res = await fetch(url, { signal: abort.signal })
+  const got: { event: string; data: unknown }[] = []
+  const reader = res.body!.getReader()
+  void (async () => {
+    let text = ''
+    for (;;) {
+      const { value, done } = await reader.read().catch(() => ({ value: undefined, done: true }))
+      if (done) return
+      text += new TextDecoder().decode(value)
+      let at: number
+      while ((at = text.indexOf('\n\n')) >= 0) {
+        const block = text.slice(0, at)
+        text = text.slice(at + 2)
+        const event = /^event: (.*)$/m.exec(block)?.[1]
+        const data = /^data: (.*)$/m.exec(block)?.[1]
+        if (event && data) got.push({ event, data: JSON.parse(data) })
+      }
+    }
+  })()
+  return { got, close: () => { abort.abort() } }
+}
+
+const post = (url: string, body: unknown) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+
+describe('browser take-over routes', () => {
+  it('takes control of a watched browser, sends input through the relay, and hands it back', async () => {
+    const { base, relays } = await start()
+    const view = await watch(`${base}/sess_on/browser/live`)
+    await vi.waitFor(() => { expect(relays).toHaveLength(1) })
+    const writes: string[] = []
+    relays[0]!.write = ((chunk: unknown) => { writes.push(String(chunk)); return true }) as never
+    const took = await post(`${base}/sess_on/browser/control`, { action: 'take' })
+    expect(took.status).toBe(200)
+    const grant = await took.json() as { control_id: string; controlled: boolean; idle_timeout_seconds: number }
+    expect(grant).toMatchObject({ object: 'session.browser_control', session_id: 'sess_on', controlled: true, idle_timeout_seconds: 300 })
+    await vi.waitFor(() => { expect(view.got.at(-1)).toMatchObject({ event: 'control', data: { controlled: true } }) })
+
+    // A second tab cannot take it without force.
+    expect((await post(`${base}/sess_on/browser/control`, { action: 'take' })).status).toBe(409)
+
+    const input = await post(`${base}/sess_on/browser/input`, { control_id: grant.control_id, events: [{ type: 'mouse', action: 'down', x: 12, y: 34, button: 'left' }, { type: 'text', text: 'hi' }] })
+    expect(input.status).toBe(200)
+    expect(await input.json()).toEqual({ object: 'session.browser_input', accepted: 2 })
+    expect(JSON.parse(writes[0]!)).toEqual({ type: 'input', commands: [
+      { method: 'Input.dispatchMouseEvent', params: { type: 'mousePressed', x: 12, y: 34, button: 'left', buttons: 1, clickCount: 1, modifiers: 0 } },
+      { method: 'Input.insertText', params: { text: 'hi' } },
+    ] })
+    expect((await post(`${base}/sess_on/browser/input`, { control_id: grant.control_id, events: [{ type: 'eval' }] })).status).toBe(400)
+    expect((await post(`${base}/sess_on/browser/input`, { control_id: 'bctl_wrong', events: [{ type: 'text', text: 'x' }] })).status).toBe(409)
+
+    const released = await post(`${base}/sess_on/browser/control`, { action: 'release', control_id: grant.control_id })
+    expect(await released.json()).toMatchObject({ controlled: false })
+    await vi.waitFor(() => { expect(view.got.at(-1)).toEqual({ event: 'control', data: { controlled: false, reason: 'released' } }) })
+    expect((await post(`${base}/sess_on/browser/input`, { control_id: grant.control_id, events: [{ type: 'text', text: 'x' }] })).status).toBe(409)
+    view.close()
+  })
+
+  it('blocks the agent\'s browser tools while the user has control', async () => {
+    const { base, relays, api } = await start()
+    const view = await watch(`${base}/sess_on/browser/live`)
+    await vi.waitFor(() => { expect(relays).toHaveLength(1) })
+    const grant = await (await post(`${base}/sess_on/browser/control`, { action: 'take' })).json() as { control_id: string }
+    await post(`${base}/sess_on/browser/input`, { control_id: grant.control_id, events: [{ type: 'key', action: 'down', key: 'Enter', text: '\r', key_code: 13 }] })
+    let decided: unknown
+    const gate = api.browserToolGate('sess_on', 'mcp__browser__browser_click').then((d) => { decided = d })
+    expect(await api.browserToolGate('sess_on', 'mcp__composio__X')).toEqual({ kind: 'allow' })
+    await new Promise(r => setTimeout(r, 30))
+    expect(decided).toBeUndefined()
+    await post(`${base}/sess_on/browser/control`, { action: 'release', control_id: grant.control_id })
+    await gate
+    expect(decided).toEqual({ kind: 'deny', reason: 'The user used the browser and handed it back; look at the page again before continuing.' })
+    view.close()
+  })
+
+  it('needs an open view and a sandbox chat with the browser, and is owner-scoped', async () => {
+    const { base } = await start()
+    expect((await post(`${base}/sess_on/browser/control`, { action: 'take' })).status).toBe(409)
+    expect(await (await post(`${base}/sess_off/browser/control`, { action: 'take' })).json()).toMatchObject({ error: { code: 'browser_unavailable' } })
+    expect(await (await post(`${base}/sess_local/browser/control`, { action: 'take' })).json()).toMatchObject({ error: { code: 'browser_unavailable' } })
+    expect((await post(`${base}/sess_on/browser/control`, { action: 'grab' })).status).toBe(400)
+    expect((await post(`${base}/sess_theirs/browser/control`, { action: 'take' })).status).toBe(404)
+    expect((await post(`${base}/sess_theirs/browser/input`, { control_id: 'x', events: [{ type: 'text', text: 'x' }] })).status).toBe(404)
+    expect((await post(`${base}/sess_on/browser/input`, { control_id: 'x', events: [{ type: 'text', text: 'x' }] })).status).toBe(409)
   })
 })
