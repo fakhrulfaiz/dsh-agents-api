@@ -1,9 +1,11 @@
 /**
- * Plain tools for the connected-app actions people ask for most (reading Gmail and Google Calendar), so the agent
+ * Plain tools for the connected-app actions people ask for most (Gmail and Google Calendar), so the agent
  * does not have to search Composio's catalogue, read schemas and choose fields each time. Each one runs one Composio
  * tool through `COMPOSIO_MULTI_EXECUTE_TOOL` with light defaults fixed here (metadata only, ten newest by default),
  * as a nested call through the normal tool pipeline: the agent's app grants, the write approvals and the guards that
- * apply to that Composio tool apply to this call too. Every other app still uses the search-and-run tools.
+ * apply to that Composio tool apply to this call too. Writes (drafts, send, calendar changes) are nested calls like the
+ * rest, so the same approval rule that asks before a write (`composio.approvalVerbs`) asks before them. Every other app
+ * still uses the search-and-run tools.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
@@ -18,6 +20,8 @@ interface AppTool {
   description: string
   properties: Record<string, unknown>
   required?: string[]
+  /** The Composio tool writes on the user's behalf; the nested call asks for approval first. */
+  write?: boolean
   /** The Composio tool's arguments for the model's input. */
   args(input: Args): Record<string, unknown>
 }
@@ -32,6 +36,12 @@ const isoTime = (v: unknown): string | undefined => {
   if (raw === undefined) return undefined
   const at = Date.parse(raw)
   return Number.isNaN(at) ? raw : new Date(at).toISOString()
+}
+/** Addresses from a comma- or semicolon-separated string or a list. */
+const addresses = (v: unknown): string[] | undefined => {
+  const list = Array.isArray(v) ? v : typeof v === 'string' ? v.split(/[,;]/u) : []
+  const out = list.map((x) => String(x).trim()).filter(Boolean)
+  return out.length > 0 ? out : undefined
 }
 const ACCOUNT = { account: { type: 'string', description: 'Connected account id, only when the user has several accounts of this app.' } }
 
@@ -86,6 +96,111 @@ export const APP_TOOLS: readonly AppTool[] = [
     description: 'List the user\'s Google calendars with each one\'s id.',
     properties: {},
     args: () => ({}),
+  },
+  {
+    name: 'gmail_create_draft',
+    slug: 'GMAIL_CREATE_EMAIL_DRAFT',
+    write: true,
+    description: 'Create a Gmail draft without sending it. The user is asked to approve first. For a reply, read the thread first and pass its thread_id and the same subject. Each call makes a separate draft; do not call it twice for one email.',
+    properties: {
+      to: { type: 'string', description: 'The recipient\'s address; several separated by commas.' },
+      subject: { type: 'string' },
+      body: { type: 'string', description: 'The text of the email.' },
+      thread_id: { type: 'string', description: 'For a reply: the conversation\'s thread id.' },
+    },
+    required: ['to', 'subject', 'body'],
+    args: (i) => {
+      const [first, ...rest] = addresses(i['to'] ?? i['recipient_email']) ?? []
+      return { user_id: 'me', recipient_email: first ?? '', subject: String(i['subject'] ?? ''), body: String(i['body'] ?? ''), ...(rest.length > 0 ? { extra_recipients: rest } : {}), ...(str(i['thread_id']) ? { thread_id: str(i['thread_id']) } : {}) }
+    },
+  },
+  {
+    name: 'gmail_send_email',
+    slug: 'GMAIL_SEND_EMAIL',
+    write: true,
+    description: 'Send an email now from the user\'s Gmail. The user is asked to approve first. Use it only when the user asked to send; to prepare an email use gmail_create_draft.',
+    properties: {
+      to: { type: 'string', description: 'The recipient\'s address; several separated by commas.' },
+      subject: { type: 'string' },
+      body: { type: 'string', description: 'The text of the email.' },
+      cc: { type: 'string', description: 'Addresses to copy, separated by commas.' },
+    },
+    required: ['to', 'subject', 'body'],
+    args: (i) => {
+      const [first, ...rest] = addresses(i['to'] ?? i['recipient_email']) ?? []
+      const cc = addresses(i['cc'])
+      return { user_id: 'me', recipient_email: first ?? '', subject: String(i['subject'] ?? ''), body: String(i['body'] ?? ''), ...(rest.length > 0 ? { extra_recipients: rest } : {}), ...(cc ? { cc } : {}) }
+    },
+  },
+  {
+    name: 'gmail_reply_to_thread',
+    slug: 'GMAIL_REPLY_TO_THREAD',
+    write: true,
+    description: 'Send a reply inside an existing Gmail conversation now. The user is asked to approve first. Use it only when the user asked to send the reply; thread_id comes from gmail_search_emails. To prepare a reply use gmail_create_draft with the thread_id.',
+    properties: {
+      thread_id: { type: 'string', description: 'The thread id.' },
+      body: { type: 'string', description: 'The text of the reply.' },
+      to: { type: 'string', description: 'The recipient\'s address.' },
+    },
+    required: ['thread_id', 'body', 'to'],
+    args: (i) => ({ user_id: 'me', thread_id: str(i['thread_id']) ?? '', message_body: String(i['body'] ?? ''), recipient_email: addresses(i['to'])?.[0] ?? '' }),
+  },
+  {
+    name: 'googlecalendar_create_event',
+    slug: 'GOOGLECALENDAR_CREATE_EVENT',
+    write: true,
+    description: 'Create an event on the user\'s Google Calendar. The user is asked to approve first. start is ISO 8601 (for example 2026-10-28T09:00:00+01:00); give duration_minutes (default 60).',
+    properties: {
+      title: { type: 'string' },
+      start: { type: 'string', description: 'Start time, ISO 8601.' },
+      duration_minutes: { type: 'integer', minimum: 1, description: 'Default 60.' },
+      description: { type: 'string' },
+      location: { type: 'string' },
+      attendees: { type: 'string', description: 'Email addresses to invite, separated by commas.' },
+      calendar_id: { type: 'string', description: 'Default the primary calendar.' },
+      timezone: { type: 'string', description: 'IANA name such as Europe/London, when start has no offset.' },
+    },
+    required: ['title', 'start'],
+    args: (i) => {
+      const minutes = count(i['duration_minutes'], 60, 60 * 24 * 14)
+      const attendees = addresses(i['attendees'])
+      return {
+        calendar_id: str(i['calendar_id']) ?? 'primary', summary: String(i['title'] ?? ''), start_datetime: str(i['start']) ?? '',
+        event_duration_hour: Math.floor(minutes / 60), event_duration_minutes: minutes % 60,
+        ...(str(i['description']) ? { description: str(i['description']) } : {}), ...(str(i['location']) ? { location: str(i['location']) } : {}),
+        ...(attendees ? { attendees } : {}), ...(str(i['timezone']) ? { timezone: str(i['timezone']) } : {}),
+      }
+    },
+  },
+  {
+    name: 'googlecalendar_update_event',
+    slug: 'GOOGLECALENDAR_UPDATE_EVENT',
+    write: true,
+    description: 'Change an existing Google Calendar event; pass only what changes. The user is asked to approve first. event_id comes from googlecalendar_list_events.',
+    properties: {
+      event_id: { type: 'string' },
+      title: { type: 'string' },
+      start: { type: 'string', description: 'New start time, ISO 8601.' },
+      end: { type: 'string', description: 'New end time, ISO 8601.' },
+      description: { type: 'string' },
+      location: { type: 'string' },
+      calendar_id: { type: 'string', description: 'Default the primary calendar.' },
+    },
+    required: ['event_id'],
+    args: (i) => ({
+      calendar_id: str(i['calendar_id']) ?? 'primary', event_id: str(i['event_id']) ?? '',
+      ...(str(i['title']) ? { summary: str(i['title']) } : {}), ...(str(i['start']) ? { start_datetime: str(i['start']) } : {}), ...(str(i['end']) ? { end_datetime: str(i['end']) } : {}),
+      ...(str(i['description']) ? { description: str(i['description']) } : {}), ...(str(i['location']) ? { location: str(i['location']) } : {}),
+    }),
+  },
+  {
+    name: 'googlecalendar_delete_event',
+    slug: 'GOOGLECALENDAR_DELETE_EVENT',
+    write: true,
+    description: 'Delete an event from the user\'s Google Calendar. The user is asked to approve first. event_id comes from googlecalendar_list_events.',
+    properties: { event_id: { type: 'string' }, calendar_id: { type: 'string', description: 'Default the primary calendar.' } },
+    required: ['event_id'],
+    args: (i) => ({ calendar_id: str(i['calendar_id']) ?? 'primary', event_id: str(i['event_id']) ?? '' }),
   },
 ]
 

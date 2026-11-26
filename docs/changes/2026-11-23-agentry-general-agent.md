@@ -14,7 +14,7 @@ Spec: `~/code/agentry-web/docs/superpowers/specs/2026-11-23-agentry-general-agen
 ## Known limits
 
 - `office-*` skills come from DSH's global skill layer and are always on; making them selectable needs an upstream per-scope skill filter in `dsh-skill`.
-- `COMPOSIO_SEARCH_TOOLS` results are not filtered by grants (every executed call is).
+- `COMPOSIO_SEARCH_TOOLS` results are trimmed to the grants from 2026-11-26 by a generic JSON filter written without a recorded live answer; an answer in an unexpected shape passes through unfiltered (every executed call is guarded either way).
 - Write detection uses slug verbs (`composio.approvalVerbs`) because live slug discovery was not possible: the profile's `COMPOSIO_API_KEY` was rejected by Composio on 2026-11-23. Add exceptions to `composio.approvalSlugs`.
 - Grants are read when a session starts or resumes; an `apps` edit applies to the next session.
 - The connect-request parser was written against representative shapes; no live `COMPOSIO_MANAGE_CONNECTIONS` output was recorded.

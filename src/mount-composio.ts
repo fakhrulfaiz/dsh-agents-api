@@ -6,11 +6,11 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import { checkComposioCall, isWriteSlug, slugsInCall, type AgentAppGrants } from './composio-grants.ts'
+import { checkComposioCall, filterSearchResult, isWriteSlug, slugsInCall, type AgentAppGrants } from './composio-grants.ts'
 
 export const COMPOSIO_GUIDANCE_SECTION = 'agents-api:composio-guidance'
 export const COMPOSIO_GUIDANCE_ORDER = 12
-export const COMPOSIO_GUIDANCE_TEXT = 'Connected apps (Gmail, Calendar, Slack, GitHub, Notion and more) are reached through the Composio tools: use COMPOSIO_SEARCH_TOOLS to find the right tool, then run it with COMPOSIO_MULTI_EXECUTE_TOOL. Search once per task, not before every call: reuse the tool names and input shapes from earlier results in this conversation, and put independent actions in one COMPOSIO_MULTI_EXECUTE_TOOL call. For Gmail and Google Calendar use the direct tools instead of searching: gmail_search_emails, gmail_read_email, gmail_read_email_thread, googlecalendar_list_events and googlecalendar_list_calendars; they return trimmed results. Keep reads small: for requests like check, list or find, fetch only the first page of the newest items (about 10 to 20) with the lightest fields the tool offers (for email, metadata and no bodies), answer from that, say if there may be more, and offer to continue. Do not page through everything, and do not run code in COMPOSIO_REMOTE_WORKBENCH, unless the user asks for everything or the answer needs it; advice in a search result to fetch complete results applies only when the user wants a complete result. Connected apps: never write connection or sign-in URLs in your reply; the user sees a Connect button. If an app call fails with 401, USER_NOT_LOGGED_IN, or no connected account, call COMPOSIO_MANAGE_CONNECTIONS for that app so the user can reconnect. If it fails with 403 insufficient scope, tell the user which permission is missing instead of retrying.'
+export const COMPOSIO_GUIDANCE_TEXT = 'Connected apps (Gmail, Calendar, Slack, GitHub, Notion and more) are reached through the Composio tools: use COMPOSIO_SEARCH_TOOLS to find the right tool, then run it with COMPOSIO_MULTI_EXECUTE_TOOL. Search once per task, not before every call: reuse the tool names and input shapes from earlier results in this conversation, and put independent actions in one COMPOSIO_MULTI_EXECUTE_TOOL call. For Gmail and Google Calendar use the direct tools instead of searching: gmail_search_emails, gmail_read_email, gmail_read_email_thread, googlecalendar_list_events and googlecalendar_list_calendars for reading, and gmail_create_draft, gmail_send_email, gmail_reply_to_thread, googlecalendar_create_event, googlecalendar_update_event and googlecalendar_delete_event for writing (the user is asked to approve writes first); they return trimmed results. Keep reads small: for requests like check, list or find, fetch only the first page of the newest items (about 10 to 20) with the lightest fields the tool offers (for email, metadata and no bodies), answer from that, say if there may be more, and offer to continue. Do not page through everything, and do not run code in COMPOSIO_REMOTE_WORKBENCH, unless the user asks for everything or the answer needs it; advice in a search result to fetch complete results applies only when the user wants a complete result. Connected apps: never write connection or sign-in URLs in your reply; the user sees a Connect button. If an app call fails with 401, USER_NOT_LOGGED_IN, or no connected account, call COMPOSIO_MANAGE_CONNECTIONS for that app so the user can reconnect. If it fails with 403 insufficient scope, tell the user which permission is missing instead of retrying.'
 
 /** Words in a tool slug that mean the call writes on the user's behalf. */
 export const DEFAULT_APPROVAL_VERBS: readonly string[] = ['SEND', 'REPLY', 'FORWARD', 'CREATE', 'UPDATE', 'DELETE', 'TRASH', 'REMOVE', 'MOVE', 'MERGE', 'CLOSE', 'SHARE', 'UPLOAD', 'INSERT', 'MODIFY', 'PATCH', 'PUT', 'POST', 'ADD', 'ARCHIVE', 'INVITE', 'ACCEPT', 'DECLINE', 'PUBLISH', 'EXECUTE', 'RUN', 'STAR', 'LABEL']
@@ -46,6 +46,18 @@ export function mountComposio(agentCtx: Context, deps: ComposioMountDeps): void 
       return { kind: 'ask' as const, reason: text, displayReason: { en: text } }
     }
     agentCtx.on('tools/pre-execute', approve as never)
+  }
+  if (deps.grants !== null && typeof (agentCtx as { on?: unknown }).on === 'function') {
+    const trim = async (exec: { name: string }, result: { isError?: boolean; content?: ReadonlyArray<{ type?: string; text?: string }> }, next: () => Promise<{ kind: string }>): Promise<unknown> => {
+      const decision = await next()
+      if (exec.name !== `${prefix}COMPOSIO_SEARCH_TOOLS` || result.isError === true || decision.kind !== 'accept') return decision
+      const blocks = result.content ?? []
+      const text = blocks.filter(b => b.type === 'text' && typeof b.text === 'string').map(b => b.text).join('')
+      const trimmed = filterSearchResult(text, deps.grants)
+      if (trimmed === undefined) return decision
+      return { ...decision, content: [{ type: 'text', text: trimmed }, ...blocks.filter(b => b.type !== 'text')] }
+    }
+    agentCtx.on('tools/post-execute', trim as never)
   }
   if (agentCtx.get('systemPrompt') === undefined) return
   agentCtx.systemPrompt.section({
