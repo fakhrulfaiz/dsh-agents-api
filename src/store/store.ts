@@ -149,6 +149,13 @@ export interface FileCollection {
    */
   getMany(owner: OwnerId, ids: readonly string[]): Promise<FileRow[]>
   /**
+   * Page of the owner's files, newest first (`created_at`, then `id`).
+   * @param owner - calling principal.
+   * @param q - `after` is the last id of the previous page (an id the owner does not hold starts from the top); `limit` is the page size; `status` keeps one status.
+   * @returns up to `limit` rows and whether more follow.
+   */
+  list(owner: OwnerId, q: { after?: string; limit: number; status?: FileRow['status'] }): Promise<{ data: FileRow[]; hasMore: boolean }>
+  /**
    * Remove a `staged` row.
    * @param id - file id.
    * @param owner - calling principal.
@@ -431,6 +438,7 @@ function guardFiles(files: FileCollection): FileCollection {
     markAttached: guard(files.markAttached.bind(files)),
     release: guard(files.release.bind(files)),
     listForSession: guard(files.listForSession.bind(files)),
+    list: guard(files.list.bind(files)),
     deleteForSession: guard(files.deleteForSession.bind(files)),
     expireStaged: guard(files.expireStaged.bind(files)),
     stagedIds: guard(files.stagedIds.bind(files)),

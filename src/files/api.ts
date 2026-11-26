@@ -9,13 +9,13 @@ import type { ServerResponse } from 'node:http'
 import type { OwnerId } from '../auth/authenticator.ts'
 import { AgentsApiRequestError } from '../errors.ts'
 import type { Route } from '../gateway.ts'
-import { json, notFound, routeParam, writeRequestError } from '../http.ts'
+import { json, listQuery, notFound, routeParam, writeRequestError } from '../http.ts'
 import { directorySegment } from '../environment/local.ts'
 import type { FileRow, Store } from '../store/store.ts'
 import type { UploadLimits } from './config.ts'
 import { serveFile, type FileSource, type ServedFile } from './content.ts'
 import { FileNotFoundError, stagingKey, type FileStore } from './file-store.ts'
-import { handleUpload } from './upload.ts'
+import { handleUpload, toWireFile } from './upload.ts'
 
 /** Staging bytes and limits; present when `uploads.dir` is configured. */
 export interface FilesRuntime {
@@ -90,6 +90,11 @@ export class FilesApi {
       },
       {
         method: 'GET',
+        pattern: '/agents/files',
+        handler: (_req, res, url, _params, principal) => this.list(res, url, principal.owner),
+      },
+      {
+        method: 'GET',
         pattern: '/agents/files/:file_id/content',
         handler: (req, res, _url, params, principal) => this.content(req, res, routeParam(params, 'file_id'), principal.owner),
       },
@@ -99,6 +104,23 @@ export class FilesApi {
         handler: (_req, res, _url, params, principal) => this.remove(res, routeParam(params, 'file_id'), principal.owner),
       },
     ]
+  }
+
+  /** The owner's uploaded files, newest first; `status=staged|attached` narrows the list. */
+  private async list(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
+    const query = listQuery(url)
+    const status = url.searchParams.get('status')
+    if (status !== null && status !== 'staged' && status !== 'attached') {
+      writeRequestError(res, new AgentsApiRequestError('Query "status" must be "staged" or "attached"', 400, 'bad_request'))
+      return
+    }
+    const page = await this.deps.store().files.list(owner, {
+      limit: query.limit,
+      ...(query.after === undefined ? {} : { after: query.after }),
+      ...(status === null ? {} : { status }),
+    })
+    const data = page.data.map(toWireFile)
+    json(res, 200, { object: 'list', data, first_id: data[0]?.id ?? null, last_id: data.at(-1)?.id ?? null, has_more: page.hasMore })
   }
 
   private async content(req: Parameters<Route['handler']>[0], res: ServerResponse, id: string, owner: OwnerId): Promise<void> {

@@ -198,6 +198,22 @@ describe.each(harnesses)('Store contract (%s)', (_name, harness) => {
     await expect(store.files.insert(fileRow('file_x', ownerId('nobody')))).rejects.toThrow()
   })
 
+  it('files: list is owner-scoped, newest first, paged and filtered by status', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    await store.ensureOwner(B)
+    for (const [i, id] of ['file_l1', 'file_l2', 'file_l3'].entries()) await store.files.insert(fileRow(id, A, { createdAt: new Date(Date.UTC(2026, 10, 10, 10, i)) }))
+    await store.files.insert(fileRow('file_lb', B))
+    await store.files.claim(A, ['file_l2'], 'sess_1')
+    const first = await store.files.list(A, { limit: 2 })
+    expect(first.data.map(row => row.id)).toEqual(['file_l3', 'file_l2'])
+    expect(first.hasMore).toBe(true)
+    const rest = await store.files.list(A, { limit: 2, after: 'file_l2' })
+    expect(rest.data.map(row => row.id)).toEqual(['file_l1'])
+    expect(rest.hasMore).toBe(false)
+    expect((await store.files.list(A, { limit: 10, status: 'attached' })).data.map(row => row.id)).toEqual(['file_l2'])
+  })
+
   it('files: claim is all or nothing and a second claim of the same file loses', async () => {
     const store = await harness.fresh()
     await store.ensureOwner(A)

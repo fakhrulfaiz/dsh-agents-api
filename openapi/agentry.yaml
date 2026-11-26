@@ -768,6 +768,61 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+    get:
+      summary: List uploaded files, newest first
+      description: The caller's own staged and attached files. `after` is the last id of the previous page; `order` is ignored (newest first).
+      tags:
+        - Files
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/After"
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - staged
+              - attached
+          description: Keep only files in this status.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FileObject"
+                  first_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  last_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  has_more:
+                    type: boolean
+                required:
+                  - object
+                  - data
+                  - first_id
+                  - last_id
+                  - has_more
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
   /v1/agents/files/{file_id}/content:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"

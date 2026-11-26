@@ -160,6 +160,15 @@ export class MemoryStore implements Store {
         row.attachedAt = null
       }
     },
+    list: async (owner, q) => {
+      this.#check()
+      const rows = [...this.#files.values()]
+        .filter(row => row.ownerId === owner && (q.status === undefined || row.status === q.status))
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : -1))
+      const start = q.after === undefined ? -1 : rows.findIndex(row => row.id === q.after)
+      const page = rows.slice(start + 1, start + 1 + q.limit)
+      return { data: page.map(row => structuredClone(row)), hasMore: rows.length > start + 1 + q.limit }
+    },
     listForSession: async (owner, sessionId) => {
       this.#check()
       return [...this.#files.values()]

@@ -25,7 +25,7 @@ Date: 2026-11-10. Spec: [attachments design](../superpowers/specs/2026-11-10-att
 - Defaults: 25 MiB per file, 10 files and 50 MiB per message, 500 MiB staged per owner, TTL 24 h. All are config fields.
 - A deleted session deletes its `files` rows, so its content links answer `404`; the DSH objects stay (content-addressed).
 - `file_id` resolution for two uploads of identical bytes in one session returns the first row for both.
-- Not implemented: serving tool-result images, agent deliverables, `GET /agents/files` listing.
+- Not implemented: serving tool-result images, agent deliverables. `GET /agents/files` listing landed 2026-11-26.
 
 ## Live check (2026-11-10)
 

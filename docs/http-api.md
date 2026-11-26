@@ -22,6 +22,7 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 | `POST` `GET` | `/agents/environments/{id}/files` | Write or list files in the environment workspace |
 | `GET` | `/agents/environments/{id}/files/{path}` | Read one environment file |
 | `POST` | `/agents/files` | Upload one file (`multipart/form-data`, part `file`). See [File attachments](#file-attachments) |
+| `GET` | `/agents/files` | List the caller's uploaded files, newest first (`limit`, `after`, `status`) |
 | `GET` | `/agents/files/{file_id}/content` | Download a staged or attached file of the caller |
 | `DELETE` | `/agents/files/{file_id}` | Remove a staged file that was never sent |
 | `POST` `GET` | `/agents/schedules` | Create or list scheduled tasks. See [Scheduled tasks](#scheduled-tasks) |

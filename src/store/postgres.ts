@@ -208,6 +208,19 @@ function fileCollection(pool: pg.Pool): FileCollection {
         [owner, ids],
       )
     },
+    async list(owner, q) {
+      const result = await pool.query<FileDbRow>(
+        `with after_row as (select created_at, id from files where owner_id = $1 and id = $2)
+         select ${FILE_COLUMNS} from files
+         where owner_id = $1
+           and ($4::text is null or status = $4)
+           and (not exists (select 1 from after_row) or (created_at, id) < (select created_at, id from after_row))
+         order by created_at desc, id desc
+         limit $3`,
+        [owner, q.after ?? null, q.limit + 1, q.status ?? null],
+      )
+      return { data: result.rows.slice(0, q.limit).map(fileFromDb), hasMore: result.rows.length > q.limit }
+    },
     async listForSession(owner, sessionId) {
       const result = await pool.query<FileDbRow>(
         `select ${FILE_COLUMNS} from files where owner_id = $1 and session_id = $2 and status = 'attached' and attachment_id is not null order by attached_at, id`,
