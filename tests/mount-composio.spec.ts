@@ -8,14 +8,15 @@ type Exec = { name: string; arguments: unknown }
 function fake() {
   let guard: ((exec: Exec) => string | undefined) | undefined
   let pre: ((exec: Exec, next: () => Promise<unknown>) => Promise<unknown>) | undefined
+  let post: ((exec: Exec, result: unknown, next: () => Promise<unknown>) => Promise<unknown>) | undefined
   let section: { name: string; text: (ctx: unknown) => string } | undefined
   const ctx = {
     tools: { guard: (g: typeof guard) => { guard = g } },
-    on: (_e: string, h: typeof pre) => { pre = h },
+    on: (e: string, h: never) => { if (e === 'tools/post-execute') post = h; else pre = h },
     get: (name: string) => (name === 'systemPrompt' ? {} : undefined),
     systemPrompt: { section: (s: typeof section) => { section = s } },
   } as unknown as Context
-  return { ctx, guard: (e: Exec) => guard!(e), pre: (e: Exec) => (pre ? pre(e, () => Promise.resolve('passed')) : Promise.resolve('passed')), section: () => section! }
+  return { ctx, guard: (e: Exec) => guard!(e), post: (e: Exec, result: unknown) => post!(e, result, () => Promise.resolve({ kind: 'accept' })), pre: (e: Exec) => (pre ? pre(e, () => Promise.resolve('passed')) : Promise.resolve('passed')), section: () => section! }
 }
 const deps = (extra: object = {}) => ({ grants: { gmail: 'all' as const }, approvalVerbs: new Set(['SEND']), approvalSlugs: new Set<string>(), sendPolicy: 'ask' as const, serverLabel: 'composio', ...extra })
 
@@ -44,5 +45,21 @@ describe('mountComposio', () => {
     const view = (names: string[]) => ({ scope: {}, toolSet: { view: () => new Map(names.map(n => [n, {}])) } })
     expect(f.section().text(view(['bash']))).toBe('')
     expect(f.section().text(view(['mcp__composio__COMPOSIO_SEARCH_TOOLS']))).toBe(COMPOSIO_GUIDANCE_TEXT)
+  })
+
+  it('trims search results to the apps the agent may use', async () => {
+    const f = fake()
+    mountComposio(f.ctx, deps())
+    const body = { successful: true, data: { results: [{ primary_tool_slugs: ['GMAIL_FETCH_EMAILS', 'SLACK_SEND_MESSAGE'], toolkit_connection_statuses: [{ toolkit: 'gmail', connected: true }, { toolkit: 'slack', connected: true }] }], tool_schemas: { GMAIL_FETCH_EMAILS: {}, SLACK_SEND_MESSAGE: {} } } }
+    const result = { isError: false, content: [{ type: 'text', text: JSON.stringify(body) }] }
+    const out = await f.post({ name: 'mcp__composio__COMPOSIO_SEARCH_TOOLS', arguments: {} }, result) as { kind: string; content: { text: string }[] }
+    expect(out.kind).toBe('accept')
+    expect(JSON.parse(out.content[0]!.text)).toEqual({ successful: true, data: { results: [{ primary_tool_slugs: ['GMAIL_FETCH_EMAILS'], toolkit_connection_statuses: [{ toolkit: 'gmail', connected: true }] }], tool_schemas: { GMAIL_FETCH_EMAILS: {} } } })
+    // other tools, errors and unrestricted agents are untouched
+    expect(await f.post({ name: 'mcp__composio__GMAIL_FETCH_EMAILS', arguments: {} }, result)).toEqual({ kind: 'accept' })
+    expect(await f.post({ name: 'mcp__composio__COMPOSIO_SEARCH_TOOLS', arguments: {} }, { ...result, isError: true })).toEqual({ kind: 'accept' })
+    const open = fake()
+    mountComposio(open.ctx, deps({ grants: null }))
+    expect(() => open.post({ name: 'x', arguments: {} }, result)).toThrow()
   })
 })

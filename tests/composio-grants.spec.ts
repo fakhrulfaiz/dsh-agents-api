@@ -1,7 +1,7 @@
 /** Composio app grants: legacy reading, call checks, clamping, write detection. */
 
 import { describe, expect, it } from 'vitest'
-import { checkComposioCall, clampGrants, effectiveGrants, isWriteSlug, slugsInCall, validateAppGrants } from '../src/composio-grants.ts'
+import { checkComposioCall, clampGrants, effectiveGrants, filterSearchResult, isWriteSlug, slugsInCall, validateAppGrants } from '../src/composio-grants.ts'
 import { materializeAgent } from '../src/agent-records.ts'
 
 const agent = (extra: Record<string, unknown>) => ({ ...materializeAgent({ model: 'm' }), ...extra })
@@ -84,5 +84,19 @@ describe('validateAppGrants', () => {
     expect(validateAppGrants({ gmail: 'some' })).toMatch(/gmail/u)
     expect(validateAppGrants({ gmail: ['lower_case'] })).toMatch(/lower_case/u)
     expect(validateAppGrants(['gmail'])).toMatch(/apps/u)
+  })
+})
+
+describe('filterSearchResult', () => {
+  const text = JSON.stringify({ data: { results: [{ related_tool_slugs: ['GMAIL_LIST_LABELS', 'NOTION_CREATE_PAGE'], toolkits: ['gmail', 'notion'] }], toolkit_schemas: { gmail: {}, notion: {} } } })
+  it('removes ungranted tools and apps, keeps granted ones, honours tool lists', () => {
+    const out = JSON.parse(filterSearchResult(text, { gmail: ['GMAIL_LIST_LABELS'] })!)
+    expect(out.data.results[0]).toEqual({ related_tool_slugs: ['GMAIL_LIST_LABELS'], toolkits: ['gmail'] })
+    expect(out.data.toolkit_schemas).toEqual({ gmail: {} })
+  })
+  it('does nothing without grants, without a change, or for non-JSON', () => {
+    expect(filterSearchResult(text, null)).toBeUndefined()
+    expect(filterSearchResult(text, { gmail: 'all', notion: 'all' })).toBeUndefined()
+    expect(filterSearchResult('plain text', { gmail: 'all' })).toBeUndefined()
   })
 })
