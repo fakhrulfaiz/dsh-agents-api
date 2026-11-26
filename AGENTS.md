@@ -55,6 +55,8 @@ Mirrored in `~/code/agentry-web/AGENTS.md`.
 3. **Browser automation in the profile:** mount `browser-use-playwright-mcp` (or Chrome DevTools / Stagehand) in the Agentry profile when Task 8 resumes.
 4. **Vision-capable model route** for sessions that need screenshot review; DSH withholds images from non-vision routes.
 5. **Cowork endpoints** for the frontend's F3 artifacts panel: deliverables, per-turn workspace changes. Non-image uploads landed 2026-11-10 with the attachment routes.
+6. Owner-filtered schedule tools: done 2026-11-26 (`docs/changes/2026-11-26-owner-scoped-schedule-tools.md`).
+7. **Session jobs endpoint** (added 2026-11-26): `GET /agents/sessions/{id}/jobs` and `POST /agents/sessions/{id}/jobs/{job_id}/kill`, owner-scoped, over DSH's `ctx.jobs` (`dsh-tool-jobs` is mounted), so the web Tasks tab can list background jobs next to subagents. Mirrored as agentry-web backlog item 11.
 
 ## Working rules
 
