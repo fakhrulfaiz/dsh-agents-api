@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { startTestService, type TestService } from '@agentry/sandbox/testing'
 import { ownerId } from '../src/auth/authenticator.ts'
+import { BROWSER_SANDBOX_IMAGE } from '../src/environment/browser-image.ts'
 import { toSdkEnvironment } from '../src/environment/environment-compat.ts'
 import type { EnvironmentRecord, EnvironmentTemplateConfig } from '../src/environment-types.ts'
 import { inlineTemplate, mountSandboxTools, SANDBOX_TOOL_NAMES } from '../src/mount-sandbox-tools.ts'
@@ -56,9 +57,10 @@ describe('sandbox tools', () => {
   beforeEach(async () => { await setup() })
 
   it('lists the built-in templates for the sandbox provider', async () => {
-    const res = await call('sandbox_templates') as { templates: { id: string; name: string; packages: { python?: string[] } }[] }
-    expect(res.templates.map((t) => t.id)).toEqual(['tpl_builtin_data_science', 'tpl_builtin_web_scraping', 'tpl_builtin_node_typescript', 'tpl_builtin_offline'])
+    const res = await call('sandbox_templates') as { templates: { id: string; name: string; image?: string; packages: { python?: string[] } }[] }
+    expect(res.templates.map((t) => t.id)).toEqual(['tpl_builtin_data_science', 'tpl_builtin_web_scraping', 'tpl_builtin_web_browser', 'tpl_builtin_node_typescript', 'tpl_builtin_offline'])
     expect(res.templates[0]).toMatchObject({ name: 'Data science', packages: { python: ['matplotlib', 'seaborn', 'scipy', 'scikit-learn'] } })
+    expect(res.templates.find((t) => t.id === 'tpl_builtin_web_browser')).toMatchObject({ name: 'Web browser', image: BROWSER_SANDBOX_IMAGE })
   })
 
   it('registers the nine tools', () => {

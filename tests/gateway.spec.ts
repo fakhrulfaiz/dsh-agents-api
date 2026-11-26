@@ -1519,8 +1519,9 @@ describe('built-in templates', () => {
       }
       const call = await serve(withSandbox)
       const mine = (await (await call('/agents/environments/templates', { method: 'POST', body: JSON.stringify({ name: 'mine', provider: 'sandbox', config: {} }) })).json()) as { id: string }
-      const listed = (await (await call('/agents/environments/templates')).json()) as { data: { id: string; name: string; provider: string; built_in?: boolean }[] }
-      expect(listed.data.map((t) => t.name)).toEqual(['Data science', 'Web and scraping', 'Node and TypeScript', 'Offline', 'mine'])
+      const listed = (await (await call('/agents/environments/templates')).json()) as { data: { id: string; name: string; provider: string; image?: string; built_in?: boolean }[] }
+      expect(listed.data.map((t) => t.name)).toEqual(['Data science', 'Web and scraping', 'Web browser', 'Node and TypeScript', 'Offline', 'mine'])
+      expect(listed.data.find((t) => t.id === 'tpl_builtin_web_browser')).toMatchObject({ name: 'Web browser', image: 'ghcr.io/fakhrulfaiz/agentry-sandbox-browser:1' })
       expect(listed.data.filter((t) => t.built_in).every((t) => t.provider === 'sandbox')).toBe(true)
       expect(listed.data.find((t) => t.id === mine.id)?.built_in).toBeUndefined()
       expect(await (await call('/agents/environments/templates/tpl_builtin_offline')).json()).toMatchObject({ name: 'Offline', built_in: true })

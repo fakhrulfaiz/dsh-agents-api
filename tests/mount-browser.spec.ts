@@ -80,9 +80,11 @@ describe('mountBrowserGuidance', () => {
     expect(text()).toBe(BROWSER_LOCAL_NOTICE)
   })
 
-  it('says a reset helps when the sandbox browser did not start', () => {
+  it('says a Web browser template is needed when the sandbox browser did not start', () => {
     const { agentCtx, text } = scope([])
     mountBrowserGuidance(agentCtx, 'sandbox')
     expect(text()).toBe(BROWSER_MISSING_NOTICE)
+    expect(text()).toContain('Web browser')
+    expect(text()).toContain('agentry-sandbox-browser:1')
   })
 })

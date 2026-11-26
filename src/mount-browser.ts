@@ -15,16 +15,17 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+import { BROWSER_SANDBOX_IMAGE } from './environment/browser-image.ts'
 import { BRIDGE_ENV } from './sandbox/remote/stdio-bridge.ts'
 import type { OAIAgent, OAIMcpTool } from './types.ts'
 
 /** MCP server label; tools are `mcp__browser__browser_navigate` and so on. */
 export const BROWSER_SERVER_LABEL = 'browser'
 
-/** The pinned Playwright MCP version the standard sandbox image ships. */
+/** The pinned Playwright MCP version the browser sandbox image ships. */
 export const PLAYWRIGHT_MCP_VERSION = '0.0.80'
 
-/** Where the standard sandbox image keeps Chromium (envd processes do not get the image's ENV). */
+/** Where the browser sandbox image keeps Chromium (envd processes do not get the image's ENV). */
 export const SANDBOX_BROWSERS_PATH = '/opt/ms-playwright'
 
 /** Section name for the browser guidance on the agent scope. */
@@ -101,7 +102,7 @@ export const BROWSER_GUIDANCE = [
 export const BROWSER_LOCAL_NOTICE = 'The web browser is turned on for this agent, but it runs only in sandbox chats, and this chat runs on the server, so you have no browser tools here. If the user needs a browser, tell them to start the chat on a sandbox environment.'
 
 /** Shown when the browser should run in this sandbox but did not start. */
-export const BROWSER_MISSING_NOTICE = 'The web browser is turned on for this agent, but it could not start in this sandbox (an older sandbox image may not have it). If the user needs a browser, tell them that resetting the sandbox to the current image adds it.'
+export const BROWSER_MISSING_NOTICE = `The web browser is turned on for this agent, but it could not start in this sandbox: the standard sandbox image does not include it. If the user needs a browser, tell them to start a new chat on the built-in "Web browser" template (or a custom template using the image \`${BROWSER_SANDBOX_IMAGE}\`).`
 
 /**
  * Register the browser section on the agent scope. In a sandbox chat it shows
