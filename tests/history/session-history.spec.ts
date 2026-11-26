@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { SessionQueryError } from '@deepseek-ai/dsh-session-query'
 import { materializeAgent } from '../../src/agent-records.ts'
-import { WireProjector, type ProjectionBase } from '../../src/history/projector.ts'
+import { WireProjector, frameSseId, type ProjectionBase } from '../../src/history/projector.ts'
 import { createSessionHistory } from '../../src/history/session-history.ts'
 import { SessionRegistry } from '../../src/session-registry.ts'
 import { FakeSessionQuery, logEvent } from '../support/fake-session-query.ts'
@@ -39,16 +39,24 @@ describe('SessionHistory', () => {
     expect(await history.turns(base, { limit: 100, order: 'asc' })).toMatchObject({ data: registry.get('sess_h')!.projector.turns })
   })
 
-  it('wire events are the projector frames after the given id', async () => {
+  it('wire events are the projector frames after the given id or position', async () => {
     const { history } = setup()
     const all = await history.wireEvents(base, 0)
     expect(all[0]?.event.type).toBe('agent.session.created')
-    expect(all.map(frame => frame.id)).toEqual(all.map((_, index) => index + 1))
+    const original = all.filter(frame => frame.sub === undefined)
+    expect(original.map(frame => frame.id)).toEqual(original.map((_, index) => index + 1))
     const live = new WireProjector(base, false)
-    const liveIds = SAME_SECOND.flatMap(event => live.apply(event).frames.map(frame => frame.id))
-    expect(all.slice(1).map(frame => frame.id)).toEqual(liveIds)
-    expect((await history.wireEvents(base, all.length - 2)).map(frame => frame.id)).toEqual([all.length - 1, all.length])
-    expect(await history.wireEvents(base, all.length)).toEqual([])
+    const liveIds = SAME_SECOND.flatMap(event => live.apply(event).frames.map(frameSseId))
+    expect(all.slice(1).map(frameSseId)).toEqual(liveIds)
+    const last = original.length
+    expect((await history.wireEvents(base, last - 2)).map(frameSseId)).toEqual(all.filter(frame => frame.id > last - 2 || (frame.id === last - 2 && frame.sub !== undefined)).map(frameSseId))
+    expect(await history.wireEvents(base, last)).toEqual(all.filter(frame => frame.id === last && frame.sub !== undefined))
+    // Resuming in the middle of a frame's item frames returns the rest of them.
+    const item = all.find(frame => frame.sub !== undefined)
+    expect(item).toBeDefined()
+    const after = await history.wireEvents(base, { id: item!.id, sub: item!.sub! })
+    expect(after[0]).toEqual(all[all.indexOf(item!) + 1])
+    expect(after).toHaveLength(all.length - all.indexOf(item!) - 1)
   })
 
   it('lists turns in log order when they share a second', async () => {

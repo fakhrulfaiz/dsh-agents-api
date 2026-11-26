@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { materializeAgent } from '../../src/agent-records.ts'
-import { WireProjector, foldSession, type ProjectionBase } from '../../src/history/projector.ts'
+import { WireProjector, compareFramePositions, foldSession, frameSseId, parseFrameId, type ProjectionBase } from '../../src/history/projector.ts'
 import { logEvent } from '../support/fake-session-query.ts'
 
 function base(tools: ProjectionBase['agent']['tools'] = []): ProjectionBase {
@@ -48,10 +48,45 @@ describe('WireProjector', () => {
     const liveFrames = events.flatMap(event => live.apply(event).frames)
 
     expect(folded.frames.slice(1)).toEqual(liveFrames)
-    expect(folded.frames.map(frame => frame.id)).toEqual(folded.frames.map((_, index) => index + 1))
-    expect(folded.frames.every(frame => frame.event.event_id === `evt_sess_p_${String(frame.id)}`)).toBe(true)
+    // Original frames keep ids 1..n; item frames are numbered after the frame before them.
+    const original = folded.frames.filter(frame => frame.sub === undefined)
+    expect(original.map(frame => frame.id)).toEqual(original.map((_, index) => index + 1))
+    expect(folded.frames.every(frame => frame.event.event_id === `evt_sess_p_${frameSseId(frame)}`)).toBe(true)
+    expect(folded.frames.filter(frame => frame.sub !== undefined).map(frameSseId)).toEqual(['4.1', '14.1'])
     expect(folded.items).toEqual(live.items)
     expect(folded.turns.map(turn => turn.id)).toEqual(['turn_1', 'turn_5'])
+  })
+
+  it('streams reasoning as its own item before the assistant message, whose text leaves the reasoning out', () => {
+    const projector = foldSession(base(), [
+      logEvent('turn/start', { turn: 1 }, 1),
+      logEvent('assistant/message', {
+        message: { content: [{ type: 'reasoning', text: 'thinking it over' }, { type: 'text', text: 'ok' }] },
+        stream: [{ type: 'reasoning-chunks', texts: ['thinking ', 'it over'] }, { type: 'text-chunks', texts: ['o', 'k'] }],
+      }, 2),
+    ])
+    const after = projector.frames.slice(4)
+    expect(after.map(frame => [frameSseId(frame), frame.event.type])).toEqual([
+      ['4.1', 'agent.session.turn.item.done'],
+      ['5', 'agent.session.turn.item.added'],
+      ['6', 'agent.session.turn.output_text.delta'],
+      ['7', 'agent.session.turn.output_text.delta'],
+      ['8', 'agent.session.turn.output_text.done'],
+      ['9', 'agent.session.turn.item.done'],
+    ])
+    expect(after[0]!.event).toMatchObject({ item: { type: 'reasoning', summary: [{ text: 'thinking it over' }] } })
+    expect(after.at(-1)!.event).toMatchObject({ item: { type: 'message', content: [{ type: 'output_text', text: 'ok' }] } })
+    expect(projector.items.find(item => item.type === 'message')).toMatchObject({ content: [{ text: 'ok' }] })
+  })
+
+  it('reads and orders SSE ids, plain and sub-numbered', () => {
+    expect(parseFrameId('12')).toEqual({ id: 12, sub: 0 })
+    expect(parseFrameId('12.10')).toEqual({ id: 12, sub: 10 })
+    expect(parseFrameId('x')).toBeUndefined()
+    expect(parseFrameId('1.2.3')).toBeUndefined()
+    expect(compareFramePositions(parseFrameId('12.10')!, parseFrameId('12.9')!)).toBeGreaterThan(0)
+    expect(compareFramePositions(parseFrameId('12')!, parseFrameId('12.1')!)).toBeLessThan(0)
+    expect(compareFramePositions(parseFrameId('12.3')!, parseFrameId('13')!)).toBeLessThan(0)
   })
 
   it('projects scheduled prompts the same live and replayed, and skips change notices', () => {
@@ -89,6 +124,7 @@ describe('WireProjector', () => {
       'agent.session.in_progress',
       'agent.session.turn.created',
       'agent.session.turn.in_progress',
+      'agent.session.turn.item.done',
       'agent.session.turn.item.added',
       'agent.session.turn.output_text.delta',
       'agent.session.turn.output_text.delta',
@@ -151,7 +187,7 @@ describe('WireProjector', () => {
     projector.apply(logEvent('turn/start', { turn: 1 }, 1))
     const call = projector.apply(logEvent('tool/call', { callId: 'call_w', name: 'get_weather', arguments: '{"city":"SF"}' }, 2))
     expect(call.status).toEqual({ status: 'requires_action', error: null })
-    expect(call.frames.map(frame => frame.event.type)).toEqual(['agent.session.requires_action'])
+    expect(call.frames.map(frame => frame.event.type)).toEqual(['agent.session.turn.item.added', 'agent.session.requires_action'])
     expect(projector.snapshot().required_actions).toEqual([{
       type: 'function_call',
       name: 'get_weather',
@@ -164,7 +200,9 @@ describe('WireProjector', () => {
       message: { source: { kind: 'tool', callId: 'call_w' }, content: [{ type: 'text', text: '68F' }] },
     }, 3))
     expect(result.status).toEqual({ status: 'in_progress', error: null })
-    expect(result.frames).toEqual([])
+    expect(result.frames.map(frame => [frame.event.type, 'item' in frame.event ? frame.event.item.type : null])).toEqual([
+      ['agent.session.turn.item.done', 'function_call_output'],
+    ])
     expect(projector.snapshot()).toMatchObject({ status: 'in_progress', required_actions: [] })
     expect(projector.items.map(item => item.type)).toEqual(['function_call', 'function_call_output'])
   })
@@ -173,7 +211,8 @@ describe('WireProjector', () => {
     const projector = new WireProjector(base([{ type: 'function', name: 'get_weather' }]), true)
     projector.apply(logEvent('turn/start', { turn: 1 }, 1))
     const call = projector.apply(logEvent('tool/call', { callId: 'c', name: 'web_search', arguments: '{}' }, 2))
-    expect(call.frames).toEqual([])
+    // Only the call's own item frame, no requires_action.
+    expect(call.frames.map(frame => frame.event.type)).toEqual(['agent.session.turn.item.added'])
     expect(call.status).toBeUndefined()
     expect(projector.status).toBe('in_progress')
     expect(projector.items).toHaveLength(1)

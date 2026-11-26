@@ -103,7 +103,7 @@ describe('approvals over the API', () => {
   it('shows requires_action with the approval, writes the status, and fans an ephemeral frame out', async () => {
     const f = await fixture()
     const id = await session(f)
-    const frames: Array<[OAISessionEvent, number | undefined]> = []
+    const frames: Array<[OAISessionEvent, string | undefined]> = []
     f.registry.subscribe(id, (event, sseId) => { frames.push([event, sseId]) })
     void parkApproval(f, id)
     const view = await read(f, id)

@@ -13,7 +13,7 @@ import type { OAIListResponse, OAITurn } from '../types.ts'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { toolResultImageRefs } from '../files/tool-images.ts'
 import { deliverablesFromEvents, type DeliverableEntry } from './deliverables.ts'
-import { foldSession, type ProjectionBase, type ReplayFrame, type StoredSessionItem, type WireProjector } from './projector.ts'
+import { compareFramePositions, foldSession, framePosition, type FramePosition, type ProjectionBase, type ReplayFrame, type StoredSessionItem, type WireProjector } from './projector.ts'
 
 /** Reads a session's history from the Session log. */
 export interface SessionHistory {
@@ -39,10 +39,10 @@ export interface SessionHistory {
   turn(base: ProjectionBase, turnId: string): Promise<OAITurn | undefined>
   /**
    * @param base - session configuration.
-   * @param afterSeq - last frame `id` the caller has; `0` returns every frame.
-   * @returns frames with a greater `id`, in order.
+   * @param after - last frame the caller has (a frame `id`, or a position for an item frame); `0` returns every frame.
+   * @returns frames after it, in order.
    */
-  wireEvents(base: ProjectionBase, afterSeq: number): Promise<ReplayFrame[]>
+  wireEvents(base: ProjectionBase, after: number | FramePosition): Promise<ReplayFrame[]>
   /**
    * Fold the whole log into a fresh projector that the caller owns, for example to seed a live session.
    * @param base - session configuration.
@@ -98,8 +98,9 @@ export function createSessionHistory(sessionQuery: Pick<SessionQueryEngine, 'rea
     async turn(base, turnId) {
       return (await fold(base)).turns.find(turn => turn.id === turnId)
     },
-    async wireEvents(base, afterSeq) {
-      return (await fold(base)).frames.filter(frame => frame.id > afterSeq)
+    async wireEvents(base, after) {
+      const last = typeof after === 'number' ? { id: after, sub: 0 } : after
+      return (await fold(base)).frames.filter(frame => compareFramePositions(framePosition(frame), last) > 0)
     },
     async deliverables(sessionId) {
       return deliverablesFromEvents((await read(sessionId))?.events ?? [])

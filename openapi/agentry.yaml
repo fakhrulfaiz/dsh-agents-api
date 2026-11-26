@@ -2223,11 +2223,11 @@ paths:
 
         The `event:` name equals the payload `type` (see the `SessionEvent` schema).
 
-        Ids. Every event derived from the Session log carries `id: <n>`, its 1-based position in the session's event sequence; `agent.session.created` is always 1. The sequence is a pure function of the Session log, so ids and the payload `event_id` (`evt_<session_id>_<n>`) survive server restarts.
+        Ids. Every event derived from the Session log carries an `id:`. Session status, turn, assistant message and slash-command events are numbered `1, 2, 3, ...` (`agent.session.created` is always 1). Item frames for the rest of the item log (user messages, reasoning, tool calls and outputs; `agent.session.turn.item.added` for a call, `agent.session.turn.item.done` otherwise) are numbered after the frame before them: `<n>.1`, `<n>.2`, ... (a reasoning item comes before the assistant message it belongs to). So the item frames never moved an existing id, and an integer `Last-Event-ID` saved before they existed still resumes at the same place. Compare ids as (`n`, `sub`) pairs, not as decimals (`12.10` follows `12.9`). The sequence is a pure function of the Session log, so ids and the payload `event_id` (`evt_<session_id>_<id>`) survive server restarts. A user message item's attachments carry their file ids, as in `GET .../items`.
 
-        Ephemeral frames have no `id:` line, are never replayed, and do not shift later ids: the status snapshot written when a stream connects, the `idle` event that closes a streamed create without input, `error` events for a failed input dispatch, and the `requires_action`/`in_progress` events raised by approvals.
+        Ephemeral frames have no `id:` line, are never replayed, and do not shift later ids: the status snapshot written when a stream connects, the `idle` event that closes a streamed create without input, `error` events for a failed input dispatch, and the `requires_action`/`in_progress` events raised by approvals, and the `agent.session.subagent.*` events (subagent created, turn opened or ended, item saved, closed; child state is memory-only, so re-read `/subagents` on open and on reconnect).
 
-        Resume. Send `Last-Event-ID: n` to receive every event with a greater id, derived from the Session log, then live events without gaps or duplicates. A non-numeric value replays the whole history. A `Last-Event-ID` connection to a session with pending approvals additionally receives one ephemeral `agent.session.requires_action` snapshot. Without the header the stream starts with one status snapshot (`idle`, `in_progress`, `requires_action`, or `failed`).
+        Resume. Send `Last-Event-ID: <n>` or `<n>.<sub>` to receive every event after it, derived from the Session log, then live events without gaps or duplicates. A value that is not an id replays the whole history. A `Last-Event-ID` connection to a session with pending approvals additionally receives one ephemeral `agent.session.requires_action` snapshot. Without the header the stream starts with one status snapshot (`idle`, `in_progress`, `requires_action`, or `failed`).
   /v1/agents/sessions/{session_id}/items:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -5248,6 +5248,106 @@ components:
         - type
         - event_id
         - error
+    SubagentCreatedEvent:
+      description: Ephemeral (no `id:`, never replayed). A subagent of this session started.
+      type: object
+      properties:
+        type:
+          const: agent.session.subagent.created
+        event_id:
+          type: string
+        session_id:
+          type: string
+        subagent:
+          $ref: "#/components/schemas/Subagent"
+      required:
+        - type
+        - event_id
+        - session_id
+        - subagent
+    SubagentUpdatedEvent:
+      description: Ephemeral (no `id:`, never replayed). A subagent turn opened or ended; `turn` is its current state.
+      type: object
+      properties:
+        type:
+          const: agent.session.subagent.updated
+        event_id:
+          type: string
+        session_id:
+          type: string
+        subagent:
+          $ref: "#/components/schemas/Subagent"
+        turn:
+          $ref: "#/components/schemas/Turn"
+      required:
+        - type
+        - event_id
+        - session_id
+        - subagent
+        - turn
+    SubagentClosedEvent:
+      description: Ephemeral (no `id:`, never replayed). A subagent of this session closed.
+      type: object
+      properties:
+        type:
+          const: agent.session.subagent.closed
+        event_id:
+          type: string
+        session_id:
+          type: string
+        subagent:
+          $ref: "#/components/schemas/Subagent"
+      required:
+        - type
+        - event_id
+        - session_id
+        - subagent
+    SubagentItemAddedEvent:
+      description: Ephemeral (no `id:`, never replayed). A subagent saved a tool call, which waits for its output. The item carries `subagent_id`.
+      type: object
+      properties:
+        type:
+          const: agent.session.subagent.item.added
+        event_id:
+          type: string
+        session_id:
+          type: string
+        subagent_id:
+          type: string
+        turn_id:
+          type: string
+        item:
+          $ref: "#/components/schemas/SessionItem"
+      required:
+        - type
+        - event_id
+        - session_id
+        - subagent_id
+        - turn_id
+        - item
+    SubagentItemDoneEvent:
+      description: Ephemeral (no `id:`, never replayed). A subagent saved a final item (message, reasoning, tool output). The item carries `subagent_id`.
+      type: object
+      properties:
+        type:
+          const: agent.session.subagent.item.done
+        event_id:
+          type: string
+        session_id:
+          type: string
+        subagent_id:
+          type: string
+        turn_id:
+          type: string
+        item:
+          $ref: "#/components/schemas/SessionItem"
+      required:
+        - type
+        - event_id
+        - session_id
+        - subagent_id
+        - turn_id
+        - item
     SessionEvent:
       description: JSON payload of one SSE frame. The frame `event:` name equals `type`.
       oneOf:
@@ -5267,6 +5367,11 @@ components:
         - $ref: "#/components/schemas/OutputTextDeltaEvent"
         - $ref: "#/components/schemas/OutputTextDoneEvent"
         - $ref: "#/components/schemas/ErrorEvent"
+        - $ref: "#/components/schemas/SubagentCreatedEvent"
+        - $ref: "#/components/schemas/SubagentUpdatedEvent"
+        - $ref: "#/components/schemas/SubagentClosedEvent"
+        - $ref: "#/components/schemas/SubagentItemAddedEvent"
+        - $ref: "#/components/schemas/SubagentItemDoneEvent"
       discriminator:
         propertyName: type
     ScheduleStatus:
