@@ -9,11 +9,19 @@
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { SessionQueryError, type SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import { paginate, type ListQuery } from '../http.ts'
-import type { OAIListResponse, OAITurn } from '../types.ts'
+import type { OAIListResponse, OAISubagent, OAITurn } from '../types.ts'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { toolResultImageRefs } from '../files/tool-images.ts'
+import { foldChild } from './child-projector.ts'
 import { deliverablesFromEvents, type DeliverableEntry } from './deliverables.ts'
 import { compareFramePositions, foldSession, framePosition, type FramePosition, type ProjectionBase, type ReplayFrame, type StoredSessionItem, type WireProjector } from './projector.ts'
+
+/** A subagent rebuilt from its own Session log. */
+export interface LoggedSubagent {
+  resource: OAISubagent
+  turns: OAITurn[]
+  items: StoredSessionItem[]
+}
 
 /** Reads a session's history from the Session log. */
 export interface SessionHistory {
@@ -64,13 +72,29 @@ export interface SessionHistory {
    * @returns the working directory in the session header, or `undefined` when the log is missing.
    */
   workspace(sessionId: string): Promise<string | undefined>
+  /**
+   * Ids of the session's direct children whose header says `origin: subagent`, oldest first.
+   * @param parentId - Agents API session id.
+   * @returns child ids; empty when the log is missing or lineage tracing is unavailable.
+   */
+  subagentIds(parentId: string): Promise<string[]>
+  /**
+   * The session's subagents rebuilt from their logs (only the child's own
+   * events, not a fork's inherited prefix), through the projection the live
+   * registry uses.
+   * @param parentId - Agents API session id.
+   * @param agentId - the parent's agent id, shown on child turns.
+   * @param childId - only this child, when given.
+   * @returns the children, oldest first.
+   */
+  subagents(parentId: string, agentId: string, childId?: string): Promise<LoggedSubagent[]>
 }
 
 /**
  * @param sessionQuery - session-query service; only `readSession` is used.
  * @returns the history reader.
  */
-export function createSessionHistory(sessionQuery: Pick<SessionQueryEngine, 'readSession'>): SessionHistory {
+export function createSessionHistory(sessionQuery: Pick<SessionQueryEngine, 'readSession'> & Partial<Pick<SessionQueryEngine, 'traceSession'>>): SessionHistory {
   /**
    * A session that has not logged an event yet may have no readable log; that
    * is an empty history, not an error.
@@ -80,6 +104,20 @@ export function createSessionHistory(sessionQuery: Pick<SessionQueryEngine, 'rea
       return await sessionQuery.readSession(SessionId(sessionId))
     } catch (error: unknown) {
       if (error instanceof SessionQueryError && error.code === 'SESSION_QUERY_SESSION_NOT_FOUND') return undefined
+      throw error
+    }
+  }
+
+  /** Direct subagent children of a session, from one lineage trace. */
+  async function children(parentId: string) {
+    if (sessionQuery.traceSession === undefined) return []
+    try {
+      const trace = await sessionQuery.traceSession(SessionId(parentId))
+      return trace.descendants
+        .map(node => node.session)
+        .filter(record => record.header.origin === 'subagent' && record.header.parentSession === parentId)
+    } catch (error: unknown) {
+      if (error instanceof SessionQueryError && error.code === 'SESSION_QUERY_SESSION_NOT_FOUND') return []
       throw error
     }
   }
@@ -112,6 +150,35 @@ export function createSessionHistory(sessionQuery: Pick<SessionQueryEngine, 'rea
         refs.push(...toolResultImageRefs((event.data as { message?: { content?: unknown } }).message?.content))
       }
       return refs
+    },
+    async subagentIds(parentId) {
+      return (await children(parentId)).map(record => String(record.header.id))
+    },
+    async subagents(parentId, agentId, childId) {
+      const records = (await children(parentId)).filter(record => childId === undefined || record.header.id === childId)
+      const rebuilt: LoggedSubagent[] = []
+      for (const record of records) {
+        const id = String(record.header.id)
+        const log = await read(id)
+        const own = log === undefined ? [] : log.events.slice(log.inheritedEventCount)
+        const projector = foldChild(parentId, id, agentId, own)
+        const createdAt = Math.floor(record.header.createdAt / 1000)
+        rebuilt.push({
+          resource: {
+            id,
+            object: 'agent.session.subagent',
+            session_id: id,
+            parent_session_id: parentId,
+            status: record.live ? 'active' : 'closed',
+            created_at: createdAt,
+            ...(record.live ? {} : { closed_at: projector.lastAt ?? createdAt }),
+            model: projector.model ?? null,
+          },
+          turns: projector.turns,
+          items: projector.items,
+        })
+      }
+      return rebuilt
     },
     async workspace(sessionId) {
       const cwd = (await read(sessionId))?.session.cwd

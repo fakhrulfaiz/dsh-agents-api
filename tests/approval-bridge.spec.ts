@@ -193,3 +193,35 @@ describe('user questions', () => {
     expect(h.bridge.pending('sess_1')).toEqual([])
   })
 })
+
+describe('subagent requests', () => {
+  it('shows a child approval on its parent with subagent_id and the logged id', async () => {
+    const h = bridgeHarness()
+    h.log('child_1', 'approval/asked', { id: 'appr-c', toolName: 'bash', callId: CALL })
+    const outcome = h.approve({ agent: h.child('child_1', 'sess_1'), toolName: 'bash', callId: CALL, reason: 'run rm' } as ApprovalRequestEvent)
+    expect(h.bridge.pending('sess_1')).toEqual([expect.objectContaining({ id: 'appr-c', subagent_id: 'child_1', tool_name: 'bash' })])
+    expect(h.onChange).toHaveBeenLastCalledWith('sess_1', [expect.objectContaining({ subagent_id: 'child_1' })])
+    expect(h.bridge.answer('sess_1', 'appr-c', 'deny')).toBe('resolved')
+    await expect(outcome).resolves.toBe('rejected')
+  })
+
+  it('keeps a child request through the parent turn end and cancels it at the child turn end', async () => {
+    const h = bridgeHarness()
+    const own = h.approve(request(h))
+    const fromChild = h.approve({ agent: h.child('child_1', 'sess_1'), toolName: 'bash' } as ApprovalRequestEvent)
+    expect(h.bridge.pending('sess_1')).toHaveLength(2)
+    h.log('sess_1', 'turn/end', {})
+    await expect(own).resolves.toBe('cancelled')
+    expect(h.bridge.pending('sess_1')).toEqual([expect.objectContaining({ subagent_id: 'child_1' })])
+    h.log('child_1', 'turn/end', {})
+    await expect(fromChild).resolves.toBe('cancelled')
+    expect(h.bridge.pending('sess_1')).toEqual([])
+  })
+
+  it('delegates a child whose parent is not claimed, and a child without the subagent origin', async () => {
+    const h = bridgeHarness()
+    await expect(h.approve({ agent: h.child('child_1', 'sess_other'), toolName: 'bash' } as ApprovalRequestEvent)).resolves.toBe('unavailable')
+    const fork = { session: { id: 'fork_1', header: { parentSession: 'sess_1' } } } as never
+    await expect(h.approve({ agent: fork, toolName: 'bash' } as ApprovalRequestEvent)).resolves.toBe('unavailable')
+  })
+})

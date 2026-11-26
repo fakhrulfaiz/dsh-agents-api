@@ -93,7 +93,7 @@ import type { SandboxProvider } from './sandbox/contract.ts'
 import type { SandboxRegistry } from './sandbox/registry.ts'
 import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, EnvironmentTemplateConfig, OAISandboxEnvironment, TemplateFileInput } from './environment-types.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { SubagentState } from './session-registry.ts'
+import type { LoggedSubagent } from './history/session-history.ts'
 import {
   StoreUnavailableError,
   encodeSessionCursor,
@@ -321,8 +321,8 @@ export class AgentsGateway {
       sources: [uploaded, toolImageSource({
         imageRefs: async (owner, sessionId) => {
           if (await this.store.sessions.get(sessionId, owner) === undefined) return undefined
-          const children = this.sessionRegistry.listSubagents(sessionId)
-          const logs = await Promise.all([sessionId, ...children.map(child => child.id)].map(id => this.history.toolImages(id)))
+          const children = new Set([...this.sessionRegistry.listSubagents(sessionId).map(child => child.id), ...await this.history.subagentIds(sessionId)])
+          const logs = await Promise.all([sessionId, ...children].map(id => this.history.toolImages(id)))
           return logs.flat()
         },
         attachments,
@@ -1404,6 +1404,11 @@ export class AgentsGateway {
     if ((event.type as string) === 'agent-preset/selected') this.commandsApi.invalidate()
     const step = this.sessionRegistry.apply(sessionId, event)
     if (step?.status) this.recordStatus(sessionId, step.status.status, step.status.error)
+    // The turn's end cleared the shown actions; a subagent's requests outlive it.
+    if (step !== undefined && event.type === 'turn/end') {
+      const pending = this.approvals.pending(sessionId)
+      if (pending.length > 0) this.setInteractionActions(sessionId, pending)
+    }
   }
 
   /**
@@ -2513,31 +2518,50 @@ export class AgentsGateway {
     return workspace
   }
 
+  /**
+   * Subagents of a session: children seen live by this process come from the
+   * registry (the cache), the rest are rebuilt from their Session logs through
+   * the same projection. A child belongs to its parent's owner, so callers
+   * check the parent first.
+   * @param row - the parent's index row.
+   * @param childId - only this child, when given.
+   * @returns the children, oldest first.
+   */
+  private async subagentsOf(row: SessionIndexRow, childId?: string): Promise<LoggedSubagent[]> {
+    const live = new Map(this.sessionRegistry.listSubagents(row.id)
+      .filter(child => childId === undefined || child.id === childId)
+      .map(child => [child.id, { resource: subagentResource(child), turns: child.turns, items: child.items }]))
+    if (childId !== undefined && live.has(childId)) return [live.get(childId)!]
+    const logged = await this.history.subagents(row.id, baseOf(row).agent.id, childId)
+    const merged = logged.map(child => live.get(child.resource.id) ?? child)
+    for (const [id, child] of live) {
+      if (!merged.some(row => row.resource.id === id)) merged.push(child)
+    }
+    return merged.sort((a, b) => a.resource.created_at - b.resource.created_at)
+  }
+
   private async listSubagents(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const sessionId = routeParam(params, 'session_id')
-    if (!await this.requireSession(res, owner, sessionId)) return
-    json(res, 200, {
-      object: 'list',
-      data: this.sessionRegistry.listSubagents(sessionId).map(subagentResource),
-    })
+    const row = await this.requireSession(res, owner, routeParam(params, 'session_id'))
+    if (!row) return
+    json(res, 200, { object: 'list', data: (await this.subagentsOf(row)).map(child => child.resource) })
   }
 
   private async getSubagent(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const located = await this.requireSubagent(res, params, owner)
-    if (!located) return
-    json(res, 200, subagentResource(located.child))
+    const child = await this.requireSubagent(res, params, owner)
+    if (!child) return
+    json(res, 200, child.resource)
   }
 
   private async listSubagentTurns(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const located = await this.requireSubagent(res, params, owner)
-    if (!located) return
-    json(res, 200, { object: 'list', data: this.sessionRegistry.listChildTurns(located.sessionId, located.subagentId) ?? [] })
+    const child = await this.requireSubagent(res, params, owner)
+    if (!child) return
+    json(res, 200, { object: 'list', data: child.turns })
   }
 
   private async getSubagentTurn(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const located = await this.requireSubagent(res, params, owner)
-    if (!located) return
-    const turn = this.sessionRegistry.getChildTurn(located.sessionId, located.subagentId, routeParam(params, 'turn_id'))
+    const child = await this.requireSubagent(res, params, owner)
+    if (!child) return
+    const turn = child.turns.find(row => row.id === routeParam(params, 'turn_id'))
     if (!turn) {
       notFound(res, 'turn not found')
       return
@@ -2546,38 +2570,32 @@ export class AgentsGateway {
   }
 
   private async listSubagentItems(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const located = await this.requireSubagent(res, params, owner)
-    if (!located) return
-    json(res, 200, { object: 'list', data: this.sessionRegistry.listChildItems(located.sessionId, located.subagentId) ?? [] })
+    const child = await this.requireSubagent(res, params, owner)
+    if (!child) return
+    json(res, 200, { object: 'list', data: child.items })
   }
 
   private async listSubagentTurnItems(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const located = await this.requireSubagent(res, params, owner)
-    if (!located) return
+    const child = await this.requireSubagent(res, params, owner)
+    if (!child) return
     const turnId = routeParam(params, 'turn_id')
-    if (!this.sessionRegistry.getChildTurn(located.sessionId, located.subagentId, turnId)) {
+    if (!child.turns.some(row => row.id === turnId)) {
       notFound(res, 'turn not found')
       return
     }
-    const items = (this.sessionRegistry.listChildItems(located.sessionId, located.subagentId) ?? [])
-      .filter(item => item.turn_id === turnId)
-    json(res, 200, { object: 'list', data: items })
+    json(res, 200, { object: 'list', data: child.items.filter(item => item.turn_id === turnId) })
   }
 
   private async requireSubagent(
     res: ServerResponse,
     params: Record<string, string>,
     owner: OwnerId,
-  ): Promise<{ sessionId: string; subagentId: string; child: SubagentState } | undefined> {
-    const sessionId = routeParam(params, 'session_id')
-    const subagentId = routeParam(params, 'subagent_id')
-    if (!await this.requireSession(res, owner, sessionId)) return undefined
-    const child = this.sessionRegistry.getSubagent(sessionId, subagentId)
-    if (!child) {
-      notFound(res, 'subagent not found')
-      return undefined
-    }
-    return { sessionId, subagentId, child }
+  ): Promise<LoggedSubagent | undefined> {
+    const row = await this.requireSession(res, owner, routeParam(params, 'session_id'))
+    if (!row) return undefined
+    const child = (await this.subagentsOf(row, routeParam(params, 'subagent_id')))[0]
+    if (!child) notFound(res, 'subagent not found')
+    return child
   }
 
   /**

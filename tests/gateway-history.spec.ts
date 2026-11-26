@@ -376,6 +376,43 @@ describe('history routes after restart', () => {
     expect((await fetch(`${second.origin}/v1/agents/sessions/${id}/turns/turn_9`)).status).toBe(404)
   })
 
+  it('serves subagents, their turns and items from the child logs after restart, as live', async () => {
+    const store = new MemoryStore()
+    const query = new FakeSessionQuery()
+    const first = await startProcess(store, query)
+    const id = await createSession(first.origin)
+    const other = await createSession(first.origin)
+    query.headers.set('child_1', { parentSession: id, origin: 'subagent', createdAt: 4_000 })
+    query.headers.set('child_x', { parentSession: other, origin: 'subagent', createdAt: 4_000 })
+    const child = [
+      logEvent('request/header', { header: { config: { model: 'deepseek-flash' } }, reason: 'initial' }, 0, 4_000),
+      logEvent('turn/start', { turn: 1 }, 1, 4_000),
+      logEvent('user/message', { content: [{ type: 'text', text: 'look' }], source: { kind: 'user' } }, 2, 4_100),
+      logEvent('assistant/message', { message: { content: [{ type: 'text', text: 'seen' }] } }, 3, 4_200),
+      logEvent('turn/end', { reason: { kind: 'completed' } }, 4, 5_000),
+    ]
+    for (const event of child) {
+      query.append('child_1', event)
+      first.registry.applyChildEvent(id, 'child_1', event, 4_000)
+    }
+    query.append('child_x', child[1]!)
+    first.registry.closeSubagent(id, 'child_1')
+    const read = async (origin: string, path: string) => (await fetch(`${origin}/v1/agents/sessions/${id}/subagents${path}`)).json() as Promise<unknown>
+    const paths = ['', '/child_1', '/child_1/turns', '/child_1/turns/turn_1', '/child_1/items', '/child_1/turns/turn_1/items']
+    const live = await Promise.all(paths.map(path => read(first.origin, path)))
+    query.crash()
+
+    const second = await startProcess(store, query)
+    expect(second.registry.listSubagents(id)).toEqual([])
+    const rebuilt = await Promise.all(paths.map(path => read(second.origin, path)))
+    expect(rebuilt).toEqual(live)
+    expect(rebuilt[0]).toMatchObject({ data: [{ id: 'child_1', status: 'closed', created_at: 4, closed_at: 5, model: 'deepseek-flash' }] })
+    expect((rebuilt[4] as { data: unknown[] }).data).toHaveLength(2)
+    // A child is reachable only through its own parent, whose owner was checked.
+    expect((await fetch(`${second.origin}/v1/agents/sessions/${id}/subagents/child_x`)).status).toBe(404)
+    expect((await fetch(`${second.origin}/v1/agents/sessions/${id}/subagents/child_1/turns/turn_9`)).status).toBe(404)
+  })
+
   it('replays a slash command result as a turn-less item across restart', async () => {
     const store = new MemoryStore()
     const query = new FakeSessionQuery()

@@ -204,10 +204,12 @@ export class WireProjector {
   setInteractionActions(actions: readonly OAIRequiredAction[]): StatusChange | undefined {
     this.#interaction = [...actions]
     const before = this.status
+    // A subagent can ask while this session has no open turn (children outlive the parent's turn).
+    const fromChild = this.#interaction.some(action => action.type === 'approval' && action.subagent_id !== undefined)
     if (this.#required.length + this.#interaction.length > 0) {
-      if (this.currentTurnId !== undefined) this.status = 'requires_action'
-    } else if (this.status === 'requires_action' && this.currentTurnId !== undefined) {
-      this.status = 'in_progress'
+      if (this.currentTurnId !== undefined || (fromChild && this.status === 'idle')) this.status = 'requires_action'
+    } else if (this.status === 'requires_action') {
+      this.status = this.currentTurnId !== undefined ? 'in_progress' : 'idle'
     }
     return this.status === before ? undefined : { status: this.status, error: this.error }
   }

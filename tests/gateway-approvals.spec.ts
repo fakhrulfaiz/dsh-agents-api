@@ -115,6 +115,22 @@ describe('approvals over the API', () => {
     expect(frame?.[1]).toBeUndefined()
   })
 
+  it('shows a subagent approval on the parent through the parent turn end, and the parent answers it', async () => {
+    const f = await fixture()
+    const id = await session(f)
+    f.api.applySessionEvent(id, logEvent('turn/start', { turn: 1 }, 1))
+    f.h.log('child_1', 'approval/asked', { id: 'appr-c', toolName: 'bash', callId: 'call_9' })
+    const outcome = f.h.approve({ agent: f.h.child('child_1', id), toolName: 'bash', callId: 'call_9' as never, reason: 'run it' })
+    expect((await read(f, id)).required_actions).toEqual([expect.objectContaining({ id: 'appr-c', subagent_id: 'child_1' })])
+    // The parent's turn ends while the child keeps waiting.
+    f.h.log(id, 'turn/end', {})
+    f.api.applySessionEvent(id, logEvent('turn/end', { reason: { kind: 'completed' } }, 2))
+    expect(await read(f, id)).toMatchObject({ status: 'requires_action', required_actions: [{ id: 'appr-c', subagent_id: 'child_1' }] })
+    expect((await events(f, id, { type: 'agent.session.input.approval_response', id: 'appr-c', decision: 'approve' })).status).toBe(200)
+    await expect(outcome).resolves.toBe('allowed-once')
+    expect(await read(f, id)).toMatchObject({ status: 'idle', required_actions: [] })
+  })
+
   it('approve resolves the request and the session goes back to in_progress', async () => {
     const f = await fixture()
     const id = await session(f)

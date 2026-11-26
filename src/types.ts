@@ -323,6 +323,8 @@ export type OAIRequiredAction =
     call_id?: string
     /** Full question items for a multi-question request (`user_question` only). */
     questions?: AskUserQuestionItem[]
+    /** Set when a subagent of this session asked (its Host session id, as in `/subagents`). */
+    subagent_id?: string
   }
 
 /** Durable session resource. */
@@ -716,6 +718,8 @@ export interface OAISubagent {
   status: 'active' | 'closed'
   created_at: number
   closed_at?: number
+  /** Model of the subagent's latest model request, from its Session log; `null` before its first request. */
+  model: string | null
 }
 
 /** Local calendar time of an `at` timing. */

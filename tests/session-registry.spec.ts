@@ -100,12 +100,11 @@ describe('SessionRegistry', () => {
     registry.subscribe('sess_1', (evt, id) => { seen.push({ type: evt.type, id, evt: evt as unknown as Record<string, unknown> }) })
     registry.ensureSubagent('sess_1', 'c')
     registry.ensureSubagent('sess_1', 'c')
-    const turn = registry.openChildTurn('sess_1', 'c')!
-    registry.appendChildItems('sess_1', 'c', [
-      { id: 'item_fn_1', type: 'function_call', call_id: 'k', name: 'bash', arguments: '{}', status: 'in_progress', turn_id: turn.id } as never,
-      { id: 'item_msg_2', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }], status: 'completed', turn_id: turn.id } as never,
-    ])
-    registry.finishChildTurn('sess_1', 'c', turn.id, 'completed')
+    registry.applyChildEvent('sess_1', 'c', logEvent('turn/start', { turn: 1 }, 0))
+    const turn = { id: 'turn_0' }
+    registry.applyChildEvent('sess_1', 'c', logEvent('tool/call', { turn: 1, step: 1, callId: 'k', name: 'glob', arguments: '{}' }, 1))
+    registry.applyChildEvent('sess_1', 'c', logEvent('assistant/message', { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'done' }] } }, 2))
+    registry.applyChildEvent('sess_1', 'c', logEvent('turn/end', { reason: { kind: 'completed' } }, 3))
     registry.closeSubagent('sess_1', 'c')
     expect(seen.map(e => e.type)).toEqual([
       'agent.session.subagent.created',
@@ -160,6 +159,17 @@ describe('SessionRegistry', () => {
       expect(registry.setInteractionActions('sess_1', [approval])).toBeUndefined()
       expect(registry.getOAISession('sess_1')?.status).toBe('idle')
       expect(registry.setInteractionActions('sess_1', [])).toBeUndefined()
+    })
+
+    it('shows a subagent request while no turn is open as requires_action, and idle when it clears', () => {
+      const registry = registryWith('sess_1')
+      const seen: string[] = []
+      registry.subscribe('sess_1', (evt) => { seen.push(evt.type) })
+      const fromChild: OAIRequiredAction = { ...approval, subagent_id: 'child_1' }
+      expect(registry.setInteractionActions('sess_1', [fromChild])).toEqual({ status: 'requires_action', error: null })
+      expect(registry.getOAISession('sess_1')).toMatchObject({ status: 'requires_action', required_actions: [fromChild] })
+      expect(registry.setInteractionActions('sess_1', [])).toEqual({ status: 'idle', error: null })
+      expect(seen).toEqual(['agent.session.requires_action', 'agent.session.idle'])
     })
 
     it('keeps requires_action while a function call and an approval overlap', () => {

@@ -38,7 +38,7 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 | `GET` | `/agents/sessions/{session_id}/turns/{turn_id}` | Retrieve one turn |
 | `GET` | `/agents/sessions/{session_id}/artifacts` | List session artifacts from the workspace, or from S3 when that endpoint is configured |
 | `GET` | `/agents/sessions/{session_id}/artifacts/{path}` | Download one artifact. Paths that escape the workspace are rejected |
-| `GET` | `/agents/sessions/{session_id}/subagents` | List Host children whose header `origin` is `subagent` |
+| `GET` | `/agents/sessions/{session_id}/subagents` | List Host children whose header `origin` is `subagent` (rebuilt from their Session logs, so they survive a restart; `model` is the model of the child's latest request) |
 | `GET` | `/agents/sessions/{session_id}/subagents/{subagent_id}` | Retrieve one child |
 | `GET` | `/agents/sessions/{session_id}/subagents/{subagent_id}/turns` | List that child's turns |
 | `GET` | `/agents/sessions/{session_id}/subagents/{subagent_id}/turns/{turn_id}` | Retrieve one child turn |
@@ -118,7 +118,8 @@ Errors: 400 `invalid_approval_response` (bad `id` or `decision`, or an incomplet
 
 Limits:
 
-- Approvals requested by a subagent (child agent) are not exposed; they fail closed (the tool call is denied).
+- Approvals requested by a subagent (child agent) of a live session appear on the parent session as `approval` actions with `subagent_id` (the child's id in `/subagents`), and the parent's `approval_response` answers them. They stay pending when the parent's turn ends (a child can outlive it), so the parent shows `requires_action` with no open turn until they are answered; the child's own turn end, `agent.session.input.cancel` on the parent, or deleting the parent cancels them.
+- Questions (`ask_user_question`) from a subagent are not exposed: DSH refuses them before any answerer runs (`DELEGATED_CALLER`; only a live root agent may ask a human, timed or not) and tells the child to put the question in its final result.
 - Timed questions (`tool-ask-user` in `mode: "timed"`) are not supported; the Host continues without an answer.
 - The profile must mount `tool-ask-user` for questions and keep the approval policy `ask`: under `never` (`DSH_PERMISSION_MODE=danger-full-access`) the Host rejects every approval before this API sees it.
 
@@ -239,11 +240,11 @@ Every event derived from the session's DSH Session log carries an `id:`. Session
 
 `GET .../events` with `Last-Event-ID: <n>` or `<n>.<sub>` writes every event after it, derived from the Session log, then continues live without gaps or duplicates. Without the header the stream starts live with one status snapshot event whose type matches the session status: `agent.session.idle`, `in_progress`, `requires_action`, or `failed` (also for an `interrupted` session). A `Last-Event-ID` that is not an id replays the whole history.
 
-Three kinds of event are ephemeral: they have no `id:` line, are never replayed, and do not move later ids. They are the status snapshot written when a stream connects, the `idle` event that closes a streamed create without input, `error` events for a failed input dispatch, and the subagent events: `agent.session.subagent.created` and `.closed` (carry the `subagent` resource), `.updated` (a child turn opened or ended; carries `subagent` and `turn`), and `.item.added`/`.item.done` (a child item was saved; carry `subagent_id`, `turn_id` and the `item`, which has `subagent_id`). Child state is memory-only and not in the parent's log, so subagent events are live only; a client re-reads `/subagents` on open and on reconnect. A reconnecting client derives the current status from the snapshot.
+Three kinds of event are ephemeral: they have no `id:` line, are never replayed, and do not move later ids. They are the status snapshot written when a stream connects, the `idle` event that closes a streamed create without input, `error` events for a failed input dispatch, and the subagent events: `agent.session.subagent.created` and `.closed` (carry the `subagent` resource), `.updated` (a child turn opened or ended; carries `subagent` and `turn`), and `.item.added`/`.item.done` (a child item was saved; carry `subagent_id`, `turn_id` and the `item`, which has `subagent_id`). Child activity is in the child's own Session log, not the parent's, so these events are live only: they have no position in the parent's frame sequence, and numbering them would mean merging separate logs by timestamp under a new id scheme. A client re-reads `/subagents` (rebuilt from the child logs, so it survives a restart) on open and on reconnect. A reconnecting client derives the current status from the snapshot.
 
 A turn that was open when the server stopped is closed after the restart: its `function_call` tool calls get a failed `function_call_output`, and the turn becomes `cancelled` with `error.code: "interrupted"`. A `tool_result` for a call parked before the restart answers 400 `unknown_call_id`. Cancel now reports `agent.session.turn.cancelled` when the Host ends the turn, a few milliseconds after the request, rather than inside the request.
 
-Known gap: the `session` objects inside replayed events show the session's current configuration, not the configuration at the time of the event, because configuration changes are not in the Session log. Subagent turns and items are in memory only and are lost on restart.
+Known gap: the `session` objects inside replayed events show the session's current configuration, not the configuration at the time of the event, because configuration changes are not in the Session log. Subagent events are not replayed (see above); `/subagents` and its turns and items are rebuilt from the child logs after a restart.
 
 MCP tool `headers` and stdio `env` values supplied in `agent.tools` (which may carry credentials) are returned masked as `***` by all session and saved-agent responses and SSE events, and are stored as part of the agent and session configuration in Postgres (`agents.body`, `sessions.body`) at rest.
 

@@ -111,4 +111,22 @@ describe('GET /agents/files/{id}/content for tool-result images', () => {
     expect(output['images'][0]['file_id']).toBe(fileId)
     expect((await get(h, 'alice', fileId)).status).toBe(200)
   })
+
+  it('serves a subagent image after a restart, to the parent owner only', async () => {
+    const h = await start()
+    const res = await h.request('alice', 'POST', '/agents/sessions', { agent: { model: 'deepseek-flash' }, environment: { type: 'none' } })
+    const sessionId = res.body!['id'] as string
+    const ref = await h.attachments.saveImage({ data: PNG, mediaType: 'image/png', name: 'shot.png' } as never)
+    h.query.headers.set('child_img', { parentSession: sessionId, origin: 'subagent' })
+    h.query.append('child_img', logEvent('turn/start', { turn: 1 }, 1))
+    h.query.append('child_img', logEvent('tool/call', { turn: 1, step: 1, callId: 'c1', name: 'read_image', arguments: '{}' }, 2))
+    h.query.append('child_img', imageResult(3, ref as unknown as Record<string, unknown>))
+    h.query.crash()
+    const items = await h.request('alice', 'GET', `/agents/sessions/${sessionId}/subagents/child_img/items`)
+    const output = (items.body!['data'] as Array<Record<string, any>>).find(item => item['type'] === 'function_call_output')!
+    const fileId = output['images'][0]['file_id'] as string
+    expect((await get(h, 'alice', fileId)).status).toBe(200)
+    expect((await get(h, 'mallory', fileId)).status).toBe(404)
+    expect((await h.request('mallory', 'GET', `/agents/sessions/${sessionId}/subagents/child_img/items`)).status).toBe(404)
+  })
 })

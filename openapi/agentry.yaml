@@ -2225,7 +2225,7 @@ paths:
 
         Ids. Every event derived from the Session log carries an `id:`. Session status, turn, assistant message and slash-command events are numbered `1, 2, 3, ...` (`agent.session.created` is always 1). Item frames for the rest of the item log (user messages, reasoning, tool calls and outputs; `agent.session.turn.item.added` for a call, `agent.session.turn.item.done` otherwise) are numbered after the frame before them: `<n>.1`, `<n>.2`, ... (a reasoning item comes before the assistant message it belongs to). So the item frames never moved an existing id, and an integer `Last-Event-ID` saved before they existed still resumes at the same place. Compare ids as (`n`, `sub`) pairs, not as decimals (`12.10` follows `12.9`). The sequence is a pure function of the Session log, so ids and the payload `event_id` (`evt_<session_id>_<id>`) survive server restarts. A user message item's attachments carry their file ids, as in `GET .../items`.
 
-        Ephemeral frames have no `id:` line, are never replayed, and do not shift later ids: the status snapshot written when a stream connects, the `idle` event that closes a streamed create without input, `error` events for a failed input dispatch, and the `requires_action`/`in_progress` events raised by approvals, and the `agent.session.subagent.*` events (subagent created, turn opened or ended, item saved, closed; child state is memory-only, so re-read `/subagents` on open and on reconnect).
+        Ephemeral frames have no `id:` line, are never replayed, and do not shift later ids: the status snapshot written when a stream connects, the `idle` event that closes a streamed create without input, `error` events for a failed input dispatch, and the `requires_action`/`in_progress` events raised by approvals, and the `agent.session.subagent.*` events (subagent created, turn opened or ended, item saved, closed; they are not in this session's log, so re-read `/subagents`, which is rebuilt from the child logs, on open and on reconnect).
 
         Resume. Send `Last-Event-ID: <n>` or `<n>.<sub>` to receive every event after it, derived from the Session log, then live events without gaps or duplicates. A value that is not an id replays the whole history. A `Last-Event-ID` connection to a session with pending approvals additionally receives one ephemeral `agent.session.requires_action` snapshot. Without the header the stream starts with one status snapshot (`idle`, `in_progress`, `requires_action`, or `failed`).
   /v1/agents/sessions/{session_id}/items:
@@ -2462,6 +2462,7 @@ paths:
       - $ref: "#/components/parameters/SessionId"
     get:
       summary: List subagents
+      description: Children whose Host session header says `origin` is `subagent`, oldest first. Children seen live by this process come from memory; the rest are rebuilt from their Session logs, so the list, turns, and items survive a restart. A child belongs to its parent's owner.
       tags:
         - Subagents
       responses:
@@ -4196,6 +4197,9 @@ components:
           items:
             $ref: "#/components/schemas/Question"
           description: "`user_question` with several questions."
+        subagent_id:
+          type: string
+          description: Set when a subagent of this session asked (its id in `/subagents`). Answer it on this session like any approval; it can be pending while the session has no open turn (status `requires_action`).
       required:
         - type
         - id
@@ -4820,6 +4824,11 @@ components:
           type: integer
         closed_at:
           type: integer
+        model:
+          type:
+            - string
+            - "null"
+          description: Model of the subagent's latest model request, from its Session log; null before its first request.
       required:
         - id
         - object
@@ -4827,6 +4836,7 @@ components:
         - parent_session_id
         - status
         - created_at
+        - model
     SendMessageInputEvent:
       type: object
       properties:

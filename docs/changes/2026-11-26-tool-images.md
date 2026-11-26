@@ -20,6 +20,6 @@ A `function_call_output` item may carry `images`, an array of:
 
 ## Limits
 
-- Subagent images are served only while the subagent is live (their items are live-only today).
+- Subagent images were served only while the subagent was live; since `2026-11-26-durable-subagents.md` they are served from the child logs too.
 - Shell (`command_execution`) results carry no images.
 - Each content request scans the session log; fine for now.

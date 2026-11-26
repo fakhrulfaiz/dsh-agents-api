@@ -3,7 +3,7 @@ import { SessionQueryError } from '@deepseek-ai/dsh-session-query'
 import { materializeAgent } from '../../src/agent-records.ts'
 import { WireProjector, frameSseId, type ProjectionBase } from '../../src/history/projector.ts'
 import { createSessionHistory } from '../../src/history/session-history.ts'
-import { SessionRegistry } from '../../src/session-registry.ts'
+import { SessionRegistry, subagentResource } from '../../src/session-registry.ts'
 import { FakeSessionQuery, logEvent } from '../support/fake-session-query.ts'
 
 const agent = materializeAgent({ model: 'deepseek-chat' })
@@ -107,5 +107,70 @@ describe('SessionHistory', () => {
     })
     await expect(history.items(base, { limit: 10 })).rejects.toThrow('corrupt log')
     await expect(history.workspace('sess_h')).rejects.toThrow('corrupt log')
+  })
+})
+
+describe('SessionHistory subagents', () => {
+  /** Two events inherited from the parent (a fork seed), then the child's own work. */
+  const INHERITED = [
+    logEvent('turn/start', { turn: 1 }, 0, 1_000),
+    logEvent('turn/end', { reason: { kind: 'completed' } }, 1, 1_000),
+  ]
+  const OWN = [
+    logEvent('request/header', { header: { config: { provider: 'p', model: 'deepseek-flash' } }, reason: 'resume' }, 2, 6_000),
+    logEvent('turn/start', { turn: 2 }, 3, 6_000),
+    logEvent('user/message', { content: [{ type: 'text', text: 'find files' }], source: { kind: 'user' } }, 4, 6_000),
+    logEvent('step/start', { turn: 2, step: 1 }, 5, 6_100),
+    logEvent('tool/call', { turn: 2, step: 1, callId: 'c1', name: 'glob', arguments: '{}' }, 6, 6_200),
+    logEvent('tool/result', { turn: 2, step: 1, message: { source: { kind: 'tool', callId: 'c1' }, content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'a.ts' }] }] } }, 7, 7_000),
+    logEvent('assistant/message', { turn: 2, step: 1, message: { content: [{ type: 'text', text: 'found a.ts' }] } }, 8, 7_500),
+    logEvent('turn/end', { reason: { kind: 'completed' }, usage: { inputTokens: 3, outputTokens: 4 } }, 9, 8_000),
+  ]
+
+  function withChild() {
+    const { query, history } = setup()
+    query.headers.set('child_1', { parentSession: 'sess_h', origin: 'subagent', createdAt: 5_500, inheritedEventCount: INHERITED.length })
+    for (const event of [...INHERITED, ...OWN]) query.append('child_1', event)
+    // A child of another session and a non-subagent child stay out of the list.
+    query.headers.set('child_other', { parentSession: 'sess_x', origin: 'subagent' })
+    query.append('child_other', logEvent('turn/start', { turn: 1 }, 0))
+    query.headers.set('fork_1', { parentSession: 'sess_h' })
+    query.append('fork_1', logEvent('turn/start', { turn: 1 }, 0))
+    return { query, history }
+  }
+
+  it('rebuilds a closed child from its log exactly as the live registry projected it', async () => {
+    const { query, history } = withChild()
+    const registry = new SessionRegistry()
+    registry.register(new WireProjector(base, false))
+    for (const event of OWN) registry.applyChildEvent('sess_h', 'child_1', event, 5_500)
+    registry.closeSubagent('sess_h', 'child_1')
+    const live = registry.getSubagent('sess_h', 'child_1')!
+
+    query.crash()
+    const [rebuilt, ...rest] = await history.subagents('sess_h', agent.id)
+    expect(rest).toEqual([])
+    expect(rebuilt!.resource).toEqual(subagentResource(live))
+    expect(rebuilt!.resource).toMatchObject({ status: 'closed', created_at: 5, closed_at: 8, model: 'deepseek-flash' })
+    expect(rebuilt!.turns).toEqual(live.turns)
+    expect(rebuilt!.turns).toMatchObject([{ id: 'turn_3', session_id: 'child_1', subagent_id: 'child_1', status: 'completed' }])
+    expect(rebuilt!.items).toEqual(live.items)
+    expect(rebuilt!.items.map(item => item.id)).toEqual(['item_msg_4', 'item_fn_6', 'item_fn_out_7', 'item_msg_8'])
+    expect(rebuilt!.items.every(item => item.subagent_id === 'child_1')).toBe(true)
+  })
+
+  it('shows a child whose log is live as active, and finds one child by id', async () => {
+    const { history } = withChild()
+    expect(await history.subagentIds('sess_h')).toEqual(['child_1'])
+    const [one] = await history.subagents('sess_h', agent.id, 'child_1')
+    expect(one!.resource).toMatchObject({ id: 'child_1', status: 'active' })
+    expect(one!.resource.closed_at).toBeUndefined()
+    expect(await history.subagents('sess_h', agent.id, 'child_other')).toEqual([])
+  })
+
+  it('has no subagents without a parent log or lineage tracing', async () => {
+    expect(await createSessionHistory(new FakeSessionQuery()).subagents('sess_none', agent.id)).toEqual([])
+    const { query } = withChild()
+    expect(await createSessionHistory({ readSession: query.readSession }).subagentIds('sess_h')).toEqual([])
   })
 })

@@ -40,7 +40,7 @@ import { firstThen, type Authenticator, type OwnerId } from './auth/authenticato
 import { API_KEY_HASH_PATTERN, createApiKeyAuthenticator, type ApiKeyEntry } from './auth/api-keys.ts'
 import { createKeycloakAuthenticator } from './auth/keycloak.ts'
 import { createStaticKeyAuthenticator } from './auth/static-key.ts'
-import { installApprovalBridge } from './approvals/approval-bridge.ts'
+import { claimAgent, installApprovalBridge } from './approvals/approval-bridge.ts'
 import { bridgeChildSessionEvent } from './bridge.ts'
 import { createLocalProvider, directorySegment } from './environment/local.ts'
 import { createAgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
@@ -423,7 +423,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   const staging = stagingDir === undefined ? undefined : createFilesystemFileStore(stagingDir)
   const sessionRegistry = new SessionRegistry()
   const approvals = installApprovalBridge(ctx, {
-    claims: agent => sessionRegistry.get(agent.session.id)?.id,
+    claims: agent => claimAgent(agent, id => sessionRegistry.get(id) !== undefined),
     onChange: (sessionId, actions) => gateway.setInteractionActions(sessionId, actions),
   })
   let builtinSkills: readonly BuiltinSkill[] = []
@@ -498,7 +498,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     const parent = session.header?.parentSession
     if (session.header?.origin === 'subagent' && parent && sessionRegistry.get(parent)) {
-      bridgeChildSessionEvent(parent, session.id, event, sessionRegistry)
+      bridgeChildSessionEvent(parent, session.id, event, sessionRegistry, session.header.createdAt)
       return
     }
     gateway.applySessionEvent(session.id, event)
