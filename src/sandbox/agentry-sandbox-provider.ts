@@ -40,6 +40,8 @@ export interface AgentrySandboxProvider extends SandboxProvider {
   describe(record: EnvironmentRecord): Promise<SandboxSummary>
   /** Size of a workspace file, or `undefined` when there is no such file. */
   fileSize(record: EnvironmentRecord, path: string): Promise<number | undefined>
+  /** Size and modification time (ms) of a workspace file, or `undefined` when there is no such file. */
+  fileStat(record: EnvironmentRecord, path: string): Promise<{ size: number; mtimeMs: number } | undefined>
   exists(record: EnvironmentRecord, path: string): Promise<boolean>
   /** Remove a workspace-relative file in the sandbox (missing is not an error). */
   remove(record: EnvironmentRecord, path: string): Promise<void>
@@ -294,6 +296,22 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
         const res = await envd.filesystem.stat({ path: inside(dir, path) }, { headers: envd.userHeaders(AGENT) })
         const type = String(res.entry?.type)
         return type === '1' || type === 'FILE_TYPE_FILE' ? Number(res.entry?.size ?? 0) : undefined
+      } catch (e) {
+        if ((e as { code?: unknown }).code === 5 || /not[_ ]found|no such file/i.test((e as Error).message)) return undefined
+        throw e
+      }
+    },
+
+    async fileStat(record, path) {
+      const { id, dir } = meta(record)
+      const envd = api(ownerOf(record)).envd(id)
+      try {
+        const res = await envd.filesystem.stat({ path: inside(dir, path) }, { headers: envd.userHeaders(AGENT) })
+        const type = String(res.entry?.type)
+        if (type !== '1' && type !== 'FILE_TYPE_FILE') return undefined
+        const modified = res.entry?.modifiedTime
+        const mtimeMs = modified === undefined ? 0 : Number(modified.seconds) * 1000 + Math.trunc(modified.nanos / 1_000_000)
+        return { size: Number(res.entry?.size ?? 0), mtimeMs }
       } catch (e) {
         if ((e as { code?: unknown }).code === 5 || /not[_ ]found|no such file/i.test((e as Error).message)) return undefined
         throw e

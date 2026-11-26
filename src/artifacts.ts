@@ -181,6 +181,29 @@ export async function getWorkspaceArtifact(
 }
 
 /**
+ * Size and modification time of one workspace file, without reading it.
+ * @param workspace - session workspace directory.
+ * @param relativePath - raw relative path.
+ * @returns the absolute path, size and mtime, or undefined when unsafe, missing, or not a regular file.
+ */
+export async function statWorkspaceArtifact(
+  workspace: string,
+  relativePath: string,
+): Promise<{ absolute: string; size: number; mtimeMs: number } | undefined> {
+  const safe = sanitizeRelativePath(relativePath)
+  if (safe === undefined) return undefined
+  const absolute = resolve(workspace, ...safe.split('/'))
+  const root = resolve(workspace)
+  if (absolute !== root && !absolute.startsWith(root + sep)) return undefined
+  try {
+    const info = await stat(absolute)
+    return info.isFile() ? { absolute, size: info.size, mtimeMs: info.mtimeMs } : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Reject empty, absolute, or traversal-bearing relative paths.
  * @param relativePath - raw path from the URL.
  * @returns a forward-slash relative path, or undefined when unsafe.

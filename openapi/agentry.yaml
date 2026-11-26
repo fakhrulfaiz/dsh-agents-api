@@ -2456,6 +2456,89 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/renders/pdf/{path}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/FilePath"
+    get:
+      summary: Render an Office file as PDF
+      description: "Converts a `doc`, `docx`, `xls`, `xlsx`, `ppt` or `pptx` file in the session's workspace (local folder, sandbox or artifact store) to PDF with the Host's Office-to-PDF service. Conversions run in the API process (2 at a time, 60 s each); the service caches PDFs by content. Send the `ETag` back in `If-None-Match` to get a 304 while the file is unchanged."
+      tags:
+        - Sessions
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "The PDF."
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: '`"<size>:<mtime>"` of the source file.'
+            X-Agentry-Missing-Fonts:
+              schema:
+                type: string
+              description: "Comma-separated, URL-encoded font families the conversion did not have; absent when none."
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "304":
+          description: "The source is unchanged since the given `ETag`."
+        "400":
+          description: "Bad path, or `unsupported_format` for a file that is not an Office document."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "`source_changed`: the file changed during the conversion."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: "`file_too_large`: the file is over 50 MB, or the PDF over 100 MB."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: "`invalid_document`: the file could not be read as a document."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: "`render_failed`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: "`render_unavailable` (no converter in this profile), `render_busy` (with `Retry-After: 5`), `sandbox_unavailable`, or `store_unavailable`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "504":
+          description: "`render_timeout`: the conversion took longer than 60 s."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /v1/agents/sessions/{session_id}/subagents:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"

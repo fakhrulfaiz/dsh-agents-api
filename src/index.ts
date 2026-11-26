@@ -52,6 +52,7 @@ import { DEFAULT_ALLOWED_MEDIA_TYPES, stagingDirectory, validateUploads, type Up
 import { createFilesystemFileStore, type FileStore } from './files/file-store.ts'
 import { startSweeper } from './files/sweeper.ts'
 import { AgentsGateway } from './gateway.ts'
+import type { OfficeToPdfLike } from './render/office-api.ts'
 import { errorMessage } from './http.ts'
 import { createSessionHistory } from './history/session-history.ts'
 import { recoverSessions, recoveryUnavailable } from './recovery.ts'
@@ -474,6 +475,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     ...(runtime.artifacts === undefined ? {} : { artifacts: runtime.artifacts }),
     ...(staging === undefined ? {} : { files: { staging, limits: config.uploads } }),
     attachments: () => ctx.get('attachments'),
+    officeToPdf: () => ctx.get('officeToPdf') as OfficeToPdfLike | undefined,
   })
 
   if (staging !== undefined) ctx.effect(() => verifyStaging(staging, stagingDir!), 'agents-api: upload staging')

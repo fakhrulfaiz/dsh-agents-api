@@ -6,9 +6,9 @@
  * `/agents/:agent_id` so those literal segments are never captured as an agent id.
  */
 
-import { mkdir, stat } from 'node:fs/promises'
+import { mkdir, readFile, stat } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
@@ -82,7 +82,8 @@ import { findMaskedSecret, MASKED_SECRET, redactAgentSecrets } from './redact.ts
 import { applySessionUpdate, baseOf, configOf, sessionFromRow } from './session-resource.ts'
 import { writeEvent, writeSSEHeaders } from './sse.ts'
 import type { ArtifactS3Config } from './artifacts.ts'
-import { artifactContentDisposition, artifactContentType, getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath } from './artifacts.ts'
+import { artifactContentDisposition, artifactContentType, getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath, statWorkspaceArtifact } from './artifacts.ts'
+import { renderOfficePdf, WorkspaceUnavailableError, type OfficeToPdfLike, type SessionFile } from './render/office-api.ts'
 import { directorySegment } from './environment/local.ts'
 import type { CreateEnvironmentInput } from './environment/provider.ts'
 import { readRuntimeInfo } from './environment/runtime-info.ts'
@@ -176,6 +177,8 @@ export interface GatewayOptions {
   files?: FilesRuntime
   /** The DSH attachment service when the profile provides one, read at call time. */
   attachments?: () => AttachmentsPort | undefined
+  /** DSH's Office-to-PDF service when the profile provides one, read at call time (absent: renders answer 503). */
+  officeToPdf?: () => OfficeToPdfLike | undefined
 }
 
 /** A session created by `provisionSession`: projector registered, agent live, index row written, no turn started. */
@@ -212,6 +215,7 @@ export class AgentsGateway {
   private readonly history: SessionHistory
   private readonly approvals: ApprovalBridge
   private readonly schedule: () => ScheduleService | undefined
+  private readonly officeRender: Parameters<typeof renderOfficePdf>[0]
   private readonly artifacts: ArtifactS3Config | undefined
   private readonly routes: Route[]
   /** Agentry built-in skills. */
@@ -302,6 +306,11 @@ export class AgentsGateway {
       warn: message => this.ctx.logger.warn(message),
     })
     const attachments = options.attachments ?? (() => undefined)
+    this.officeRender = {
+      officeToPdf: options.officeToPdf ?? (() => undefined),
+      requireSession: (res, owner, sessionId) => this.requireSession(res, owner, sessionId),
+      sessionFile: (owner, sessionId, path) => this.sessionFile(owner, sessionId, path),
+    }
     this.ingest = new AttachmentIngest({
       store: () => this.store,
       staging: options.files?.staging,
@@ -358,6 +367,7 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents/sessions', handler: (req, res, url, _params, p) => this.createSession(req, res, url, p.owner) },
       { method: 'GET', pattern: '/agents/sessions', handler: (_req, res, url, _params, p) => this.listSessions(res, url, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts/*path', handler: (_req, res, url, params, p) => this.getArtifact(res, params, p.owner, url.searchParams.get('download') === '1') },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/renders/pdf/*path', handler: (req, res, _url, params, p) => renderOfficePdf(this.officeRender, req, res, p.owner, routeParam(params, 'session_id'), params['path'] ?? '') },
       { method: 'GET', pattern: '/agents/sessions/:session_id/deliverables', handler: (_req, res, _url, params, p) => this.listDeliverables(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts', handler: (_req, res, _url, params, p) => this.listArtifacts(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id/items', handler: (_req, res, _url, params, p) => this.listSubagentTurnItems(res, params, p.owner) },
@@ -2504,6 +2514,49 @@ export class AgentsGateway {
     res.setHeader('Content-Disposition', artifactContentDisposition(rawPath, download))
     res.setHeader('X-Content-Type-Options', 'nosniff')
     res.end(body)
+  }
+
+  /**
+   * One workspace file of a session, by a sanitized relative path: sandbox, artifact store or local folder,
+   * as `getArtifact` reads them. The version is `<size>:<mtime>` (content hash for the artifact store).
+   * @throws {WorkspaceUnavailableError} when the sandbox cannot be reached.
+   */
+  private async sessionFile(owner: OwnerId, sessionId: string, path: string): Promise<SessionFile | undefined> {
+    const sandbox = await this.sandboxOfSession(owner, sessionId)
+    if (sandbox !== undefined) {
+      let stat: { size: number; mtimeMs: number } | undefined
+      try {
+        stat = await sandbox.provider.fileStat(sandbox.record, path)
+      } catch (e: unknown) {
+        throw new WorkspaceUnavailableError(errorMessage(e), { cause: e })
+      }
+      if (stat === undefined) return undefined
+      return {
+        size: stat.size,
+        version: `${String(stat.size)}:${String(stat.mtimeMs)}`,
+        read: async () => {
+          try {
+            return await sandbox.provider.readFile(sandbox.record, path)
+          } catch (e: unknown) {
+            throw new WorkspaceUnavailableError(errorMessage(e), { cause: e })
+          }
+        },
+      }
+    }
+    if (this.artifacts !== undefined) {
+      const body = await getS3Artifact(this.artifacts, sessionId, path)
+      if (body === undefined) return undefined
+      return { size: body.length, version: `${String(body.length)}:${createHash('sha1').update(body).digest('hex')}`, read: () => Promise.resolve(new Uint8Array(body)) }
+    }
+    const workspace = this.sessionRegistry.get(sessionId)?.workspace ?? await this.history.workspace(sessionId)
+    if (workspace === undefined) return undefined
+    const stat = await statWorkspaceArtifact(workspace, path)
+    if (stat === undefined) return undefined
+    return {
+      size: stat.size,
+      version: `${String(stat.size)}:${String(Math.trunc(stat.mtimeMs))}`,
+      read: async () => new Uint8Array(await readFile(stat.absolute)),
+    }
   }
 
   /**
