@@ -12,6 +12,7 @@ Package-local reference and change notes for `@agentry/api`.
 
 | Note | Summary |
 | --- | --- |
+| [2026-11-26-browser.md](changes/2026-11-26-browser.md) | Web browser for agents: `browser` agent field, Playwright MCP inside the sandbox through the envd stdio bridge, no host browser |
 | [2026-11-26-durable-subagents.md](changes/2026-11-26-durable-subagents.md) | Subagent list, turns, items and images rebuilt from the child Session logs after a restart; `model` on the subagent resource; subagent approvals on the parent session with `subagent_id` |
 | [2026-11-26-owner-scoped-schedule-tools.md](changes/2026-11-26-owner-scoped-schedule-tools.md) | In-chat `schedule_*` tools shadowed per session with owner-scoped copies; other owners' and ownerless tasks look like unknown ids |
 | [2026-11-26-tool-images.md](changes/2026-11-26-tool-images.md) | Images from tool results: `images` on `function_call_output` items, `timg_` file ids served by the files content route |

@@ -3316,6 +3316,11 @@ components:
             - type: string
               enum: [ask, auto]
             - type: "null"
+        browser:
+          description: "Agentry extension: the web browser (Playwright MCP tools `mcp__browser__*`). It runs only in sandbox chats, inside the sandbox; a chat on the server gets no browser tools. Absent or `null` uses the server default `browser.default` (off)."
+          oneOf:
+            - type: boolean
+            - type: "null"
         skills:
           description: "Agentry extension: skill selection. Absent or null uses every built-in skill; an explicit selection uses exactly the listed built-ins and library skills. The agent's private skills always apply."
           oneOf:
@@ -3390,6 +3395,11 @@ components:
           oneOf:
             - type: string
               enum: [ask, auto]
+            - type: "null"
+        browser:
+          description: "Agentry extension: the web browser (Playwright MCP tools `mcp__browser__*`). It runs only in sandbox chats, inside the sandbox; a chat on the server gets no browser tools. Absent or `null` uses the server default `browser.default` (off)."
+          oneOf:
+            - type: boolean
             - type: "null"
         skills:
           description: "Agentry extension: skill selection. Absent or null uses every built-in skill; an explicit selection uses exactly the listed built-ins and library skills. The agent's private skills always apply."

@@ -42,7 +42,7 @@ import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
 import { mountAgentInstructions } from './mount-instructions.ts'
 import { AGENTRY_PRESET_ID } from './preset.ts'
 import { copyIntoSandboxUploads, MAX_ARTIFACT_BYTES, providerRows, type AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
-import { sandboxStartErrorIn, type SandboxPresets } from './sandbox/presets.ts'
+import { sandboxCredentials, sandboxStartErrorIn, type SandboxPresets } from './sandbox/presets.ts'
 import { SandboxApiError } from '@agentry/sandbox/client'
 import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
 import { sweepStaged, type InstallDeps } from './skills/install.ts'
@@ -63,6 +63,7 @@ import { mountComposioAppTools } from './mount-composio-app-tools.ts'
 import { mountScheduleGuidance } from './mount-schedule-guidance.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
+import { BRIDGE_HOST_CWD, browserEnabled, browserMcpTool, mountBrowserGuidance, validateBrowserField, type BrowserSandbox } from './mount-browser.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
 import { slashCommandItem } from './items.ts'
@@ -167,6 +168,10 @@ export interface GatewayOptions {
   skillsRoot?: string
   /** Composio grant enforcement and send approvals (`composio` config). */
   composio?: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
+  /** Whether agents without a `browser` value get the web browser (`browser.default`, default false). */
+  browserDefault?: boolean
+  /** The sandbox stdio bridge program (tests); default `lib/sandbox-stdio-bridge.js`. */
+  browserBridgePath?: string
   /** GitHub endpoints for skill imports (tests point it at a fake). */
   skillsGithub?: GithubDeps
   /** Host skill discovery sources hidden from the catalog (developer folders). */
@@ -224,6 +229,8 @@ export class AgentsGateway {
   private readonly deliverablesCache = new DeliverablesCache<DeliverableEntry>(500)
   private readonly skillsGithub: GithubDeps | undefined
   private readonly composio: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
+  private readonly browserDefault: boolean
+  private readonly browserBridgePath: string | undefined
   /** Refresh hooks of live sessions' Agentry skill providers, by owner. */
   readonly skillInvalidations = new SkillInvalidations()
   /** Commands Agentry exposes; `undefined` exposes all. */
@@ -276,6 +283,8 @@ export class AgentsGateway {
     this.skillsRoot = options.skillsRoot ?? ''
     this.skillsGithub = options.skillsGithub
     this.composio = options.composio ?? { serverLabel: 'composio', approvalVerbs: DEFAULT_APPROVAL_VERBS, approvalSlugs: [] }
+    this.browserDefault = options.browserDefault ?? false
+    this.browserBridgePath = options.browserBridgePath
     this.skillInstallApi = new SkillInstallApi(this.installDeps(), options.skillsGithub)
     const skillsApi = new SkillsApi({
       skills: options.skills,
@@ -794,6 +803,8 @@ export class AgentsGateway {
     if (toolError) throw new AgentsApiRequestError(toolError, 400, 'bad_request')
     const hostToolsError = validateHostTools(resolved.host_tools)
     if (hostToolsError) throw new AgentsApiRequestError(hostToolsError, 400, 'bad_request')
+    const browserError = validateBrowserField(resolved.browser)
+    if (browserError) throw new AgentsApiRequestError(browserError, 400, 'bad_request')
 
     const sessionId = SessionId(`sess_${randomUUID().replaceAll('-', '')}`)
     let cwd: string
@@ -1459,11 +1470,13 @@ export class AgentsGateway {
 
   /**
    * @param body - agent create or update body.
-   * @returns an error message for Agentry's extension fields (`skills`, `apps`, `send_policy`), or `undefined`.
+   * @returns an error message for Agentry's extension fields (`skills`, `apps`, `send_policy`, `browser`), or `undefined`.
    */
-  validateAgentExtensions(body: { skills?: unknown; apps?: unknown; send_policy?: unknown }): string | undefined {
+  validateAgentExtensions(body: { skills?: unknown; apps?: unknown; send_policy?: unknown; browser?: unknown }): string | undefined {
     const policy = body.send_policy
     if (policy !== undefined && policy !== null && policy !== 'ask' && policy !== 'auto') return 'send_policy must be "ask", "auto", or null'
+    const browserError = validateBrowserField(body.browser)
+    if (browserError !== undefined) return browserError
     return this.validateSkills(body.skills) ?? validateAppGrants(body.apps)
   }
 
@@ -1495,14 +1508,15 @@ export class AgentsGateway {
    * Mount the session's preset: `agentry`, or for a session on an Agentry
    * Sandbox environment that sandbox's preset (every tool runs inside it),
    * held for the agent's lifetime.
+   * @returns the sandbox the session runs in, or `undefined` for a local chat.
    */
-  private async mountSessionPreset(agentCtx: Context, owner: OwnerId, environment: OAIEnvironmentConfig | undefined): Promise<void> {
+  private async mountSessionPreset(agentCtx: Context, owner: OwnerId, environment: OAIEnvironmentConfig | undefined): Promise<BrowserSandbox | undefined> {
     const environmentId = environment?.type === 'sandbox' ? environment.environment_id : undefined
     const record = environmentId === undefined ? undefined : await this.store.environments.get(owner, environmentId)
     if (environmentId !== undefined && record === undefined) throw new Error(`environment ${environmentId} no longer exists; this session cannot run`)
     if (record === undefined || record.provider === 'local') {
       await mountDefaultPreset(agentCtx)
-      return
+      return undefined
     }
     // Never fall back to the host for a non-local environment: an unroutable session fails.
     const sandboxId = record.provider_metadata['sandbox_id']
@@ -1513,6 +1527,28 @@ export class AgentsGateway {
     const lease = await this.sandboxPresets.acquire(owner, sandboxId, workspace)
     ;(agentCtx as { effect?: (fn: () => () => void) => void }).effect?.(() => () => { void lease[Symbol.asyncDispose]() })
     await mountDefaultPreset(agentCtx, lease.presetId)
+    return { owner, sandboxId, workspace }
+  }
+
+  /**
+   * The web browser for an agent that has it on: in a sandbox chat, Playwright
+   * MCP inside the sandbox through the stdio bridge (in memory, never in the
+   * saved config); in a local chat, no tools and a prompt line saying why.
+   */
+  private async mountBrowser(agentCtx: Context, resolved: OAIAgent, sandbox: BrowserSandbox | undefined): Promise<void> {
+    if (!browserEnabled(resolved, this.browserDefault)) return
+    const credentials = sandboxCredentials()
+    if (sandbox === undefined || credentials === undefined) {
+      mountBrowserGuidance(agentCtx, 'local')
+      return
+    }
+    mountBrowserGuidance(agentCtx, 'sandbox')
+    try {
+      await mountMcpTools(agentCtx, [browserMcpTool(sandbox, credentials, this.browserBridgePath)], BRIDGE_HOST_CWD)
+    } catch (error: unknown) {
+      // `required: false` already tolerates a server that fails to start; this covers the client itself.
+      this.ctx.logger.warn(`agents-api: the web browser did not start for sandbox ${sandbox.sandboxId}: ${errorMessage(error)}`)
+    }
   }
 
   /**
@@ -1527,7 +1563,7 @@ export class AgentsGateway {
       (tool): tool is OAIFunctionTool => tool.type === 'function',
     )
     return async (agentCtx) => {
-      await this.mountSessionPreset(agentCtx, owner, environment)
+      const sandbox = await this.mountSessionPreset(agentCtx, owner, environment)
       this.mountAgentrySkills(agentCtx, resolved.id, owner)
       mountAgentInstructions(agentCtx, resolved.instructions, resolved.name)
       // Mounted before the mask so an agent's `host_tools` can hide the agent tools.
@@ -1590,6 +1626,7 @@ export class AgentsGateway {
       mountScheduleGuidance(agentCtx)
       mountFunctionTools(agentCtx, functionTools, pending)
       await mountMcpTools(agentCtx, mcpToolsFrom(resolved.tools), cwd)
+      await this.mountBrowser(agentCtx, resolved, sandbox)
       mountComposio(agentCtx, {
         grants: effectiveGrants(resolved),
         approvalVerbs: new Set(this.composio.approvalVerbs),
