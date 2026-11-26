@@ -292,6 +292,30 @@ describe('AgentsGateway', () => {
     expect((await fetch(`${root}/v1/agents/missing`, { method: 'DELETE' })).status).toBe(404)
   })
 
+  it('keeps the browser field on saved agents and refuses a non-boolean', async () => {
+    const { base } = gateway()
+    const root = await base
+    const bad = await fetch(`${root}/v1/agents`, { method: 'POST', body: JSON.stringify({ model: 'deepseek-chat', browser: 'yes' }) })
+    expect(bad.status).toBe(400)
+    expect(await bad.json()).toMatchObject({ error: { message: 'browser must be a boolean or null' } })
+    const created = await (await fetch(`${root}/v1/agents`, { method: 'POST', body: JSON.stringify({ model: 'deepseek-chat', browser: true }) })).json() as { id: string; browser?: boolean | null }
+    expect(created.browser).toBe(true)
+    expect((await fetch(`${root}/v1/agents/${created.id}`, { method: 'POST', body: JSON.stringify({ browser: 1 }) })).status).toBe(400)
+    const off = await (await fetch(`${root}/v1/agents/${created.id}`, { method: 'POST', body: JSON.stringify({ browser: false }) })).json() as { browser?: boolean | null }
+    expect(off.browser).toBe(false)
+    const kept = await (await fetch(`${root}/v1/agents/${created.id}`, { method: 'POST', body: JSON.stringify({ name: 'n' }) })).json() as { browser?: boolean | null }
+    expect(kept.browser).toBe(false)
+  })
+
+  it('refuses an inline session agent with a non-boolean browser, and never stores a browser tool', async () => {
+    const { base } = gateway()
+    const root = await base
+    expect((await fetch(`${root}/v1/agents/sessions`, { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat', browser: 'on' } }) })).status).toBe(400)
+    const session = await (await fetch(`${root}/v1/agents/sessions`, { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat', browser: true } }) })).json() as { agent: { browser?: boolean; tools: unknown[] } }
+    expect(session.agent.browser).toBe(true)
+    expect(session.agent.tools).toEqual([])
+  })
+
   it('creates sessions from inline agent, agent_id, and overrides', async () => {
     const { base, store, agents } = gateway()
     const root = await base

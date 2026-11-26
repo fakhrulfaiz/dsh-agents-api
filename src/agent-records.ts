@@ -11,7 +11,7 @@ import type { CreateAgentParams, OAIAgent, UpdateAgentParams } from './types.ts'
  * @param params - create or update fields.
  * @returns spreadable optional properties.
  */
-function optionalAgentFields(params: CreateAgentParams | UpdateAgentParams): Pick<OAIAgent, 'multi_agent' | 'reasoning' | 'service_tier' | 'text' | 'host_tools' | 'skills' | 'apps' | 'send_policy'> {
+function optionalAgentFields(params: CreateAgentParams | UpdateAgentParams): Pick<OAIAgent, 'multi_agent' | 'reasoning' | 'service_tier' | 'text' | 'host_tools' | 'skills' | 'apps' | 'send_policy' | 'browser'> {
   return {
     ...(params.multi_agent !== undefined ? { multi_agent: params.multi_agent } : {}),
     ...(params.reasoning !== undefined ? { reasoning: params.reasoning } : {}),
@@ -21,6 +21,7 @@ function optionalAgentFields(params: CreateAgentParams | UpdateAgentParams): Pic
     ...(params.skills !== undefined ? { skills: params.skills } : {}),
     ...(params.apps !== undefined ? { apps: params.apps } : {}),
     ...(params.send_policy !== undefined ? { send_policy: params.send_policy } : {}),
+    ...(params.browser !== undefined ? { browser: params.browser } : {}),
   }
 }
 

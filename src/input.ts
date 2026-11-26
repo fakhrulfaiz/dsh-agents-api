@@ -117,6 +117,7 @@ export function overlayAgent(base: OAIAgent, overlay: SessionAgentParams): OAIAg
     ...(overlay.reasoning !== undefined ? { reasoning: overlay.reasoning } : {}),
     ...(overlay.service_tier !== undefined ? { service_tier: overlay.service_tier } : {}),
     ...(overlay.text !== undefined ? { text: overlay.text } : {}),
+    ...(overlay.browser !== undefined ? { browser: overlay.browser } : {}),
   }
 }
 
