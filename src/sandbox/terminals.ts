@@ -110,6 +110,11 @@ export class TerminalHub {
   }
 
   private finish(terminal: Terminal, code: number): void {
+    // A process stream that ends before the shell started must fail the open, not leave it waiting forever.
+    if (terminal.pid === undefined) {
+      terminal.onStart?.reject(new TerminalError('could not start a terminal: the shell ended before it started', 502, 'terminal_unavailable'))
+      this.terminals.delete(terminal.id)
+    }
     if (terminal.exit !== undefined) return
     terminal.exit = code
     for (const reader of terminal.readers) reader({ kind: 'exit', code })
