@@ -201,6 +201,56 @@ export interface ProvisionedSession {
   base: ProjectionBase
   /** Resolved session agent. */
   resolved: OAIAgent
+  /**
+   * Background create only: start building the agent. Until it is live, requests
+   * that need it wait; `first` is the queued first message, started once setup
+   * ends (or dropped when a cancel or delete arrived meanwhile).
+   */
+  start?: (first?: QueuedFirstMessage) => void
+}
+
+/** The first message of a session whose agent is still being set up. */
+export interface QueuedFirstMessage {
+  /** Start the turn; the agent is live. */
+  begin: () => void
+  /** Drop the message (release staged files). */
+  drop: () => void
+}
+
+/** An agent setup that runs after `POST /agents/sessions` answered. */
+interface SetupJob {
+  /** Resolves (never rejects) once the agent is live or its setup failed. */
+  readonly settled: Promise<void>
+  /** Set by a cancel or delete during setup: the queued first message is dropped, not started. */
+  dropQueued: boolean
+}
+
+/** `error` on the wire and `last_error` for a session whose background setup failed. */
+const SETUP_FAILED = 'The session could not be set up'
+
+/**
+ * Map an agent-create failure to what the caller sees.
+ * @param error - failure from the sandbox preflight, `agents.create`, or the index insert.
+ * @returns a store outage as is, 400 for an invalid MCP config, 503 `sandbox_unavailable`, else `SessionCreateError`.
+ */
+function createFailure(error: unknown): Error {
+  if (error instanceof StoreUnavailableError || error instanceof AgentsApiRequestError) return error
+  if (error instanceof AgentsApiMcpConfigError) return new AgentsApiRequestError(error.message, 400, 'bad_request')
+  const sandboxDown = sandboxStartErrorIn(error)
+  if (sandboxDown !== undefined) return new AgentsApiRequestError(sandboxDown.message, 503, 'sandbox_unavailable')
+  return new SessionCreateError(error)
+}
+
+/**
+ * Text shown for a failed background setup: the reason when it is safe to show
+ * (invalid MCP config, sandbox down), else a generic line; `AGENTRY_DEBUG_ERRORS=1`
+ * appends the cause (it can name host paths, so never in production).
+ * @param error - setup failure.
+ */
+function setupFailureMessage(error: unknown): string {
+  const mapped = createFailure(error)
+  if (mapped instanceof AgentsApiRequestError) return mapped.message
+  return process.env['AGENTRY_DEBUG_ERRORS'] === '1' ? `${SETUP_FAILED}: ${errorMessage(error)}` : SETUP_FAILED
 }
 
 /**
@@ -218,6 +268,10 @@ export class AgentsGateway {
   private readonly statusWrites = new Map<string, Promise<void>>()
   /** Resumes in flight, so two requests do not resume one session twice. */
   private readonly resuming = new Map<string, Promise<void>>()
+  /** Agent setups still running after their create request was answered, by session id. */
+  private readonly setups = new Map<string, SetupJob>()
+  /** Sessions whose background setup failed in this process, with the text shown for it. */
+  private readonly setupFailures = new Map<string, string>()
   private readonly sandboxes: SandboxRegistry
   private readonly sandboxPresets: SandboxPresets | undefined
   private readonly runtimeInfoPath: string | undefined
@@ -630,6 +684,7 @@ export class AgentsGateway {
       const row = await this.store.sessions.get(sessionId, owner)
       if (!row) return undefined
       cwd = this.sessionRegistry.get(row.id)?.workspace ?? await this.history.workspace(row.id)
+      await this.setups.get(row.id)?.settled
       const live = this.ctx.agents.get(SessionId(row.id))
       if (live !== undefined) return { scope: live as SkillViewOptions['scope'], cwd }
     } else {
@@ -654,6 +709,7 @@ export class AgentsGateway {
   private async resolveCommandTarget(owner: OwnerId, sessionId: string): Promise<CommandTarget | undefined> {
     const row = await this.store.sessions.get(sessionId, owner)
     if (!row) return undefined
+    await this.setups.get(row.id)?.settled
     const live = this.ctx.agents.get(SessionId(row.id))
     if (live !== undefined) return { scope: live }
     const presets = (this.ctx as { get?: (name: string) => unknown }).get?.call(this.ctx, 'agentPresets') as {
@@ -729,10 +785,11 @@ export class AgentsGateway {
     const body = await readBody(req) as unknown as CreateSessionParams
     let provisioned: ProvisionedSession
     let fileIds: string[]
+    const userText = userTextFromInput(body.input)
     try {
       fileIds = fileIdsFromInput(body.input)
       await this.ingest.validate(owner, fileIds)
-      provisioned = await this.provisionSession(owner, body)
+      provisioned = await this.provisionSession(owner, body, { queued: (userText !== undefined && userText !== '') || fileIds.length > 0 })
     } catch (error: unknown) {
       if (error instanceof AgentsApiRequestError) {
         writeRequestError(res, error)
@@ -748,6 +805,7 @@ export class AgentsGateway {
       throw error
     }
     const { sessionId, projector, base } = provisioned
+    const start = provisioned.start!
     let attached: AttachedFiles | undefined
     if (fileIds.length > 0) {
       try {
@@ -768,13 +826,21 @@ export class AgentsGateway {
     const stream = body.stream === true
       || url.searchParams.get('stream') === 'true'
       || (req.headers.accept ?? '').includes('text/event-stream')
-    const userText = userTextFromInput(body.input)
     const hasInput = (userText !== undefined && userText !== '') || attached !== undefined
-    const startTurn = (): void => {
-      void this.triggerTurn(sessionId, userText ?? '', attached).catch((error: unknown) => {
-        this.emitError(sessionId, error)
-      })
-    }
+    const first: QueuedFirstMessage | undefined = hasInput
+      ? {
+          begin: () => {
+            void this.triggerTurn(sessionId, userText ?? '', attached).catch((error: unknown) => {
+              this.emitError(sessionId, error)
+              // The row said `in_progress` while the message was queued; no turn started.
+              if (projector.status === 'idle') this.recordStatus(sessionId, 'idle', null)
+            })
+          },
+          drop: () => {
+            void attached?.rollback()
+          },
+        }
+      : undefined
 
     if (stream) {
       writeSSEHeaders(res)
@@ -785,20 +851,13 @@ export class AgentsGateway {
         unsubscribe()
       })
       writeEvent(res, projector.created.event.type, projector.created.event, frameSseId(projector.created))
-      if (hasInput) {
-        startTurn()
-      } else {
-        this.sessionRegistry.emitEphemeral(sessionId, {
-          type: 'agent.session.idle',
-          event_id: mintEventId(),
-          session: oaiSession,
-        })
-      }
+      // Setup emits `agent.session.idle` when no message is queued, or the turn's events, or `error` and `agent.session.failed`.
+      start(first)
       return
     }
 
-    if (hasInput) startTurn()
     json(res, 200, await this.sessionPayload(oaiSession, base, owner))
+    start(first)
   }
 
   /**
@@ -819,14 +878,20 @@ export class AgentsGateway {
   /**
    * Resolve the session agent, prepare its workspace, register its projector,
    * create its agent, and insert its index row. Starts no turn.
+   *
+   * With `background`, the index row is written first (status `in_progress` when a
+   * first message is queued, else `idle`) and the agent is built only when the
+   * caller calls `start`, so the create request does not wait for MCP connections.
+   * A Sandbox environment's preset is still checked before the row is written.
    * @param owner - owner recorded on the session.
    * @param body - session body; `input` and `stream` are ignored.
-   * @returns the session id, its live projector and projection base, and the resolved agent.
+   * @param background - build the agent after answering; `queued` says whether a first message waits for it.
+   * @returns the session id, its live projector and projection base, the resolved agent, and `start` for a background create.
    * @throws AgentsApiRequestError 400 for an invalid agent, tool, workspace, or reasoning effort, or 404 for an unknown `agent_id`.
    * @throws SessionCreateError when `agents.create` or the index insert fails; the projector, handle, and agent are removed first.
    * @throws StoreUnavailableError when the store is unavailable, after the same cleanup.
    */
-  private async provisionSession(owner: OwnerId, body: CreateSessionParams): Promise<ProvisionedSession> {
+  private async provisionSession(owner: OwnerId, body: CreateSessionParams, background?: { queued: boolean }): Promise<ProvisionedSession> {
     const resolved = await this.resolveSessionAgent(body, owner)
     const toolError = validateMountableTools(resolved.tools)
     if (toolError) throw new AgentsApiRequestError(toolError, 400, 'bad_request')
@@ -871,10 +936,11 @@ export class AgentsGateway {
       vaultIds: config.vault_ids,
     }
     const projector = new WireProjector(base, false)
+    if (background?.queued === true) projector.status = 'in_progress'
     // Registered before the agent exists so no event logged during creation is missed.
     this.sessionRegistry.register(projector, cwd)
 
-    try {
+    const createLive = async (): Promise<void> => {
       const handle = await this.ctx.agents.create({
         sessionId,
         meta: { cwd },
@@ -888,23 +954,9 @@ export class AgentsGateway {
         (this.ctx.agents.get(sessionId) as { session?: { append(type: string, data: unknown): void } } | undefined)?.session?.append('sandbox/mode', { mode: 'danger-full-access' })
       }
       this.pendingBySession.set(sessionId, pending)
-      await this.store.sessions.insert({
-        id: sessionId,
-        ownerId: owner,
-        agentId: typeof body.agent_id === 'string' && body.agent_id !== '' ? body.agent_id : null,
-        environmentId: null,
-        dshSessionId: sessionId,
-        status: 'idle',
-        lastError: null,
-        model: resolved.model,
-        reasoningEffort: resolved.reasoning?.effort ?? null,
-        body: config,
-        createdAt: now,
-        updatedAt: now,
-      })
-    } catch (error: unknown) {
+    }
+    const undoLive = async (): Promise<void> => {
       pending.rejectAll(new Error('session create failed'))
-      this.sessionRegistry.delete(sessionId)
       const created = this.handles.get(sessionId)
       this.handles.delete(sessionId)
       this.pendingBySession.delete(sessionId)
@@ -915,13 +967,137 @@ export class AgentsGateway {
           // Host teardown already ran.
         }
       }
-      if (error instanceof StoreUnavailableError) throw error
-      if (error instanceof AgentsApiMcpConfigError) throw new AgentsApiRequestError(error.message, 400, 'bad_request')
-      const sandboxDown = sandboxStartErrorIn(error)
-      if (sandboxDown !== undefined) throw new AgentsApiRequestError(sandboxDown.message, 503, 'sandbox_unavailable')
-      throw new SessionCreateError(error)
     }
-    return { sessionId, projector, base, resolved }
+    const insertRow = (status: SessionStatus): Promise<unknown> => this.store.sessions.insert({
+      id: sessionId,
+      ownerId: owner,
+      agentId: typeof body.agent_id === 'string' && body.agent_id !== '' ? body.agent_id : null,
+      environmentId: null,
+      dshSessionId: sessionId,
+      status,
+      lastError: null,
+      model: resolved.model,
+      reasoningEffort: resolved.reasoning?.effort ?? null,
+      body: config,
+      createdAt: now,
+      updatedAt: now,
+    })
+
+    if (background === undefined) {
+      try {
+        await createLive()
+        await insertRow('idle')
+      } catch (error: unknown) {
+        this.sessionRegistry.delete(sessionId)
+        await undoLive()
+        throw createFailure(error)
+      }
+      return { sessionId, projector, base, resolved }
+    }
+
+    let lease: AsyncDisposable | undefined
+    try {
+      // A sandbox that cannot start still answers 503 here, not as a failed session later.
+      lease = await this.preflightSandbox(owner, environment)
+      await insertRow(projector.status)
+    } catch (error: unknown) {
+      this.sessionRegistry.delete(sessionId)
+      await Promise.resolve(lease?.[Symbol.asyncDispose]()).catch(() => undefined)
+      throw createFailure(error)
+    }
+    const start = (first?: QueuedFirstMessage): void => {
+      this.runSetup(sessionId, projector, { createLive, undoLive, ...(lease === undefined ? {} : { lease }) }, first)
+    }
+    return { sessionId, projector, base, resolved, start }
+  }
+
+  /**
+   * Hold the session's Sandbox preset for the length of a background setup, so a
+   * sandbox that cannot start is refused before the create request is answered.
+   * @returns the lease, or `undefined` for a session that does not run in a sandbox.
+   * @throws as `SandboxPresets.acquire` (`SandboxStartError` when the sandbox cannot start).
+   */
+  private async preflightSandbox(owner: OwnerId, environment: OAIEnvironmentConfig): Promise<AsyncDisposable | undefined> {
+    if (environment.type !== 'sandbox' || environment.environment_id === undefined || this.sandboxPresets === undefined) return undefined
+    const record = await this.store.environments.get(owner, environment.environment_id)
+    const sandboxId = record?.provider_metadata['sandbox_id']
+    const workspace = record?.provider_metadata['workspace_directory']
+    if (record === undefined || record.provider === 'local' || sandboxId === undefined || workspace === undefined) return undefined
+    return this.sandboxPresets.acquire(owner, sandboxId, workspace)
+  }
+
+  /**
+   * Build a session's agent after its create request was answered. Requests that
+   * need the agent wait on the job (`ensureLive`, `stopLiveAgent`). When the agent
+   * is live, the queued first message starts (or is dropped after a cancel or
+   * delete), else `agent.session.idle` is emitted. A failure marks the session
+   * failed (`failSetup`).
+   * @param sessionId - new session.
+   * @param projector - its registered projector.
+   * @param steps - agent creation, its undo, and the preflight sandbox lease to release.
+   * @param first - the queued first message, if any.
+   */
+  private runSetup(
+    sessionId: string,
+    projector: WireProjector,
+    steps: { createLive: () => Promise<void>; undoLive: () => Promise<void>; lease?: AsyncDisposable },
+    first: QueuedFirstMessage | undefined,
+  ): void {
+    let finish!: () => void
+    const job: SetupJob = { settled: new Promise<void>((resolve) => { finish = resolve }), dropQueued: false }
+    this.setups.set(sessionId, job)
+    const run = async (): Promise<void> => {
+      try {
+        await steps.createLive()
+      } catch (error: unknown) {
+        await steps.undoLive()
+        await this.failSetup(sessionId, projector, error)
+        return
+      } finally {
+        await Promise.resolve(steps.lease?.[Symbol.asyncDispose]()).catch(() => undefined)
+      }
+      // `idle` before the message goes in, so `triggerTurn` starts a turn instead of steering.
+      projector.status = 'idle'
+      if (first !== undefined && !job.dropQueued) {
+        first.begin()
+        return
+      }
+      if (first !== undefined) {
+        first.drop()
+        this.recordStatus(sessionId, 'idle', null)
+      }
+      this.sessionRegistry.emitEphemeral(sessionId, { type: 'agent.session.idle', event_id: mintEventId(), session: projector.snapshot() })
+    }
+    void run()
+      .catch((error: unknown) => {
+        this.ctx.logger.warn(`agents-api: session setup for ${sessionId} failed: ${errorMessage(error)}`)
+      })
+      .finally(() => {
+        this.setups.delete(sessionId)
+        finish()
+      })
+  }
+
+  /**
+   * Mark a session whose background setup failed: `failed` with the shown text
+   * in the projection and the index, `error` and `agent.session.failed` on its
+   * stream, then unregister it. Later requests that need the agent answer 409
+   * `session_setup_failed`.
+   * @param sessionId - session id.
+   * @param projector - its registered projector.
+   * @param error - setup failure.
+   */
+  private async failSetup(sessionId: string, projector: WireProjector, error: unknown): Promise<void> {
+    const shown = setupFailureMessage(error)
+    this.ctx.logger.warn(`agents-api: session setup failed for ${sessionId}: ${errorMessage(error)}`)
+    this.setupFailures.set(sessionId, shown)
+    projector.status = 'failed'
+    projector.error = shown
+    this.emitError(sessionId, new Error(shown))
+    this.sessionRegistry.emitEphemeral(sessionId, { type: 'agent.session.failed', event_id: mintEventId(), session: projector.snapshot() })
+    this.recordStatus(sessionId, 'failed', shown)
+    await this.statusWrites.get(sessionId)
+    this.sessionRegistry.delete(sessionId)
   }
 
   /** Wire `error` event for a dispatch failure. It is not a Session log fact, so it carries no `id`. */
@@ -1118,6 +1294,12 @@ export class AgentsGateway {
    * @param sessionId - session whose agent stops.
    */
   private async stopLiveAgent(sessionId: string): Promise<void> {
+    const setup = this.setups.get(sessionId)
+    if (setup !== undefined) {
+      setup.dropQueued = true
+      await setup.settled
+    }
+    this.setupFailures.delete(sessionId)
     this.sandboxChanges.forget(sessionId)
     this.approvals.cancelAll(sessionId)
     this.pendingBySession.get(sessionId)?.rejectAll(new Error(`Session "${sessionId}" was deleted`))
@@ -1256,6 +1438,8 @@ export class AgentsGateway {
       writeRequestError(res, new AgentsApiRequestError('No pending approval: the session is not running', 404, 'approval_not_found'))
       return
     }
+    const setup = this.setups.get(sessionId)
+    if (setup !== undefined && batch.some(evt => evt.type === 'agent.session.input.cancel')) setup.dropQueued = true
     try {
       await this.ensureLive(row)
     } catch (error: unknown) {
@@ -1712,6 +1896,12 @@ export class AgentsGateway {
    * @throws AgentsApiRequestError 409 `session_not_resumable` when the row has no stored setup.
    */
   private async ensureLive(row: SessionIndexRow): Promise<void> {
+    // A session created moments ago may still be building its agent.
+    await this.setups.get(row.id)?.settled
+    const failed = this.setupFailures.get(row.id)
+    if (failed !== undefined) {
+      throw new AgentsApiRequestError(failed, 409, 'session_setup_failed')
+    }
     // The resume registers its projector only after reading the log, so an in-flight attempt is checked first.
     const inFlight = this.resuming.get(row.id)
     if (inFlight !== undefined) {

@@ -1997,7 +1997,7 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
-      description: "Send `agent` and/or `agent_id`. With `stream: true` the response is a `text/event-stream` of `SessionEvent` frames (see the events operation) instead of JSON."
+      description: "Send `agent` and/or `agent_id`. With `stream: true` the response is a `text/event-stream` of `SessionEvent` frames (see the events operation) instead of JSON. The response does not wait for the agent's setup (MCP connections): a create with input answers `in_progress` and the message starts once the agent is ready. A setup failure later marks the session `failed` (ephemeral `error` and `agent.session.failed` on the stream) instead of answering 500."
     get:
       summary: List sessions, newest first
       tags:
@@ -2179,7 +2179,7 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
-      description: Posting to a session that is not live resumes it from its Session log first (409 `session_not_resumable` for sessions created before migration 0002, 500 `session_resume_failed`). Approval answers do not resume.
+      description: Posting to a session that is not live resumes it from its Session log first (409 `session_not_resumable` for sessions created before migration 0002, 500 `session_resume_failed`). Approval answers do not resume. Posting while a new session's agent is still being set up waits for it; 409 `session_setup_failed` when that setup failed.
     get:
       summary: Stream session events
       tags:
@@ -3069,7 +3069,7 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     Conflict:
-      description: "`session_setting_not_live` (model or effort change not applicable), `session_not_resumable`, `file_attached` (delete of an attached file), `file_already_attached`, or `uploads_unsafe` (the workspace `uploads` entry is a symlink or not a directory)."
+      description: "`session_setting_not_live` (model or effort change not applicable), `session_not_resumable`, `session_setup_failed` (the agent setup of a new session failed), `file_attached` (delete of an attached file), `file_already_attached`, or `uploads_unsafe` (the workspace `uploads` entry is a symlink or not a directory)."
       content:
         application/json:
           schema:

@@ -60,6 +60,8 @@ const mountedAgentTools: string[] = []
 const mountedPresets: string[] = []
 
 function fakeContext(options?: {
+  /** `agents.create` waits for this before it builds the agent, like a slow MCP connection. */
+  createGate?: Promise<void>
   failCreate?: boolean
   failFollowup?: boolean
   failDispose?: boolean
@@ -98,6 +100,7 @@ function fakeContext(options?: {
           }
         }) => void | Promise<void>
       }) => {
+        if (options?.createGate) await options.createGate
         if (options?.failCreate) throw new Error('factory failed')
         const agent: FakeAgent = {
           id: sessionId,
@@ -183,6 +186,7 @@ async function listen(handler: (req: IncomingMessage, res: ServerResponse) => Pr
 }
 
 function gateway(apiKey = '', options?: {
+  createGate?: Promise<void>
   failCreate?: boolean
   failFollowup?: boolean
   failDispose?: boolean
@@ -225,6 +229,15 @@ function gateway(apiKey = '', options?: {
 }
 
 const APP_TOOL_NAMES = new Set(APP_TOOLS.map(tool => tool.name))
+
+/** A create whose agent setup fails answers 200, then the session turns `failed` with a generic error. */
+async function expectSetupFailed(store: MemoryStore, response: Response): Promise<void> {
+  expect(response.status).toBe(200)
+  const { id } = await response.json() as { id: string }
+  await vi.waitFor(async () => {
+    expect(await store.sessions.get(id, TEST_OWNER)).toMatchObject({ status: 'failed', lastError: 'The session could not be set up' })
+  })
+}
 
 describe('http body helpers', () => {
   it('parses objects and treats invalid JSON as empty', async () => {
@@ -375,7 +388,7 @@ describe('AgentsGateway', () => {
     expect(view.metadata).toEqual(created.metadata)
   })
 
-  it('rejects a relative self-hosted workspace and a factory failure', async () => {
+  it('rejects a relative self-hosted workspace and marks a factory failure failed', async () => {
     const ok = gateway()
     const root = await ok.base
     expect((await fetch(`${root}/v1/agents/sessions`, {
@@ -388,21 +401,21 @@ describe('AgentsGateway', () => {
 
     const failing = gateway('', { failCreate: true })
     const failRoot = await failing.base
-    expect((await fetch(`${failRoot}/v1/agents/sessions`, {
+    await expectSetupFailed(failing.store, await fetch(`${failRoot}/v1/agents/sessions`, {
       method: 'POST',
       body: JSON.stringify({ agent: { model: 'deepseek-chat' } }),
-    })).status).toBe(500)
+    }))
   })
 
-  it('answers a generic message when session creation fails', async () => {
+  it('shows a generic message when the agent setup fails', async () => {
     const failing = gateway('', { failCreate: true })
     const response = await fetch(`${await failing.base}/v1/agents/sessions`, {
       method: 'POST',
       body: JSON.stringify({ agent: { model: 'deepseek-chat' } }),
     })
-    const body = await response.json() as { error: { message: string; code: string } }
-    expect(body.error.code).toBe('agent_create_failed')
-    expect(body.error.message).not.toContain('factory failed')
+    const { id } = await response.clone().json() as { id: string }
+    await expectSetupFailed(failing.store, response)
+    expect(JSON.stringify(await failing.store.sessions.get(id, TEST_OWNER))).not.toContain('factory failed')
   })
 
   it('streams create-session events and later input, cancel, and tool output', async () => {
@@ -916,7 +929,7 @@ describe('AgentsGateway', () => {
     })).status).toBe(200)
     expect(restrictCalls.at(-1)).toEqual({ allow: ['web_fetch'], deny: ['web_search', 'plugin_manager'] })
 
-    const unknown = await fetch(`${root}/v1/agents/sessions`, {
+    await expectSetupFailed(store, await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
       body: JSON.stringify({
         agent: {
@@ -925,11 +938,7 @@ describe('AgentsGateway', () => {
         },
         environment: { type: 'none' },
       }),
-    })
-    expect(unknown.status).toBe(500)
-    expect(await unknown.json()).toMatchObject({
-      error: { code: 'agent_create_failed', message: 'The session could not be created' },
-    })
+    }))
   })
 
   it('mounts agent instructions onto the Host system prompt', async () => {
@@ -957,19 +966,15 @@ describe('AgentsGateway', () => {
     expect(promptSections.filter(section => section.name === 'agents-api:instructions')).toEqual([])
   })
 
-  it('fails session create when instructions need a missing system prompt', async () => {
-    const { base } = gateway('', { omitSystemPrompt: true })
+  it('fails the session when instructions need a missing system prompt', async () => {
+    const { base, store } = gateway('', { omitSystemPrompt: true })
     const root = await base
-    const response = await fetch(`${root}/v1/agents/sessions`, {
+    await expectSetupFailed(store, await fetch(`${root}/v1/agents/sessions`, {
       method: 'POST',
       body: JSON.stringify({
         agent: { model: 'deepseek-chat', instructions: 'be brief' },
       }),
-    })
-    expect(response.status).toBe(500)
-    expect(await response.json()).toMatchObject({
-      error: { code: 'agent_create_failed', message: 'The session could not be created' },
-    })
+    }))
   })
 
   describe('MCP secret redaction', () => {
@@ -1538,5 +1543,169 @@ describe('built-in templates', () => {
     } finally {
       await svc.close()
     }
+  })
+})
+
+describe('session create answers before the agent setup finishes', () => {
+  function gate(): { promise: Promise<void>; open: () => void } {
+    let open!: () => void
+    const promise = new Promise<void>((resolve) => { open = resolve })
+    return { promise, open }
+  }
+  const message = (text: string) => ({
+    events: [{ type: 'agent.session.input.message', input: [{ role: 'user', content: [{ type: 'input_text', text }] }] }],
+  })
+  const texts = (agent: FakeAgent | undefined): string[] => (agent?.followup.mock.calls ?? [])
+    .map(call => JSON.stringify(call[0]))
+  const settled = async <T>(promise: Promise<T>): Promise<boolean> => {
+    let done = false
+    void promise.then(() => { done = true }, () => { done = true })
+    await new Promise(resolve => setTimeout(resolve, 30))
+    return done
+  }
+
+  it('answers in_progress while setup runs, then starts the queued first turn', async () => {
+    const slow = gate()
+    const { base, agents, store } = gateway('', { createGate: slow.promise })
+    const root = await base
+    const response = await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({ agent: { model: 'deepseek-chat' }, input: 'hello there' }),
+    })
+    expect(response.status).toBe(200)
+    const created = await response.json() as { id: string; status: string }
+    expect(created.status).toBe('in_progress')
+    expect(agents.get(created.id)).toBeUndefined()
+    expect((await store.sessions.get(created.id, TEST_OWNER))?.status).toBe('in_progress')
+    expect(await (await fetch(`${root}/v1/agents/sessions/${created.id}`)).json()).toMatchObject({ status: 'in_progress' })
+
+    slow.open()
+    await vi.waitFor(() => { expect(agents.get(created.id)?.followup).toHaveBeenCalledOnce() })
+    expect(texts(agents.get(created.id))[0]).toContain('hello there')
+  })
+
+  it('answers idle without input, then builds the agent', async () => {
+    const slow = gate()
+    const { base, agents } = gateway('', { createGate: slow.promise })
+    const root = await base
+    const created = await (await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({ agent: { model: 'deepseek-chat' } }),
+    })).json() as { id: string; status: string }
+    expect(created.status).toBe('idle')
+    slow.open()
+    await vi.waitFor(() => { expect(agents.get(created.id)).toBeDefined() })
+  })
+
+  it('holds a follow-up sent during setup until the agent is live, after the first message', async () => {
+    const slow = gate()
+    const { base, agents } = gateway('', { createGate: slow.promise })
+    const root = await base
+    const { id } = await (await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({ agent: { model: 'deepseek-chat' }, input: 'first' }),
+    })).json() as { id: string }
+    const followUp = fetch(`${root}/v1/agents/sessions/${id}/events`, { method: 'POST', body: JSON.stringify(message('second')) })
+    expect(await settled(followUp)).toBe(false)
+    slow.open()
+    expect((await followUp).status).toBe(200)
+    const sent = texts(agents.get(id))
+    expect(sent).toHaveLength(2)
+    expect(sent[0]).toContain('first')
+    expect(sent[1]).toContain('second')
+  })
+
+  it('holds a cancel sent during setup, then drops the queued first message', async () => {
+    const slow = gate()
+    const { base, agents, store } = gateway('', { createGate: slow.promise })
+    const root = await base
+    const { id } = await (await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({ agent: { model: 'deepseek-chat' }, input: 'never mind' }),
+    })).json() as { id: string }
+    const cancel = fetch(`${root}/v1/agents/sessions/${id}/events`, { method: 'POST', body: JSON.stringify({ events: [{ type: 'agent.session.input.cancel' }] }) })
+    expect(await settled(cancel)).toBe(false)
+    slow.open()
+    const answered = await cancel
+    expect(answered.status).toBe(200)
+    expect(await answered.json()).toMatchObject({ status: 'idle' })
+    expect(agents.get(id)?.followup).not.toHaveBeenCalled()
+    expect(agents.get(id)?.cancel).toHaveBeenCalledOnce()
+    await vi.waitFor(async () => { expect((await store.sessions.get(id, TEST_OWNER))?.status).toBe('idle') })
+  })
+
+  it('marks the session failed and emits error and failed events when setup fails', async () => {
+    const slow = gate()
+    const { base, agents, store, registry } = gateway('', { createGate: slow.promise, failCreate: true })
+    const root = await base
+    const stream = await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      headers: { accept: 'text/event-stream', 'content-type': 'application/json' },
+      body: JSON.stringify({ agent: { model: 'deepseek-chat' }, input: 'go', stream: true }),
+    })
+    expect(stream.status).toBe(200)
+    const reader = stream.body!.getReader()
+    const decoder = new TextDecoder()
+    let text = ''
+    const readUntil = async (needle: string): Promise<void> => {
+      while (!text.includes(needle)) {
+        const chunk = await reader.read()
+        if (chunk.done) throw new Error(`stream ended before ${needle}`)
+        text += decoder.decode(chunk.value)
+      }
+    }
+    await readUntil('agent.session.created')
+    const id = /"id":"(sess_[0-9a-f]+)"/.exec(text)![1]!
+    slow.open()
+    await readUntil('agent.session.failed')
+    await reader.cancel()
+    expect(text.indexOf('agent.session.created')).toBeLessThan(text.indexOf('event: error'))
+    expect(text.indexOf('event: error')).toBeLessThan(text.indexOf('agent.session.failed'))
+    expect(text).not.toContain('factory failed')
+
+    await vi.waitFor(async () => {
+      expect(await store.sessions.get(id, TEST_OWNER)).toMatchObject({ status: 'failed', lastError: 'The session could not be set up' })
+    })
+    expect(registry.get(id)).toBeUndefined()
+    expect(agents.get(id)).toBeUndefined()
+    expect(await (await fetch(`${root}/v1/agents/sessions/${id}`)).json()).toMatchObject({ status: 'failed', error: 'The session could not be set up' })
+    const later = await fetch(`${root}/v1/agents/sessions/${id}/events`, { method: 'POST', body: JSON.stringify(message('again')) })
+    expect(later.status).toBe(409)
+    expect(await later.json()).toMatchObject({ error: { code: 'session_setup_failed' } })
+  })
+
+  it('streams created first, then starts the turn once setup is done', async () => {
+    const slow = gate()
+    const { base, agents } = gateway('', { createGate: slow.promise })
+    const root = await base
+    const stream = await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      headers: { accept: 'text/event-stream', 'content-type': 'application/json' },
+      body: JSON.stringify({ agent: { model: 'deepseek-chat' }, input: 'go', stream: true }),
+    })
+    const reader = stream.body!.getReader()
+    const first = new TextDecoder().decode((await reader.read()).value)
+    expect(first).toContain('agent.session.created')
+    const id = /"id":"(sess_[0-9a-f]+)"/.exec(first)![1]!
+    expect(agents.get(id)).toBeUndefined()
+    slow.open()
+    await vi.waitFor(() => { expect(agents.get(id)?.followup).toHaveBeenCalledOnce() })
+    await reader.cancel()
+  })
+
+  it('deleting a session during setup disposes the agent once setup ends and starts no turn', async () => {
+    const slow = gate()
+    const { base, agents, store } = gateway('', { createGate: slow.promise })
+    const root = await base
+    const { id } = await (await fetch(`${root}/v1/agents/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({ agent: { model: 'deepseek-chat' }, input: 'hi' }),
+    })).json() as { id: string }
+    const deleted = fetch(`${root}/v1/agents/sessions/${id}`, { method: 'DELETE' })
+    expect(await settled(deleted)).toBe(false)
+    slow.open()
+    expect((await deleted).status).toBe(200)
+    expect(agents.get(id)?.followup).not.toHaveBeenCalled()
+    expect(await store.sessions.get(id, TEST_OWNER)).toBeUndefined()
   })
 })
