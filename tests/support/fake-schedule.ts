@@ -78,6 +78,7 @@ export class FakeSchedule {
 
   /** The service view the gateway receives. */
   readonly service = {
+    deliveryLimits: () => ({ newSessionIntervalSeconds: 60 }),
     catalog: async () => this.#record('catalog', [], () => [...this.entries]),
     view: async (request: { id: string }) => this.#record('view', [request], () => this.entries.find(entry => entry.id === request.id) ?? { id: request.id, code: 'schedule_not_found' as const }),
     create: async (request: ScheduleCreateRequest, actor?: string) => this.#record('create', [request, actor], () => {

@@ -17,7 +17,7 @@ The API exposes the Host schedule service (`ctx.schedule`) as owner-scoped `/v1/
 - `revision` is the task's `updated_at` and maps to the Host `expectedUpdatedAt`. A task without `updatedAt` (legacy rows) reports `created_at` as its revision and cannot be updated with a revision.
 - `source` (`api` or `chat`) from the design is not returned: it needs a per-row session lookup.
 - The paging `after` id names the previous page's last task among the caller's tasks; an unknown `after` starts from the first task. The list reads the whole catalog per request.
-- One chat per task, not per run. Per-run chats, completion notifications, and per-owner isolation of the model's schedule tools are not done.
+- One chat per task, not per run. Per-run chats and completion notifications are not done. Per-owner isolation of the model's schedule tools landed 2026-11-26 ([owner-scoped schedule tools](2026-11-26-owner-scoped-schedule-tools.md)).
 - The schedule service is an optional peer: `ScheduleInputError` and `RemoteError` from it are recognised by name and code, not by `instanceof`.
 - A task created in a chat by the model is owned through its chat. If the model uses a `new` / `new_once` target anyway, the task is owned through the chat (involved session) but its `session_id` is the first indexed involved session until the Host creates the target session, which has no index row.
 

@@ -1505,6 +1505,17 @@ export class AgentsGateway {
         ...(this.skillsGithub ? { github: this.skillsGithub } : {}),
       })
       applyHostToolsRestrict(agentCtx, resolved.host_tools)
+      // Owner-scoped copies of DSH's schedule tools shadow the preset's, which see every user's tasks.
+      // Loaded only with a Host schedule service: the schedule packages are optional peers.
+      if (this.schedule() !== undefined) {
+        const { mountScheduleTools } = await import('./mount-schedule-tools.ts')
+        mountScheduleTools(agentCtx, {
+          schedule: this.schedule,
+          ownersOf: ids => this.store.sessions.ownersOf(ids),
+          owner,
+          hostTools: resolved.host_tools,
+        })
+      }
       mountScheduleGuidance(agentCtx)
       mountFunctionTools(agentCtx, functionTools, pending)
       await mountMcpTools(agentCtx, mcpToolsFrom(resolved.tools), cwd)
