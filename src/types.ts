@@ -212,7 +212,7 @@ export interface OAIAgent {
   send_policy?: 'ask' | 'auto' | null
   /** Agentry extension: skill selection; see `AgentSkillSelection`. */
   skills?: AgentSkillSelection | null
-  /** Agentry extension: the web browser (Playwright MCP, sandbox chats only); absent or `null` uses the server default (`browser.default`, off). */
+  /** Agentry extension: the web browser (Playwright MCP, sandbox chats only); absent or `null` is auto: the browser when the chat's sandbox has it (server default `browser.default`). */
   browser?: boolean | null
   host_tools?: OAIHostToolsConfig | null
   multi_agent?: OAIMultiAgentConfig | null
@@ -234,7 +234,7 @@ export interface CreateAgentParams {
   send_policy?: 'ask' | 'auto' | null
   /** Agentry extension: skill selection; see `AgentSkillSelection`. */
   skills?: AgentSkillSelection | null
-  /** Agentry extension: the web browser (Playwright MCP, sandbox chats only); absent or `null` uses the server default (`browser.default`, off). */
+  /** Agentry extension: the web browser (Playwright MCP, sandbox chats only); absent or `null` is auto: the browser when the chat's sandbox has it (server default `browser.default`). */
   browser?: boolean | null
   host_tools?: OAIHostToolsConfig | null
   multi_agent?: OAIMultiAgentConfig | null
@@ -256,7 +256,7 @@ export interface UpdateAgentParams {
   send_policy?: 'ask' | 'auto' | null
   /** Agentry extension: skill selection; see `AgentSkillSelection`. */
   skills?: AgentSkillSelection | null
-  /** Agentry extension: the web browser (Playwright MCP, sandbox chats only); absent or `null` uses the server default (`browser.default`, off). */
+  /** Agentry extension: the web browser (Playwright MCP, sandbox chats only); absent or `null` is auto: the browser when the chat's sandbox has it (server default `browser.default`). */
   browser?: boolean | null
   host_tools?: OAIHostToolsConfig | null
   multi_agent?: OAIMultiAgentConfig | null

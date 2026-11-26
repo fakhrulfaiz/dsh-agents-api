@@ -197,8 +197,8 @@ export interface Config extends RuntimeConfigInput {
   }
   /** The web browser (Playwright MCP). It runs only inside Agentry Sandbox chats; there is no host browser. */
   browser?: {
-    /** Whether agents whose `browser` field is absent or null get it (default false). */
-    default?: boolean
+    /** What agents whose `browser` field is absent or null get: `auto` (when the chat's sandbox has the browser), `on` or `off`; `true`/`false` mean on/off (default `auto`). */
+    default?: 'auto' | 'on' | 'off' | boolean
     /** Most frames a second the live browser view (`/agents/sessions/{id}/browser/live`) sends, 1 to 10 (default 4). */
     liveFps?: number
   }
@@ -230,7 +230,7 @@ export interface Config extends RuntimeConfigInput {
 /** `Config` after validation: `auth`, `prefix`, `database`, and `workspaces` are always present; `codebox` and `dataDir` never are. */
 export type ResolvedConfig = Omit<Config, 'auth' | 'prefix' | 'database' | 'codebox' | 'dataDir' | 'skills' | 'commands' | 'uploads' | 'composio' | 'browser'> & {
   auth: ResolvedAuthConfig
-  browser: { default: boolean; liveFps: number }
+  browser: { default: 'auto' | 'on' | 'off' | boolean; liveFps: number }
   skills: { cacheTtlSeconds: number; dir: string; builtinDir: string; workspaceSkills: boolean }
   commands: { cacheTtlSeconds: number; allow: string[] }
   composio: { serverLabel: string; approvalVerbs: string[]; approvalSlugs: string[] }
@@ -289,9 +289,9 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
     allow: z.array(z.string()).default([...DEFAULT_COMMANDS_ALLOW]),
   }).default({ cacheTtlSeconds: 60, allow: [...DEFAULT_COMMANDS_ALLOW] }),
   browser: z.object({
-    default: z.boolean().default(false),
+    default: z.union([z.boolean(), z.const('auto'), z.const('on'), z.const('off')]).default('auto'),
     liveFps: z.number().default(4),
-  }).default({ default: false, liveFps: 4 }),
+  }).default({ default: 'auto', liveFps: 4 }),
   composio: z.object({
     serverLabel: z.string().default('composio'),
     approvalVerbs: z.array(z.string()).default([...DEFAULT_APPROVAL_VERBS]),

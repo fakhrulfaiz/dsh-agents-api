@@ -3608,7 +3608,7 @@ components:
               enum: [ask, auto]
             - type: "null"
         browser:
-          description: "Agentry extension: the web browser (Playwright MCP tools `mcp__browser__*`). It runs only in sandbox chats, inside the sandbox; a chat on the server gets no browser tools. Absent or `null` uses the server default `browser.default` (off)."
+          description: "Agentry extension: the web browser (Playwright MCP tools `mcp__browser__*`). It runs only in sandbox chats, inside the sandbox; a chat on the server gets no browser tools. `true` always tries to start it; `false` never does (no tools, no notice). Absent or `null` is auto (the server default `browser.default`): the browser mounts when the chat's sandbox has it, otherwise there are no tools and the prompt says the sandbox has no browser."
           oneOf:
             - type: boolean
             - type: "null"
@@ -3688,7 +3688,7 @@ components:
               enum: [ask, auto]
             - type: "null"
         browser:
-          description: "Agentry extension: the web browser (Playwright MCP tools `mcp__browser__*`). It runs only in sandbox chats, inside the sandbox; a chat on the server gets no browser tools. Absent or `null` uses the server default `browser.default` (off)."
+          description: "Agentry extension: the web browser (Playwright MCP tools `mcp__browser__*`). It runs only in sandbox chats, inside the sandbox; a chat on the server gets no browser tools. `true` always tries to start it; `false` never does (no tools, no notice). Absent or `null` is auto (the server default `browser.default`): the browser mounts when the chat's sandbox has it, otherwise there are no tools and the prompt says the sandbox has no browser."
           oneOf:
             - type: boolean
             - type: "null"

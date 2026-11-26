@@ -38,10 +38,25 @@ const BROWSER_PROBE_TOOL = `mcp__${BROWSER_SERVER_LABEL}__browser_navigate`
 /** The bridge program beside this module in a build (`lib/`). */
 export const DEFAULT_BRIDGE_PATH = fileURLToPath(new URL('./sandbox-stdio-bridge.js', import.meta.url))
 
-/** Whether the agent has the browser: its `browser` field, else the server default. */
-export function browserEnabled(agent: Pick<OAIAgent, 'browser'>, serverDefault: boolean): boolean {
-  return typeof agent.browser === 'boolean' ? agent.browser : serverDefault
+/** `on`: always try; `off`: never; `auto`: only when the chat's sandbox has the browser. */
+export type BrowserMode = 'auto' | 'on' | 'off'
+
+/** The server default (`browser.default`) as a mode; `true`/`false` stay accepted as on/off. */
+export function normalizeBrowserDefault(value: boolean | BrowserMode | undefined): BrowserMode {
+  if (value === true) return 'on'
+  if (value === false) return 'off'
+  return value ?? 'auto'
 }
+
+/** The agent's mode: `true` on, `false` off, absent or `null` the server default. */
+export function browserMode(agent: Pick<OAIAgent, 'browser'>, serverDefault: BrowserMode): BrowserMode {
+  if (agent.browser === true) return 'on'
+  if (agent.browser === false) return 'off'
+  return serverDefault
+}
+
+/** Command that succeeds when the sandbox has Playwright MCP (the program `browserMcpTool` starts). */
+export const BROWSER_PROBE_COMMAND = 'command -v playwright-mcp'
 
 /** `browser` must be a boolean or null when present. */
 export function validateBrowserField(value: unknown): string | undefined {
@@ -56,6 +71,8 @@ export interface BrowserSandbox {
   workspace: string
   /** The chat's session id (picks the browser's DevTools port). */
   sessionId: string
+  /** The environment's provider name (to reach the sandbox for the auto-mode check). */
+  provider?: string
 }
 
 /**
@@ -125,12 +142,16 @@ export const BROWSER_LOCAL_NOTICE = 'The web browser is turned on for this agent
 /** Shown when the browser should run in this sandbox but did not start. */
 export const BROWSER_MISSING_NOTICE = `The web browser is turned on for this agent, but it could not start in this sandbox: the standard sandbox image does not include it. If the user needs a browser, tell them to start a new chat on the built-in "Web and browser" template (or a custom template using the image \`${BROWSER_SANDBOX_IMAGE}\`).`
 
+/** Shown in an auto-mode chat whose sandbox has no browser. */
+export const BROWSER_ABSENT_NOTICE = `This sandbox has no web browser, so you have no browser tools: do not look for one in connected apps. If the user needs a browser, tell them to start a new chat on an environment made from the built-in "Web and browser" template (image \`${BROWSER_SANDBOX_IMAGE}\`).`
+
 /**
  * Register the browser section on the agent scope. In a sandbox chat it shows
  * the guidance while the browser tools are visible, or a notice that the
- * browser did not start; in a local chat it explains why there is no browser.
+ * browser did not start; in a local chat it explains why there is no browser;
+ * `absent` (auto mode, sandbox without the browser) says there is none.
  */
-export function mountBrowserGuidance(agentCtx: Context, mode: 'sandbox' | 'local'): void {
+export function mountBrowserGuidance(agentCtx: Context, mode: 'sandbox' | 'local' | 'absent'): void {
   if (agentCtx.get('systemPrompt') === undefined) return
   agentCtx.systemPrompt.section({
     name: AGENTRY_BROWSER_SECTION,
@@ -140,7 +161,8 @@ export function mountBrowserGuidance(agentCtx: Context, mode: 'sandbox' | 'local
 }
 
 /** The section text for a chat `mode` and whether the browser tools are present. */
-export function browserGuidanceText(mode: 'sandbox' | 'local', hasTools: boolean): string {
+export function browserGuidanceText(mode: 'sandbox' | 'local' | 'absent', hasTools: boolean): string {
   if (hasTools) return BROWSER_GUIDANCE
+  if (mode === 'absent') return BROWSER_ABSENT_NOTICE
   return mode === 'local' ? BROWSER_LOCAL_NOTICE : BROWSER_MISSING_NOTICE
 }

@@ -6,7 +6,9 @@ import {
   BROWSER_LOCAL_NOTICE,
   BROWSER_MISSING_NOTICE,
   browserCdpPort,
-  browserEnabled,
+  BROWSER_ABSENT_NOTICE,
+  browserMode,
+  normalizeBrowserDefault,
   browserMcpTool,
   mountBrowserGuidance,
   validateBrowserField,
@@ -58,10 +60,15 @@ describe('browserMcpTool', () => {
 
 describe('browser field', () => {
   it('uses the agent value, else the server default', () => {
-    expect(browserEnabled({ browser: true }, false)).toBe(true)
-    expect(browserEnabled({ browser: false }, true)).toBe(false)
-    expect(browserEnabled({ browser: null }, true)).toBe(true)
-    expect(browserEnabled({}, false)).toBe(false)
+    expect(browserMode({ browser: true }, 'off')).toBe('on')
+    expect(browserMode({ browser: false }, 'on')).toBe('off')
+    expect(browserMode({ browser: null }, 'auto')).toBe('auto')
+    expect(browserMode({}, 'auto')).toBe('auto')
+    expect(browserMode({}, 'off')).toBe('off')
+    expect(normalizeBrowserDefault(undefined)).toBe('auto')
+    expect(normalizeBrowserDefault(true)).toBe('on')
+    expect(normalizeBrowserDefault(false)).toBe('off')
+    expect(normalizeBrowserDefault('on')).toBe('on')
   })
 
   it('accepts a boolean or null', () => {
@@ -94,6 +101,14 @@ describe('mountBrowserGuidance', () => {
     const { agentCtx, text } = scope([])
     mountBrowserGuidance(agentCtx, 'local')
     expect(text()).toBe(BROWSER_LOCAL_NOTICE)
+  })
+
+  it('says an auto-mode sandbox has no browser, and not to look in connected apps', () => {
+    const { agentCtx, text } = scope([])
+    mountBrowserGuidance(agentCtx, 'absent')
+    expect(text()).toBe(BROWSER_ABSENT_NOTICE)
+    expect(text()).toContain('connected apps')
+    expect(text()).toContain('Web and browser')
   })
 
   it('says a Web browser template is needed when the sandbox browser did not start', () => {

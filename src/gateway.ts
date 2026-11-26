@@ -43,7 +43,7 @@ import { mountAgentInstructions } from './mount-instructions.ts'
 import { AGENTRY_PRESET_ID } from './preset.ts'
 import { copyIntoSandboxUploads, MAX_ARTIFACT_BYTES, providerRows, type AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
 import { sandboxCredentials, sandboxStartErrorIn, type SandboxPresets } from './sandbox/presets.ts'
-import { SandboxApiError, type EnvdClient } from '@agentry/sandbox/client'
+import { runInEnvd, SandboxApiError, type EnvdClient } from '@agentry/sandbox/client'
 import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
 import { sweepStaged, type InstallDeps } from './skills/install.ts'
 import { SkillInstallApi } from './skills/routes.ts'
@@ -64,7 +64,7 @@ import { mountComposioAppTools } from './mount-composio-app-tools.ts'
 import { mountScheduleGuidance } from './mount-schedule-guidance.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
-import { BRIDGE_HOST_CWD, browserCdpPort, browserEnabled, browserMcpTool, mountBrowserGuidance, validateBrowserField, type BrowserSandbox } from './mount-browser.ts'
+import { BRIDGE_HOST_CWD, browserCdpPort, BROWSER_PROBE_COMMAND, browserMcpTool, browserMode, normalizeBrowserDefault, type BrowserMode, mountBrowserGuidance, validateBrowserField, type BrowserSandbox } from './mount-browser.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
 import { slashCommandItem } from './items.ts'
@@ -173,8 +173,10 @@ export interface GatewayOptions {
   skillsRoot?: string
   /** Composio grant enforcement and send approvals (`composio` config). */
   composio?: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
-  /** Whether agents without a `browser` value get the web browser (`browser.default`, default false). */
-  browserDefault?: boolean
+  /** What agents without a `browser` value do (`browser.default`: auto, on or off; `true`/`false` mean on/off; default auto). */
+  browserDefault?: BrowserMode | boolean
+  /** Whether the sandbox behind `envd` has the browser (default: runs `command -v playwright-mcp` as `agent`). */
+  sandboxHasBrowser?: (envd: EnvdClient) => Promise<boolean>
   /** The sandbox stdio bridge program (tests); default `lib/sandbox-stdio-bridge.js`. */
   browserBridgePath?: string
   /** Most frames a second the live browser view sends (`browser.liveFps`, default 4). */
@@ -301,7 +303,10 @@ export class AgentsGateway {
   private readonly deliverablesCache = new DeliverablesCache<DeliverableEntry>(500)
   private readonly skillsGithub: GithubDeps | undefined
   private readonly composio: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
-  private readonly browserDefault: boolean
+  private readonly browserDefault: BrowserMode
+  private readonly sandboxHasBrowser: (envd: EnvdClient) => Promise<boolean>
+  /** Auto-mode probe results by sandbox id; forgotten when the sandbox is reset or deleted. */
+  private readonly browserProbes = new Map<string, Promise<boolean>>()
   private readonly browserBridgePath: string | undefined
   /** Refresh hooks of live sessions' Agentry skill providers, by owner. */
   readonly skillInvalidations = new SkillInvalidations()
@@ -355,7 +360,14 @@ export class AgentsGateway {
     this.skillsRoot = options.skillsRoot ?? ''
     this.skillsGithub = options.skillsGithub
     this.composio = options.composio ?? { serverLabel: 'composio', approvalVerbs: DEFAULT_APPROVAL_VERBS, approvalSlugs: [] }
-    this.browserDefault = options.browserDefault ?? false
+    this.browserDefault = normalizeBrowserDefault(options.browserDefault)
+    this.sandboxHasBrowser = options.sandboxHasBrowser ?? (async (envd) => {
+      try {
+        return (await runInEnvd(envd, 'agent', BROWSER_PROBE_COMMAND, { timeoutMs: 5_000 })).code === 0
+      } catch {
+        throw new Error('browser probe failed')
+      }
+    })
     this.browserBridgePath = options.browserBridgePath
     this.browserLive = new BrowserLiveHub({ minIntervalMs: Math.round(1000 / Math.min(10, Math.max(1, options.browserLiveFps ?? 4))) })
     this.startBrowserRelay = options.startBrowserRelay ?? startRelay
@@ -1753,19 +1765,41 @@ export class AgentsGateway {
     const lease = await this.sandboxPresets.acquire(owner, sandboxId, workspace)
     ;(agentCtx as { effect?: (fn: () => () => void) => void }).effect?.(() => () => { void lease[Symbol.asyncDispose]() })
     await mountDefaultPreset(agentCtx, lease.presetId)
-    return { owner, sandboxId, workspace }
+    return { owner, sandboxId, workspace, provider: record.provider }
+  }
+
+  /** Whether the sandbox has the browser, checked once and cached; a failed check counts as no and is not cached. */
+  private probeBrowser(sandbox: BrowserSandbox): Promise<boolean> {
+    const cached = this.browserProbes.get(sandbox.sandboxId)
+    if (cached !== undefined) return cached
+    const probe = (async () => {
+      const provider = this.sandboxes.get(sandbox.provider ?? '') as Partial<AgentrySandboxProvider> | undefined
+      if (typeof provider?.api !== 'function') throw new Error('no sandbox provider')
+      return await this.sandboxHasBrowser(provider.api(sandbox.owner).envd(sandbox.sandboxId))
+    })()
+    this.browserProbes.set(sandbox.sandboxId, probe)
+    return probe.catch((error: unknown) => {
+      this.browserProbes.delete(sandbox.sandboxId)
+      this.ctx.logger.warn(`agents-api: could not check the browser in sandbox ${sandbox.sandboxId}: ${errorMessage(error)}`)
+      return false
+    })
   }
 
   /**
-   * The web browser for an agent that has it on: in a sandbox chat, Playwright
+   * The web browser for an agent that has it on (or on auto with a sandbox that has it): in a sandbox chat, Playwright
    * MCP inside the sandbox through the stdio bridge (in memory, never in the
    * saved config); in a local chat, no tools and a prompt line saying why.
    */
   private async mountBrowser(agentCtx: Context, resolved: OAIAgent, sandbox: BrowserSandbox | undefined): Promise<void> {
-    if (!browserEnabled(resolved, this.browserDefault)) return
+    const mode = browserMode(resolved, this.browserDefault)
+    if (mode === 'off') return
     const credentials = sandboxCredentials()
     if (sandbox === undefined || credentials === undefined) {
-      mountBrowserGuidance(agentCtx, 'local')
+      if (mode === 'on') mountBrowserGuidance(agentCtx, 'local')
+      return
+    }
+    if (mode === 'auto' && !await this.probeBrowser(sandbox)) {
+      mountBrowserGuidance(agentCtx, 'absent')
       return
     }
     mountBrowserGuidance(agentCtx, 'sandbox')
@@ -2466,6 +2500,7 @@ export class AgentsGateway {
       this.terminals.closeEnvironment(record.id)
       this.browserLive.closeEnvironment(record.id)
     }
+    this.browserProbes.delete(sandboxId)
     if (action === 'reset') forgetWorkspaceAlias(sandboxId)
     await this.getEnvironment(res, params, owner)
   }
@@ -2555,7 +2590,7 @@ export class AgentsGateway {
       else res.end()
     }
     let detach: (() => void) | undefined
-    if (sandbox !== undefined && sandboxId !== undefined && browserEnabled(configOf(row).agent, this.browserDefault)) {
+    if (sandbox !== undefined && sandboxId !== undefined && browserMode(configOf(row).agent, this.browserDefault) !== 'off') {
       const envd = sandbox.provider.api(owner).envd(sandboxId)
       const port = browserCdpPort(sessionId)
       try {
@@ -2642,6 +2677,7 @@ export class AgentsGateway {
     this.terminals.closeEnvironment(record.id)
     this.browserLive.closeEnvironment(record.id)
     forgetWorkspaceAlias(record.provider_metadata['sandbox_id'] ?? '')
+    this.browserProbes.delete(record.provider_metadata['sandbox_id'] ?? '')
     const provider = this.sandboxes.get(record.provider)
     if (provider === undefined) {
       this.ctx.logger.warn(`agents-api: environment ${record.id} uses sandbox provider "${record.provider}", which is not registered; removing the record without cleaning a backend`)

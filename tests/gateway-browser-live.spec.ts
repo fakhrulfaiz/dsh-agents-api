@@ -50,6 +50,7 @@ async function start() {
   const sandboxEnv = { type: 'sandbox', environment_id: 'env_sbx' } as unknown as SessionConfig['environment']
   await store.sessions.insert(row('sess_on', sandboxEnv, true))
   await store.sessions.insert(row('sess_off', sandboxEnv, false))
+  await store.sessions.insert(row('sess_auto', sandboxEnv, null))
   await store.sessions.insert(row('sess_local', { type: 'local' } as unknown as SessionConfig['environment'], true))
   const registry = new SandboxRegistry('local')
   registry.register(createLocalProvider(join(tmpdir(), 'agentry-live-spec-envs')))
@@ -122,6 +123,14 @@ describe('browser live route', () => {
     expect(await events(`${base}/sess_local/browser/live`, 1)).toEqual([{ event: 'idle', data: { reason: 'not_sandbox' } }])
     expect(await events(`${base}/sess_off/browser/live`, 1)).toEqual([{ event: 'idle', data: { reason: 'browser_off' } }])
     expect(startBrowserRelay).not.toHaveBeenCalled()
+  })
+
+  it('keeps the live view for auto agents (the relay reports no_browser) and says browser_off for off', async () => {
+    const { base, relays } = await start()
+    const got = await events(`${base}/sess_auto/browser/live`, 1, () => {
+      void vi.waitFor(() => { expect(relays).toHaveLength(1) }).then(() => { relays[0]!.write('{"type":"idle","reason":"no_browser"}\n') })
+    })
+    expect(got).toEqual([{ event: 'idle', data: { reason: 'no_browser' } }])
   })
 
   it('hides unknown sessions', async () => {
