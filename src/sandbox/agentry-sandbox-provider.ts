@@ -47,6 +47,10 @@ export interface AgentrySandboxProvider extends SandboxProvider {
   remove(record: EnvironmentRecord, path: string): Promise<void>
   /** The absolute path of a workspace-relative path in the sandbox. */
   absolute(record: EnvironmentRecord, path: string): string
+  /** Run a `/bin/sh -c` script as `agent` (default 30 s; stdout and stderr capped at 8 MB each, `truncated` when cut). */
+  exec(record: EnvironmentRecord, script: string, opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<{ code: number; stdout: string; stderr: string; truncated?: boolean }>
+  /** The workspace directory inside the sandbox. */
+  workspaceDir(record: EnvironmentRecord): string
 }
 
 /** One Agentry Sandbox place as listed on the `sandbox` provider row. */
@@ -97,6 +101,8 @@ export async function copyIntoSandboxUploads(
 }
 
 const AGENT = 'agent'
+const EXEC_TIMEOUT_MS = 30_000
+const EXEC_OUTPUT_CAP = 8 * 1024 * 1024
 const QUICK_TIMEOUT_MS = 10_000
 /** Largest artifact served from a sandbox in one response. */
 export const MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
@@ -338,6 +344,47 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
 
     absolute(record, path) {
       return inside(meta(record).dir, path)
+    },
+
+    workspaceDir(record) {
+      return meta(record).dir
+    },
+
+    async exec(record, script, opts = {}) {
+      const { id } = meta(record)
+      const envd = api(ownerOf(record)).envd(id)
+      const timeout = AbortSignal.timeout(opts.timeoutMs ?? EXEC_TIMEOUT_MS)
+      const stop = new AbortController()
+      const signal = AbortSignal.any([timeout, stop.signal, ...(opts.signal ? [opts.signal] : [])])
+      const decoder = { out: new TextDecoder(), err: new TextDecoder() }
+      let stdout = ''
+      let stderr = ''
+      let code = -1
+      let truncated = false
+      const stream = envd.process.start(
+        { process: { cmd: '/bin/sh', args: ['-c', script], envs: {} }, stdin: false },
+        { headers: envd.userHeaders(AGENT), signal },
+      )
+      try {
+        for await (const res of stream) {
+          const ev = res.event?.event
+          if (ev?.case === 'data') {
+            const out = ev.value.output
+            if (out.case === 'stdout') stdout += decoder.out.decode(out.value, { stream: true })
+            else if (out.case === 'stderr') stderr += decoder.err.decode(out.value, { stream: true })
+            if (stdout.length > EXEC_OUTPUT_CAP || stderr.length > EXEC_OUTPUT_CAP) {
+              truncated = true
+              stop.abort()
+              break
+            }
+          } else if (ev?.case === 'end') {
+            code = ev.value.exitCode
+          }
+        }
+      } catch (e) {
+        if (!truncated) throw e
+      }
+      return { code, stdout: stdout.slice(0, EXEC_OUTPUT_CAP), stderr: stderr.slice(0, EXEC_OUTPUT_CAP), ...(truncated ? { truncated } : {}) }
     },
 
     async readFile(record, path) {

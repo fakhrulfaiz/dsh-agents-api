@@ -53,6 +53,7 @@ import { createFilesystemFileStore, type FileStore } from './files/file-store.ts
 import { startSweeper } from './files/sweeper.ts'
 import { AgentsGateway } from './gateway.ts'
 import type { OfficeToPdfLike } from './render/office-api.ts'
+import type { WorkspaceChangesLike } from './history/turn-changes.ts'
 import { errorMessage } from './http.ts'
 import { createSessionHistory } from './history/session-history.ts'
 import { recoverSessions, recoveryUnavailable } from './recovery.ts'
@@ -476,6 +477,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     ...(staging === undefined ? {} : { files: { staging, limits: config.uploads } }),
     attachments: () => ctx.get('attachments'),
     officeToPdf: () => ctx.get('officeToPdf') as OfficeToPdfLike | undefined,
+    workspaceChanges: () => ctx.get('workspaceChanges') as WorkspaceChangesLike | undefined,
   })
 
   if (staging !== undefined) ctx.effect(() => verifyStaging(staging, stagingDir!), 'agents-api: upload staging')
@@ -505,6 +507,12 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     }
     gateway.applySessionEvent(session.id, event)
   })
+  // A sandbox session's tools wait for its turn-start snapshot (src/history/sandbox-changes.ts), as DSH's recorder does for local ones.
+  ctx.on('tools/pre-execute', (async (exec: { agent?: { session?: { id?: unknown } } }, next: () => Promise<unknown>) => {
+    const id = exec.agent?.session?.id
+    if (id !== undefined) await gateway.changesSettled(String(id))
+    return next()
+  }) as never)
   ctx.on('commands/change', () => {
     gateway.invalidateCommands()
   })

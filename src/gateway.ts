@@ -83,6 +83,9 @@ import { applySessionUpdate, baseOf, configOf, sessionFromRow } from './session-
 import { writeEvent, writeSSEHeaders } from './sse.ts'
 import type { ArtifactS3Config } from './artifacts.ts'
 import { artifactContentDisposition, artifactContentType, getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath, statWorkspaceArtifact } from './artifacts.ts'
+import { ChangesApi } from './history/changes-api.ts'
+import { SandboxChanges, type SandboxTarget } from './history/sandbox-changes.ts'
+import type { WorkspaceChangesLike } from './history/turn-changes.ts'
 import { renderOfficePdf, WorkspaceUnavailableError, type OfficeToPdfLike, type SessionFile } from './render/office-api.ts'
 import { directorySegment } from './environment/local.ts'
 import type { CreateEnvironmentInput } from './environment/provider.ts'
@@ -179,6 +182,8 @@ export interface GatewayOptions {
   attachments?: () => AttachmentsPort | undefined
   /** DSH's Office-to-PDF service when the profile provides one, read at call time (absent: renders answer 503). */
   officeToPdf?: () => OfficeToPdfLike | undefined
+  /** DSH's workspace-changes service when the profile provides one, read at call time (absent: local chats list no changes). */
+  workspaceChanges?: () => WorkspaceChangesLike | undefined
 }
 
 /** A session created by `provisionSession`: projector registered, agent live, index row written, no turn started. */
@@ -216,6 +221,8 @@ export class AgentsGateway {
   private readonly approvals: ApprovalBridge
   private readonly schedule: () => ScheduleService | undefined
   private readonly officeRender: Parameters<typeof renderOfficePdf>[0]
+  /** Per-turn changes of sandbox chats (DSH's recorder cannot see inside a sandbox). */
+  private readonly sandboxChanges: SandboxChanges
   private readonly artifacts: ArtifactS3Config | undefined
   private readonly routes: Route[]
   /** Agentry built-in skills. */
@@ -306,6 +313,17 @@ export class AgentsGateway {
       warn: message => this.ctx.logger.warn(message),
     })
     const attachments = options.attachments ?? (() => undefined)
+    this.sandboxChanges = new SandboxChanges({
+      target: sessionId => this.sandboxTarget(sessionId),
+      warn: message => this.ctx.logger.warn(message),
+    })
+    const changesApi = new ChangesApi({
+      requireSession: (res, owner, sessionId) => this.requireSession(res, owner, sessionId),
+      events: sessionId => this.history.events(sessionId),
+      workspaceChanges: options.workspaceChanges ?? (() => undefined),
+      isSandbox: async (owner, sessionId) => await this.sandboxOfSession(owner, sessionId) !== undefined,
+      sandbox: this.sandboxChanges,
+    })
     this.officeRender = {
       officeToPdf: options.officeToPdf ?? (() => undefined),
       requireSession: (res, owner, sessionId) => this.requireSession(res, owner, sessionId),
@@ -380,6 +398,7 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents/sessions/:session_id/events', handler: (req, res, _url, params, p) => this.postEvents(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/events', handler: (req, res, _url, params, p) => this.streamEvents(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/items', handler: (_req, res, url, params, p) => this.listItems(res, url, params, p.owner) },
+      ...changesApi.routes(),
       { method: 'GET', pattern: '/agents/sessions/:session_id/turns/:turn_id', handler: (_req, res, _url, params, p) => this.getTurn(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/turns', handler: (_req, res, url, params, p) => this.listTurns(res, url, params, p.owner) },
       { method: 'POST', pattern: '/agents/sessions/:session_id', handler: (req, res, _url, params, p) => this.updateSession(req, res, params, p.owner) },
@@ -1088,6 +1107,7 @@ export class AgentsGateway {
    * @param sessionId - session whose agent stops.
    */
   private async stopLiveAgent(sessionId: string): Promise<void> {
+    this.sandboxChanges.forget(sessionId)
     this.approvals.cancelAll(sessionId)
     this.pendingBySession.get(sessionId)?.rejectAll(new Error(`Session "${sessionId}" was deleted`))
     this.pendingBySession.delete(sessionId)
@@ -1412,6 +1432,8 @@ export class AgentsGateway {
    */
   applySessionEvent(sessionId: string, event: SessionEvent): void {
     if ((event.type as string) === 'agent-preset/selected') this.commandsApi.invalidate()
+    if (event.type === 'turn/start') this.sandboxChanges.start(sessionId, `turn_${String(event.seq)}`)
+    else if (event.type === 'turn/end') this.sandboxChanges.end(sessionId)
     const step = this.sessionRegistry.apply(sessionId, event)
     if (step?.status) this.recordStatus(sessionId, step.status.status, step.status.error)
     // The turn's end cleared the shown actions; a subagent's requests outlive it.
@@ -2514,6 +2536,27 @@ export class AgentsGateway {
     res.setHeader('Content-Disposition', artifactContentDisposition(rawPath, download))
     res.setHeader('X-Content-Type-Options', 'nosniff')
     res.end(body)
+  }
+
+  /**
+   * Resolves once the session's queued sandbox snapshots settled, so a tool never races the turn-start snapshot.
+   * @param sessionId - session id.
+   */
+  changesSettled(sessionId: string): Promise<void> {
+    return this.sandboxChanges.settled(sessionId)
+  }
+
+  /** Where a sandbox session's git commands run; `undefined` for other sessions or when the lookup fails. */
+  private async sandboxTarget(sessionId: string): Promise<SandboxTarget | undefined> {
+    try {
+      const row = await this.store.sessions.get(sessionId, 'any')
+      if (row === undefined) return undefined
+      const sandbox = await this.sandboxOfSession(row.ownerId, sessionId)
+      if (sandbox === undefined || typeof sandbox.provider.exec !== 'function') return undefined
+      return { dir: sandbox.provider.workspaceDir(sandbox.record), exec: (script, opts) => sandbox.provider.exec(sandbox.record, script, opts) }
+    } catch {
+      return undefined
+    }
   }
 
   /**

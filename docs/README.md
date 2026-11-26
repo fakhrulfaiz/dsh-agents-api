@@ -6,6 +6,7 @@ Package-local reference and change notes for `@agentry/api`.
 
 | Page | Summary |
 | --- | --- |
+| [2026-11-26-turn-changes.md](changes/2026-11-26-turn-changes.md) | Changed files per turn with diffs (`/changes`, `/turns/{id}/changes[/{index}]`): DSH recorder for local chats, a shadow git repository inside the sandbox for sandbox chats; memory only |
 | [2026-11-26-office-render.md](changes/2026-11-26-office-render.md) | `GET /agents/sessions/{id}/renders/pdf/{path}`: Office files converted to PDF by DSH's `officeToPdf` in the API process |
 | [http-api.md](http-api.md) | Agents API routes, create/stream input, function-tool and approval wire contracts, live model and effort changes, scheduled tasks, slash commands |
 
