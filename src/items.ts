@@ -6,6 +6,7 @@ import { connectRequestFrom } from './connect-request.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { ATTACHMENT_NOTE_PREFIX } from './files/note.ts'
 import { typeFromExtension } from './files/sniff.ts'
+import { outputImageParts } from './files/tool-images.ts'
 import { parseToolArguments, textFromContent, toOAIUsage } from './input.ts'
 import type {
   OAICommandExecutionItem,
@@ -181,6 +182,8 @@ function firstTokenAt(stream: Array<{ type: string; time0?: number }> | undefine
 export interface ItemContext {
   /** When the event's step started (its `step/start`), epoch ms; absent when not in the log. */
   stepStartedAt?: number
+  /** Agents API session the items belong to (the parent for subagent items); names tool-result images. */
+  sessionId?: string
 }
 
 export function itemsFromEvent(event: SessionEvent, turnId: string, context: ItemContext = {}): OAISessionItem[] {
@@ -326,6 +329,8 @@ export function itemsFromEvent(event: SessionEvent, turnId: string, context: Ite
     }
     const connect = isError ? undefined : connectRequestFrom(output)
     if (connect !== undefined) fnOutItem.connect_request = connect
+    const images = outputImageParts(message?.content, context.sessionId)
+    if (images.length > 0) fnOutItem.images = images
     return [fnOutItem]
   }
 

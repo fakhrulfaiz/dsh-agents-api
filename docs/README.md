@@ -13,6 +13,7 @@ Package-local reference and change notes for `@agentry/api`.
 | Note | Summary |
 | --- | --- |
 | [2026-11-26-owner-scoped-schedule-tools.md](changes/2026-11-26-owner-scoped-schedule-tools.md) | In-chat `schedule_*` tools shadowed per session with owner-scoped copies; other owners' and ownerless tasks look like unknown ids |
+| [2026-11-26-tool-images.md](changes/2026-11-26-tool-images.md) | Images from tool results: `images` on `function_call_output` items, `timg_` file ids served by the files content route |
 | [2026-11-23-agentry-general-agent.md](changes/2026-11-23-agentry-general-agent.md) | Agentry identity preset, per-agent skills and installs, command allow-list, Composio grants and connect requests |
 | [2026-11-10-redact-mcp-secrets.md](changes/2026-11-10-redact-mcp-secrets.md) | MCP `headers` and `env` values returned masked as `***` by every session and saved-agent response and SSE event; storage and recovery keep real values |
 | [2026-11-10-attachments.md](changes/2026-11-10-attachments.md) | Chat file attachments: `/agents/files` upload, content, and delete; `input_image` / `input_file` parts; workspace `uploads/` copy; item parts; TTL sweeper; `FileStore` seam |

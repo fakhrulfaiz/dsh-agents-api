@@ -67,6 +67,7 @@ import { ScheduleApi } from './schedules.ts'
 import { slashCommandItem } from './items.ts'
 import { COMMAND_NAME, CommandsApi, commandNotFound, type CommandService, type CommandTarget } from './commands.ts'
 import { withFileIds } from './files/item-parts.ts'
+import { toolImageSource } from './files/tool-images.ts'
 import { openAttached, type AttachmentsPort } from './files/attached.ts'
 import { AttachmentIngest, type AttachedFiles } from './files/ingest.ts'
 import { FilesApi, uploadedFileSource, type FilesRuntime } from './files/api.ts'
@@ -311,6 +312,14 @@ export class AgentsGateway {
         store: () => this.store,
         staging: options.files?.staging,
         attached: row => openAttached(row, attachments()),
+      }), toolImageSource({
+        imageRefs: async (owner, sessionId) => {
+          if (await this.store.sessions.get(sessionId, owner) === undefined) return undefined
+          const children = this.sessionRegistry.listSubagents(sessionId)
+          const logs = await Promise.all([sessionId, ...children.map(child => child.id)].map(id => this.history.toolImages(id)))
+          return logs.flat()
+        },
+        attachments,
       })],
       warn: message => this.ctx.logger.warn(message),
     })

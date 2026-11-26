@@ -10,6 +10,8 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { SessionQueryError, type SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import { paginate, type ListQuery } from '../http.ts'
 import type { OAIListResponse, OAITurn } from '../types.ts'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { toolResultImageRefs } from '../files/tool-images.ts'
 import { deliverablesFromEvents, type DeliverableEntry } from './deliverables.ts'
 import { foldSession, type ProjectionBase, type ReplayFrame, type StoredSessionItem, type WireProjector } from './projector.ts'
 
@@ -52,6 +54,11 @@ export interface SessionHistory {
    * @returns files declared with `present`, oldest first; empty when the log is missing.
    */
   deliverables(sessionId: string): Promise<DeliverableEntry[]>
+  /**
+   * @param sessionId - session id (a subagent's Host session id works too).
+   * @returns the image references in its tool results, oldest first; empty when the log is missing.
+   */
+  toolImages(sessionId: string): Promise<ImageAttachmentRef[]>
   /**
    * @param sessionId - session id.
    * @returns the working directory in the session header, or `undefined` when the log is missing.
@@ -96,6 +103,14 @@ export function createSessionHistory(sessionQuery: Pick<SessionQueryEngine, 'rea
     },
     async deliverables(sessionId) {
       return deliverablesFromEvents((await read(sessionId))?.events ?? [])
+    },
+    async toolImages(sessionId) {
+      const refs: ImageAttachmentRef[] = []
+      for (const event of (await read(sessionId))?.events ?? []) {
+        if (event.type !== 'tool/result') continue
+        refs.push(...toolResultImageRefs((event.data as { message?: { content?: unknown } }).message?.content))
+      }
+      return refs
     },
     async workspace(sessionId) {
       const cwd = (await read(sessionId))?.session.cwd

@@ -775,7 +775,7 @@ paths:
     get:
       summary: Download a file
       description: >-
-        Bytes of a staged or attached file of the caller. Another owner's id answers `404`. Rasters are served `inline`; everything else as an `attachment`, with SVG, HTML, and unknown types as `application/octet-stream`.
+        Bytes of a staged or attached file of the caller, or of an image a tool returned (the `file_id` of an `output_image` part on a `function_call_output` item, `timg_` prefix). Another owner's id answers `404`. Rasters are served `inline`; everything else as an `attachment`, with SVG, HTML, and unknown types as `application/octet-stream`.
         Responses carry `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'`, and `Cache-Control: private, max-age=3600` (ids are immutable).
       tags:
         - Files
@@ -4372,6 +4372,31 @@ components:
         - in_progress
         - completed
         - incomplete
+    OutputImagePart:
+      type: object
+      description: >-
+        Agentry extension: one image a tool returned. `file_id` is derived from the session and the stored image, so live and replayed items carry the same id; it serves the bytes through `GET /v1/agents/files/{file_id}/content` for the session's owner only.
+      properties:
+        type:
+          const: output_image
+        file_id:
+          type: string
+          description: Id for `GET /v1/agents/files/{file_id}/content`.
+        filename:
+          type: string
+        bytes:
+          type: integer
+        media_type:
+          type: string
+        width:
+          type: integer
+        height:
+          type: integer
+      required:
+        - type
+        - bytes
+        - media_type
+      additionalProperties: false
     InputFilePart:
       type: object
       description: >-
@@ -4526,6 +4551,11 @@ components:
           $ref: "#/components/schemas/ItemTiming"
         subagent_id:
           type: string
+        images:
+          description: "Agentry extension: images the tool returned (screenshots, `read_image`), in order; absent when there are none."
+          type: array
+          items:
+            $ref: "#/components/schemas/OutputImagePart"
         connect_request:
           description: "Agentry extension: a connected-app sign-in link found in the output; clients show a Connect button."
           type: object
