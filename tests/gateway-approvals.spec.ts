@@ -38,7 +38,7 @@ interface Fixture {
   dropAgent: (id: string) => void
 }
 
-async function fixture(): Promise<Fixture> {
+async function fixture(options: { models?: string[] } = {}): Promise<Fixture> {
   const agents: Fixture['agents'] = new Map()
   const created: Fixture['created'] = []
   const llm = fakeLlm()
@@ -55,6 +55,9 @@ async function fixture(): Promise<Fixture> {
     sessions: { get: (id: string) => agents.has(id) ? { id } : undefined },
     tools: { schemas: () => [] },
     llm,
+    ...(options.models === undefined ? {} : {
+      get: (name: string) => name === 'llm' ? { listProviders: () => [{ id: 'deepseek-official' }], listModels: () => Promise.resolve(options.models!.map(id => ({ id }))) } : undefined,
+    }),
     agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }) },
     logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn() },
   } as unknown as Context
@@ -331,6 +334,58 @@ describe('live model and effort', () => {
     const response = await events(f, id, { type: 'agent.session.input.message', input: 'hi', model: 'nope' })
     expect(response.status).toBe(409)
     expect(f.agents.get(id)?.followup).not.toHaveBeenCalled()
+  })
+})
+
+describe('models that are not offered', () => {
+  it('answers 409 session_setting_not_live for an unknown follow-up model and sends nothing', async () => {
+    const f = await fixture({ models: ['deepseek-chat', 'deepseek-reasoner'] })
+    const id = await session(f)
+    const response = await events(f, id, { type: 'agent.session.input.message', input: 'hi', model: 'nope' })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ error: { code: 'session_setting_not_live', message: expect.stringContaining('nope') } })
+    expect(f.agents.get(id)?.followup).not.toHaveBeenCalled()
+    expect(f.agents.get(id)?.model.select).not.toHaveBeenCalled()
+    expect((await read(f, id)).agent.model).toBe('deepseek-chat')
+  })
+
+  it('answers 409 for an unknown model on a session update and stores nothing', async () => {
+    const f = await fixture({ models: ['deepseek-chat'] })
+    const id = await session(f)
+    const update = vi.spyOn(f.store.sessions, 'update')
+    const response = await post(`${f.root}/agents/sessions/${id}`, { agent: { model: 'nope' } })
+    expect(response.status).toBe(409)
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it('accepts a listed model, and an effort-only update whose stored model is no longer listed', async () => {
+    const f = await fixture({ models: ['deepseek-reasoner'] })
+    const id = await session(f)
+    expect((await post(`${f.root}/agents/sessions/${id}`, { agent: { model: 'deepseek-reasoner' } })).status).toBe(200)
+    const g = await fixture({ models: ['other'] })
+    const gid = await session(g)
+    expect((await post(`${g.root}/agents/sessions/${gid}`, { agent: { reasoning: { effort: 'low' } } })).status).toBe(200)
+  })
+})
+
+describe('clearing the reasoning effort', () => {
+  it('clears a stored effort on a session update and re-selects without one', async () => {
+    const f = await fixture()
+    const id = await session(f, { model: 'deepseek-chat', reasoning: { effort: 'high' } })
+    const response = await post(`${f.root}/agents/sessions/${id}`, { agent: { reasoning: { effort: null } } })
+    expect(response.status).toBe(200)
+    expect(f.agents.get(id)?.model.select).toHaveBeenCalledExactlyOnceWith({ provider: 'deepseek-official', model: 'deepseek-chat' })
+    expect((await read(f, id)).agent.reasoning?.effort).toBeUndefined()
+    expect((await f.store.sessions.get(id, 'any'))?.reasoningEffort).toBeNull()
+  })
+
+  it('clears the effort from a follow-up message', async () => {
+    const f = await fixture()
+    const id = await session(f, { model: 'deepseek-chat', reasoning: { effort: 'high' } })
+    const response = await events(f, id, { type: 'agent.session.input.message', input: 'hi', reasoning: { effort: null } })
+    expect(response.status).toBe(200)
+    expect(f.agents.get(id)?.model.select).toHaveBeenCalledExactlyOnceWith({ provider: 'deepseek-official', model: 'deepseek-chat' })
+    expect((await f.store.sessions.get(id, 'any'))?.reasoningEffort).toBeNull()
   })
 })
 

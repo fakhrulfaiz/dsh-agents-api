@@ -950,7 +950,7 @@ export class AgentsGateway {
       throw new AgentsApiRequestError('Field "agent.model" cannot be null or empty', 400, 'bad_request')
     }
     if (next.agent.model !== current.agent.model || next.agent.reasoning?.effort !== current.agent.reasoning?.effort) {
-      await this.applyLiveModel(row, next.agent)
+      await this.applyLiveModel(row, next.agent, current.agent.model)
     }
     const updated = await this.store.sessions.update(row.id, owner, {
       model: next.agent.model,
@@ -967,9 +967,10 @@ export class AgentsGateway {
    * running is unchanged.
    * @param row - the session's index row, used to resume the agent when it is not live.
    * @param agent - the agent configuration after the update.
-   * @throws AgentsApiRequestError 409 `session_setting_not_live` when no live agent exists, the route or effort is unsupported, or the selection cannot be recorded.
+   * @param modelBefore - the model before the update; a model that is not offered is refused only when it differs from this.
+   * @throws AgentsApiRequestError 409 `session_setting_not_live` when no live agent exists, the model is not offered, the route or effort is unsupported, or the selection cannot be recorded.
    */
-  private async applyLiveModel(row: SessionIndexRow, agent: OAIAgent): Promise<void> {
+  private async applyLiveModel(row: SessionIndexRow, agent: OAIAgent, modelBefore: string): Promise<void> {
     const notLive = (message: string): AgentsApiRequestError => new AgentsApiRequestError(message, 409, 'session_setting_not_live')
     try {
       await this.ensureLive(row)
@@ -978,11 +979,13 @@ export class AgentsGateway {
     }
     const live = this.ctx.agents.get(SessionId(row.id))
     if (live === undefined) throw notLive(`Session "${row.id}" has no running agent`)
-    const provider = await providerForModel(
+    const found = await lookUpModel(
       this.ctx,
       agent.model,
       live.model.current()?.provider ?? this.ctx.agentDefaultModel.currentSelection().provider,
     )
+    if (found.known === false && agent.model !== modelBefore) throw notLive(`Model "${agent.model}" is not offered by any configured provider`)
+    const provider = found.provider
     const effort = agent.reasoning?.effort
     const route = { provider, model: agent.model, ...(effort == null ? {} : { reasoningEffort: ReasoningEffortId(effort) }) }
     try {
@@ -1755,13 +1758,13 @@ export class AgentsGateway {
         const text = userTextFromInput(evt.input)
         const fileIds = fileIdsFromInput(evt.input)
         await this.ingest.validate(owner, fileIds)
-        if (evt.model != null || evt.reasoning?.effort != null) {
+        if (evt.model != null || evt.reasoning?.effort !== undefined) {
           const fresh = await this.store.sessions.get(sessionId, owner)
           if (fresh === undefined) throw new AgentsApiRequestError(`Session "${sessionId}" not found`, 404, 'resource_not_found')
           await this.changeSettings(fresh, owner, {
             agent: {
               ...(evt.model == null ? {} : { model: evt.model }),
-              ...(evt.reasoning?.effort == null ? {} : { reasoning: { effort: evt.reasoning.effort } }),
+              ...(evt.reasoning?.effort === undefined ? {} : { reasoning: { effort: evt.reasoning.effort } }),
             },
           })
         }
@@ -2595,8 +2598,21 @@ export class AgentsGateway {
  * @param fallback - `agentDefaultModel` provider.
  */
 async function providerForModel(ctx: Context, model: string, fallback: string): Promise<string> {
+  return (await lookUpModel(ctx, model, fallback)).provider
+}
+
+/**
+ * Find the provider that lists a model, and whether the model is known at all.
+ * `known` is `false` only when every provider's list was read and none had the
+ * model; it is `undefined` when the lists cannot say (no `llm` service, or a
+ * provider failed to list).
+ * @param ctx - host context.
+ * @param model - model id.
+ * @param fallback - `agentDefaultModel` provider.
+ */
+async function lookUpModel(ctx: Context, model: string, fallback: string): Promise<{ provider: string; known: boolean | undefined }> {
   const get = (ctx as { get?: (name: string) => unknown }).get
-  if (typeof get !== 'function') return fallback
+  if (typeof get !== 'function') return { provider: fallback, known: undefined }
   let llm: {
     listProviders?: () => ReadonlyArray<{ id: string }>
     listModels?: (provider: string) => Promise<ReadonlyArray<{ id: string }>>
@@ -2604,23 +2620,25 @@ async function providerForModel(ctx: Context, model: string, fallback: string): 
   try {
     llm = get.call(ctx, 'llm') as typeof llm
   } catch {
-    return fallback
+    return { provider: fallback, known: undefined }
   }
   if (llm === undefined || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
-    return fallback
+    return { provider: fallback, known: undefined }
   }
   const ids = llm.listProviders().map(provider => provider.id)
   const ordered = ids.includes(fallback) ? [fallback, ...ids.filter(id => id !== fallback)] : ids
+  let complete = ordered.length > 0
   for (const provider of ordered) {
     let models: ReadonlyArray<{ id: string }>
     try {
       models = await llm.listModels(provider)
     } catch {
+      complete = false
       continue
     }
-    if (models.some(row => row.id === model)) return provider
+    if (models.some(row => row.id === model)) return { provider, known: true }
   }
-  return fallback
+  return { provider: fallback, known: complete ? false : undefined }
 }
 
 /**

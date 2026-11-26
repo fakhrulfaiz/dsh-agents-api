@@ -4290,11 +4290,12 @@ components:
             model:
               type: string
               minLength: 1
-              description: Retargets the live agent from the next model step. `null` and the empty string are rejected.
+              description: Retargets the live agent from the next model step. `null` and the empty string are rejected. A model that no configured provider offers answers 409 `session_setting_not_live` and nothing is stored.
             reasoning:
               type: object
               properties:
                 effort:
+                  description: "`null` clears the stored effort back to the agent's default."
                   oneOf:
                     - $ref: "#/components/schemas/ReasoningEffort"
                     - type: "null"
@@ -4734,11 +4735,12 @@ components:
             $ref: "#/components/schemas/InputMessage"
         model:
           type: string
-          description: Switch the session model from the next model step, before this message is queued.
+          description: Switch the session model from the next model step, before this message is queued. A model that no configured provider offers answers 409 `session_setting_not_live` and the message is not sent.
         reasoning:
           type: object
           properties:
             effort:
+              description: "`null` clears the stored effort back to the agent's default."
               oneOf:
                 - $ref: "#/components/schemas/ReasoningEffort"
                 - type: "null"
