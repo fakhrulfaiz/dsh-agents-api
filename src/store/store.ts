@@ -87,6 +87,8 @@ export interface SessionListQuery {
   status?: string
   from?: Date
   to?: Date
+  /** Keep only sessions whose metadata has every one of these keys with these values. */
+  metadata?: Record<string, string>
   cursor?: string
   limit: number
 }
@@ -288,6 +290,15 @@ export interface Store {
      */
     update(id: string, owner: OwnerId | 'any', patch: SessionIndexPatch): Promise<SessionIndexRow | undefined>
     /**
+     * Merge keys into the session's stored metadata in one atomic step, so two
+     * concurrent merges cannot drop each other's keys.
+     * @param id - session id.
+     * @param owner - calling principal, or `'any'`.
+     * @param patch - keys to set; a `null` value deletes the key.
+     * @returns the updated row, or `undefined` when missing, owned by someone else, or without a stored setup.
+     */
+    mergeMetadata(id: string, owner: OwnerId | 'any', patch: Record<string, string | null>): Promise<SessionIndexRow | undefined>
+    /**
      * @param id - session id.
      * @param owner - calling principal, or `'any'`.
      * @returns the row, or `undefined` when missing or owned by someone else.
@@ -459,6 +470,7 @@ export function guardStore(store: Store): Store {
     sessions: {
       insert: guard(sessions.insert.bind(sessions)),
       update: guard(sessions.update.bind(sessions)),
+      mergeMetadata: guard(sessions.mergeMetadata.bind(sessions)),
       get: guard(sessions.get.bind(sessions)),
       delete: guard(sessions.delete.bind(sessions)),
       list: guard(sessions.list.bind(sessions)),

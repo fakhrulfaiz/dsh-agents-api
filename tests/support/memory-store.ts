@@ -214,6 +214,19 @@ export class MemoryStore implements Store {
       this.#sessions.set(id, next)
       return cloneRow(next)
     },
+    mergeMetadata: async (id, owner, patch) => {
+      this.#check()
+      const row = this.#session(id, owner)
+      if (row === undefined || row.body === null) return undefined
+      const metadata: Record<string, string> = { ...row.body.metadata }
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null) delete metadata[key]
+        else metadata[key] = value
+      }
+      const next: SessionIndexRow = { ...cloneRow(row), body: { ...row.body, metadata }, updatedAt: new Date() }
+      this.#sessions.set(id, next)
+      return cloneRow(next)
+    },
     get: async (id, owner) => {
       this.#check()
       const row = this.#session(id, owner)
@@ -233,6 +246,7 @@ export class MemoryStore implements Store {
         .filter(row => q.status === undefined || row.status === q.status)
         .filter(row => q.from === undefined || row.createdAt.getTime() >= q.from.getTime())
         .filter(row => q.to === undefined || row.createdAt.getTime() < q.to.getTime())
+        .filter(row => Object.entries(q.metadata ?? {}).every(([key, value]) => row.body?.metadata[key] === value))
         .filter(row => after === undefined || newestFirst(row, { ...row, createdAt: after.createdAt, id: after.id }) > 0)
         .sort(newestFirst)
       const data = rows.slice(0, q.limit).map(cloneRow)

@@ -389,6 +389,52 @@ describe('clearing the reasoning effort', () => {
   })
 })
 
+describe('session metadata merge and filter', () => {
+  const meta = async (f: Fixture, id: string) => ((await (await fetch(`${f.root}/agents/sessions/${id}`)).json()) as { metadata: Record<string, string> }).metadata
+
+  it('metadata_merge sets and deletes single keys and keeps the others', async () => {
+    const f = await fixture()
+    const id = await session(f, { model: 'deepseek-chat' })
+    await post(`${f.root}/agents/sessions/${id}`, { metadata: { title: 'A', starred: 'true' } })
+    const response = await post(`${f.root}/agents/sessions/${id}`, { metadata_merge: { starred: null, color: 'red' } })
+    expect(response.status).toBe(200)
+    expect(((await response.json()) as { metadata: unknown }).metadata).toEqual({ title: 'A', color: 'red' })
+    expect(await meta(f, id)).toEqual({ title: 'A', color: 'red' })
+    expect((await f.store.sessions.get(id, 'any'))?.body?.metadata).toEqual({ title: 'A', color: 'red' })
+  })
+
+  it('concurrent merges of different keys both survive, and plain metadata still replaces', async () => {
+    const f = await fixture()
+    const id = await session(f)
+    await Promise.all([
+      post(`${f.root}/agents/sessions/${id}`, { metadata_merge: { a: '1' } }),
+      post(`${f.root}/agents/sessions/${id}`, { metadata_merge: { b: '2' } }),
+    ])
+    expect(await meta(f, id)).toEqual({ a: '1', b: '2' })
+    await post(`${f.root}/agents/sessions/${id}`, { metadata: { c: '3' } })
+    expect(await meta(f, id)).toEqual({ c: '3' })
+  })
+
+  it('rejects a metadata_merge value that is not a string or null', async () => {
+    const f = await fixture()
+    const id = await session(f)
+    expect((await post(`${f.root}/agents/sessions/${id}`, { metadata_merge: { a: 1 } })).status).toBe(400)
+  })
+
+  it('lists sessions filtered by metadata[key]=value across pages', async () => {
+    const f = await fixture()
+    const ids: string[] = []
+    for (let i = 0; i < 4; i++) ids.push(await session(f))
+    await post(`${f.root}/agents/sessions/${ids[0]}`, { metadata_merge: { starred: 'true' } })
+    await post(`${f.root}/agents/sessions/${ids[3]}`, { metadata_merge: { starred: 'true', x: 'y' } })
+    const list = async (query: string) => ((await (await fetch(`${f.root}/agents/sessions?${query}`)).json()) as { data: Array<{ id: string }>; has_more: boolean })
+    expect((await list('metadata[starred]=true')).data.map(row => row.id).sort()).toEqual([ids[0]!, ids[3]!].sort())
+    expect((await list('metadata[starred]=true&metadata[x]=y')).data.map(row => row.id)).toEqual([ids[3]])
+    expect((await list('metadata[starred]=true&limit=1')).has_more).toBe(true)
+    expect((await list('metadata[starred]=false')).data).toEqual([])
+  })
+})
+
 describe('session creation effort', () => {
   it('passes the wire reasoning effort to DSH', async () => {
     const f = await fixture()

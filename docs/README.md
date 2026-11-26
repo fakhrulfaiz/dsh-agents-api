@@ -12,6 +12,7 @@ Package-local reference and change notes for `@agentry/api`.
 
 | Note | Summary |
 | --- | --- |
+| [2026-11-26-session-metadata-merge.md](changes/2026-11-26-session-metadata-merge.md) | `metadata_merge` on session update (atomic, `null` deletes a key) and `metadata[key]=value` list filter |
 | [2026-11-23-agentry-general-agent.md](changes/2026-11-23-agentry-general-agent.md) | Agentry identity preset, per-agent skills and installs, command allow-list, Composio grants and connect requests |
 | [2026-11-10-redact-mcp-secrets.md](changes/2026-11-10-redact-mcp-secrets.md) | MCP `headers` and `env` values returned masked as `***` by every session and saved-agent response and SSE event; storage and recovery keep real values |
 | [2026-11-10-attachments.md](changes/2026-11-10-attachments.md) | Chat file attachments: `/agents/files` upload, content, and delete; `input_image` / `input_file` parts; workspace `uploads/` copy; item parts; TTL sweeper; `FileStore` seam |

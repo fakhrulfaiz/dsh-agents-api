@@ -1951,6 +1951,16 @@ paths:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/After"
         - $ref: "#/components/parameters/Order"
+        - name: metadata
+          in: query
+          required: false
+          style: deepObject
+          explode: true
+          schema:
+            type: object
+            additionalProperties:
+              type: string
+          description: "Agentry extension. `metadata[key]=value` keeps only sessions whose metadata has that key with that exact value; several keys must all match. Applies before paging, so every page is complete."
       responses:
         "200":
           description: OK
@@ -4309,6 +4319,14 @@ components:
               additionalProperties:
                 type: string
             - type: "null"
+          description: Replaces the whole metadata map (OpenAI-compatible). Concurrent writers can drop each other's keys; use `metadata_merge` to change single keys.
+        metadata_merge:
+          type: object
+          additionalProperties:
+            oneOf:
+              - type: string
+              - type: "null"
+          description: "Agentry extension. Sets the given keys and leaves the others; a `null` value deletes the key. The merge is atomic in the store, so concurrent merges of different keys both survive. Applied after `metadata` when both are sent."
     Turn:
       type: object
       properties:

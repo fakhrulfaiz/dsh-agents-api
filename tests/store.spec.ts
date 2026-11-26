@@ -302,6 +302,34 @@ describe.each(harnesses)('Store contract (%s)', (_name, harness) => {
     expect((await store.sessions.update('sess_b', A, { status: 'failed' }))?.body).toEqual(body)
   })
 
+  it('sessions.mergeMetadata merges and deletes keys atomically, and sessions.list filters by metadata', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    await store.ensureOwner(B)
+    const body = (metadata: Record<string, string>): SessionConfig => ({
+      agent: materializeAgent({ model: 'deepseek-chat' }),
+      environment: { type: 'none' },
+      metadata,
+      vault_ids: [],
+    })
+    await store.sessions.insert(sessionRow('sess_m1', A, { body: body({ title: 'T' }), createdAt: new Date(1000) }))
+    await store.sessions.insert(sessionRow('sess_m2', A, { body: body({}), createdAt: new Date(2000) }))
+    await store.sessions.insert(sessionRow('sess_m3', B, { body: body({ starred: 'true' }), createdAt: new Date(3000) }))
+    await store.sessions.insert(sessionRow('sess_nobody', A, { createdAt: new Date(4000) }))
+    await Promise.all([
+      store.sessions.mergeMetadata('sess_m1', A, { starred: 'true' }),
+      store.sessions.mergeMetadata('sess_m1', A, { color: 'red' }),
+    ])
+    expect((await store.sessions.get('sess_m1', A))?.body?.metadata).toEqual({ title: 'T', starred: 'true', color: 'red' })
+    expect((await store.sessions.mergeMetadata('sess_m1', A, { color: null }))?.body?.metadata).toEqual({ title: 'T', starred: 'true' })
+    expect(await store.sessions.mergeMetadata('sess_m1', B, { x: 'y' })).toBeUndefined()
+    expect(await store.sessions.mergeMetadata('sess_nobody', A, { x: 'y' })).toBeUndefined()
+    const ids = async (metadata: Record<string, string>) => (await store.sessions.list({ owner: A, metadata, limit: 10 })).data.map(row => row.id)
+    expect(await ids({ starred: 'true' })).toEqual(['sess_m1'])
+    expect(await ids({ starred: 'true', title: 'T' })).toEqual(['sess_m1'])
+    expect(await ids({ starred: 'false' })).toEqual([])
+  })
+
   it('sessions.list filters by owner, agent, status, and time, newest first, in disjoint cursor pages', async () => {
     const store = await harness.fresh()
     await store.ensureOwner(A)

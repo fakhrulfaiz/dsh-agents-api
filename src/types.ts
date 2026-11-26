@@ -375,7 +375,8 @@ export interface CreateSessionParams {
  * Body for `POST /v1/agents/sessions/{session_id}`.
  *
  * Only `model`, `reasoning.effort`, `service_tier`, and `metadata` may change.
- * `agent` and `reasoning` merge supplied fields; `metadata` replaces the map.
+ * `agent` and `reasoning` merge supplied fields; `metadata` replaces the map;
+ * `metadata_merge` (Agentry) merges keys into it.
  */
 export interface UpdateSessionParams {
   agent?: {
@@ -384,6 +385,11 @@ export interface UpdateSessionParams {
     service_tier?: ServiceTier | null
   }
   metadata?: Record<string, string> | null
+  /**
+   * Agentry extension: change single metadata keys without replacing the map.
+   * A `null` value deletes the key. Applied after `metadata` when both are sent.
+   */
+  metadata_merge?: Record<string, string | null>
 }
 
 /** One cycle of work inside a session. */

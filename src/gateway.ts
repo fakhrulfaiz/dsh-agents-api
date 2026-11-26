@@ -29,6 +29,7 @@ import {
   json,
   listQuery,
   matchRoute,
+  metadataFilter,
   normalizePath,
   notFound,
   paginate,
@@ -883,9 +884,11 @@ export class AgentsGateway {
   private async listSessions(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
     const query = listQuery(url)
     const after = query.after === undefined ? undefined : await this.store.sessions.get(query.after, owner)
+    const metadata = metadataFilter(url)
     const page = await this.store.sessions.list({
       owner,
       limit: query.limit,
+      ...(metadata === undefined ? {} : { metadata }),
       ...(after === undefined ? {} : { cursor: encodeSessionCursor(after.createdAt, after.id) }),
     })
     json(res, 200, {
@@ -949,6 +952,12 @@ export class AgentsGateway {
     if (next === undefined) {
       throw new AgentsApiRequestError('Field "agent.model" cannot be null or empty', 400, 'bad_request')
     }
+    const merge = body.metadata_merge
+    if (merge !== undefined && (merge === null || typeof merge !== 'object' || Object.values(merge).some(value => value !== null && typeof value !== 'string'))) {
+      throw new AgentsApiRequestError('Field "metadata_merge" must map keys to strings or null', 400, 'bad_request')
+    }
+    // A merge-only update skips the whole-row write below, which would overwrite a concurrent merge with this request's stale copy.
+    if (body.agent === undefined && body.metadata === undefined && merge !== undefined) return this.mergeSessionMetadata(row, owner, merge)
     if (next.agent.model !== current.agent.model || next.agent.reasoning?.effort !== current.agent.reasoning?.effort) {
       await this.applyLiveModel(row, next.agent, current.agent.model)
     }
@@ -958,7 +967,21 @@ export class AgentsGateway {
       body: next,
     })
     if (!updated) return undefined
-    return this.sessionRegistry.applyConfig(row.id, next) ?? sessionFromRow(updated)
+    const settled = this.sessionRegistry.applyConfig(row.id, next) ?? sessionFromRow(updated)
+    return merge === undefined ? settled : this.mergeSessionMetadata(row, owner, merge)
+  }
+
+  /**
+   * Merge metadata keys into a session (`null` deletes a key) and refresh the live projection.
+   * @param row - the session's index row.
+   * @param owner - calling principal.
+   * @param merge - keys to set or delete.
+   * @returns the updated resource, or `undefined` when the row disappeared or has no stored setup.
+   */
+  private async mergeSessionMetadata(row: SessionIndexRow, owner: OwnerId, merge: Record<string, string | null>): Promise<OAIAgentSession | undefined> {
+    const updated = await this.store.sessions.mergeMetadata(row.id, owner, merge)
+    if (updated?.body == null) return undefined
+    return this.sessionRegistry.applyConfig(row.id, updated.body) ?? sessionFromRow(updated)
   }
 
   /**
