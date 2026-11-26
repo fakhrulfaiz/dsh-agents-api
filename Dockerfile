@@ -50,8 +50,7 @@ RUN mkdir -p /opt/agentry-plugin && cd /opt/agentry-plugin \
 COPY --from=build --chown=node:node /opt/office-runtime /opt/office-runtime
 COPY --chown=node:node docker/profile /opt/agentry/profile
 COPY --chown=node:node docker/entrypoint.sh /opt/agentry/entrypoint.sh
-# /workspace: an empty folder DSH's working-directory check finds on this host for sandbox sessions (the real workspace disk is mounted at /workspace inside each sandbox, so the host folder stays empty).
-RUN mkdir -p /data /workspace && chown node:node /data /workspace
+RUN mkdir -p /data && chown node:node /data
 USER node
 ENV HOME=/home/node DSH_HOME=/data/dsh AGENTRY_WORKSPACES=/data/workspaces AGENTRY_UPLOADS_DIR=/data/uploads \
     AGENTRY_OFFICE_RUNTIME=/opt/office-runtime/primary-runtime \

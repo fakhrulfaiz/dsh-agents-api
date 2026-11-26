@@ -53,6 +53,17 @@ describe('TerminalHub', () => {
     hub.stop()
   })
 
+  it('fails the open (instead of hanging) when the process stream ends before the shell starts', async () => {
+    const hub = new TerminalHub()
+    // eslint-disable-next-line require-yield
+    async function* empty() { return }
+    const envd = { userHeaders: () => ({}), process: { start: () => empty() } } as never
+    const opened = hub.open('o', 'env_1', envd, {})
+    const outcome = await Promise.race([opened.then(() => 'opened', (e: unknown) => e), new Promise((r) => setTimeout(() => r('hung'), 200))])
+    expect(outcome).toMatchObject({ status: 502, code: 'terminal_unavailable' })
+    hub.stop()
+  })
+
   it('scopes terminals to their owner and environment, caps them, and closes by environment', async () => {
     const hub = new TerminalHub()
     const id = await hub.open('o', 'env_1', fakeEnvd().envd, {})

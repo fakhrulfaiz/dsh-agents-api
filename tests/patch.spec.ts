@@ -24,6 +24,11 @@ describe('dsh-agents-api bundle', () => {
     expect(patch).toContain('!!js process.env.AGENTRY_DEV_KEY')
     expect(patch).toContain('url: !!js process.env.AGENTRY_DATABASE_URL')
     expect(patch).toMatch(/- id: skill-office\n\s+name: '@deepseek-ai\/dsh-skill-office'/u)
+    // The base working-directory row is replaced by ours, which checks a sandbox session's folder in its sandbox.
+    expect(patch).toMatch(/^- id: working-directory\n\s+disabled: true$/mu)
+    expect(patch).toMatch(/- id: agentry-working-directory\n\s+name: '@agentry\/api\/working-directory'/u)
+    const exports = (JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')) as { exports: Record<string, unknown> }).exports
+    expect(exports['./working-directory']).toEqual({ default: './lib/working-directory.js' })
   })
 
   it.skipIf(process.env['DSH_ROOT'] === undefined)('inherits the command registry and the /compact, /goal, /feedback definitions from the pinned bundles', () => {
