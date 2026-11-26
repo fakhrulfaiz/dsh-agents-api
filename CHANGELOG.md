@@ -5,6 +5,7 @@ Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
 ## Unreleased
 
+- 2026-11-26: Template files given as `{type: "file_id"}` now work: provisioning an environment copies the owner's uploaded file (read, not claimed, so it stays reusable) into the workspace at the template path, for the local and sandbox providers. An id that is not the owner's answers 400 instead of every `file_id` template failing.
 - 2026-11-26: `GET /agents/files` lists the caller's uploaded files, newest first (`limit`, `after`, `status=staged|attached`; list envelope with `first_id`, `last_id`, `has_more`). Another owner's files never appear.
 - 2026-11-26: Session metadata merge and filter. `POST /agents/sessions/{id}` accepts `metadata_merge` (keys to set; a `null` value deletes the key), applied atomically in the store (one SQL statement), so concurrent writers of different keys no longer drop each other's keys; plain `metadata` still replaces the map. `GET /agents/sessions?metadata[key]=value` (several keys must all match) filters in the store query before paging. See [`docs/changes/2026-11-26-session-metadata-merge.md`](docs/changes/2026-11-26-session-metadata-merge.md).
 - 2026-11-26: `reasoning: { effort: null }` on `POST /agents/sessions/{id}` and on a follow-up message clears the stored reasoning effort back to the agent's default (the live agent is re-pointed at its model with no effort).

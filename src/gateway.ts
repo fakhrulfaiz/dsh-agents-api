@@ -71,6 +71,7 @@ import { withFileIds } from './files/item-parts.ts'
 import { openAttached, type AttachmentsPort } from './files/attached.ts'
 import { AttachmentIngest, type AttachedFiles } from './files/ingest.ts'
 import { FilesApi, uploadedFileSource, type FilesRuntime } from './files/api.ts'
+import type { FileSource, ServedFile } from './files/content.ts'
 import { SkillsApi, type SkillTarget } from './skills.ts'
 import { SessionRegistry } from './session-registry.ts'
 import { WireProjector, type ProjectionBase } from './history/projector.ts'
@@ -89,7 +90,7 @@ import { absoluteFilePath, parseFileListQuery, parseFileWrite, selectFilePage, t
 import { normalizeTemplateConfig, parseTemplateInput, toSdkTemplate, unsupportedFields } from './environment/template-compat.ts'
 import type { SandboxProvider } from './sandbox/contract.ts'
 import type { SandboxRegistry } from './sandbox/registry.ts'
-import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, EnvironmentTemplateConfig, OAISandboxEnvironment } from './environment-types.ts'
+import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, EnvironmentTemplateConfig, OAISandboxEnvironment, TemplateFileInput } from './environment-types.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SubagentState } from './session-registry.ts'
 import {
@@ -228,6 +229,8 @@ export class AgentsGateway {
   private readonly commandsAllow: ReadonlySet<string> | undefined
   private readonly commandsApi: CommandsApi
   private readonly ingest: AttachmentIngest
+  /** Where uploaded bytes are read from (also used to copy template `file_id` files). */
+  private fileSources: FileSource[] = []
   private readonly commands: () => CommandService | undefined
   /** Sessions with a command executing, so a second one is refused instead of interleaving. */
   private readonly commandsRunning = new Set<string>()
@@ -305,14 +308,16 @@ export class AgentsGateway {
       attachments,
       warn: message => this.ctx.logger.warn(message),
     })
+    const uploaded = uploadedFileSource({
+      store: () => this.store,
+      staging: options.files?.staging,
+      attached: row => openAttached(row, attachments()),
+    })
+    this.fileSources = [uploaded]
     const filesApi = new FilesApi({
       store: () => this.store,
       runtime: options.files,
-      sources: [uploadedFileSource({
-        store: () => this.store,
-        staging: options.files?.staging,
-        attached: row => openAttached(row, attachments()),
-      })],
+      sources: [uploaded],
       warn: message => this.ctx.logger.warn(message),
     })
     this.routes = [
@@ -1745,7 +1750,7 @@ export class AgentsGateway {
     const id = `env_${randomUUID().replaceAll('-', '')}`
     let created: Awaited<ReturnType<SandboxProvider['create']>>
     try {
-      created = await provider.create(owner, id, { session_id: sessionId, template: config })
+      created = await provider.create(owner, id, { session_id: sessionId, template: await this.inlineFileRefs(owner, config) })
     } catch (error: unknown) {
       throw bad(errorMessage(error), 'bad_request')
     }
@@ -1985,6 +1990,35 @@ export class AgentsGateway {
    * provider, else the template's, else the default. `inline` is template config used when no template is named.
    * @returns the environment's wire form. Throws AgentsApiRequestError (400) for a bad request.
    */
+  /**
+   * Replace a template's `file_id` files by inline copies of the owner's uploaded bytes, so every provider
+   * receives only inline files. The upload stays reusable (it is read, not claimed).
+   * @param owner - environment owner.
+   * @param config - template config.
+   * @returns the config with inline files only.
+   * @throws AgentsApiRequestError 400 `file_not_found` when an id is not one of the owner's files.
+   */
+  private async inlineFileRefs<T extends EnvironmentTemplateConfig>(owner: OwnerId, config: T): Promise<T> {
+    if (!config.files?.some(file => file.type === 'file_id')) return config
+    const files: TemplateFileInput[] = []
+    for (const file of config.files) {
+      if (file.type !== 'file_id') {
+        files.push(file)
+        continue
+      }
+      let served: ServedFile | undefined
+      for (const source of this.fileSources) {
+        served = await source.open(owner, file.file_id)
+        if (served !== undefined) break
+      }
+      if (served === undefined) throw new AgentsApiRequestError(`file "${file.path}": file not found: ${file.file_id}`, 400, 'file_not_found')
+      const chunks: Buffer[] = []
+      for await (const chunk of served.body()) chunks.push(Buffer.from(chunk))
+      files.push({ type: 'inline', path: file.path, data: Buffer.concat(chunks).toString('base64') })
+    }
+    return { ...config, files }
+  }
+
   async provisionEnvironment(owner: OwnerId, raw: Record<string, unknown>, inline?: EnvironmentTemplateConfig): Promise<SdkEnvironment> {
     const fail = (message: string, code = 'bad_request'): never => { throw new AgentsApiRequestError(message, 400, code) }
     const body = raw as { template_id?: string; session_id?: string; image?: string; provider?: string; name?: unknown; place?: unknown }
@@ -2022,7 +2056,7 @@ export class AgentsGateway {
     const id = `env_${randomUUID().replaceAll('-', '')}`
     let created!: Awaited<ReturnType<SandboxProvider['create']>>
     try {
-      created = await provider.create(owner, id, input)
+      created = await provider.create(owner, id, input.template === undefined ? input : { ...input, template: await this.inlineFileRefs(owner, input.template) })
     } catch (error: unknown) {
       fail(errorMessage(error))
     }

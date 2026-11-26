@@ -216,3 +216,23 @@ describe('GET /agents/files', () => {
     expect((await h.request('carol', 'GET', '/agents/files')).body).toMatchObject({ data: [], first_id: null, has_more: false })
   })
 })
+
+describe('template files by file_id', () => {
+  it('copies an uploaded file into the new environment workspace and reports an unknown id as 400', async () => {
+    const h = await start()
+    const upload = await h.upload('alice', 'notes.txt', 'hello template', 'text/plain')
+    const template = await h.request('alice', 'POST', '/agents/environments/templates', { name: 'with file', files: [{ type: 'file_id', path: '/workspace/docs/notes.txt', file_id: upload.body['id'] }] })
+    expect(template.status).toBe(201)
+    const env = await h.request('alice', 'POST', '/agents/environments', { template_id: template.body!['id'] })
+    expect(env.status).toBe(201)
+    const created = await readdir(h.workspaces, { recursive: true })
+    const file = created.find(entry => entry.endsWith('notes.txt'))
+    expect(file).toBeDefined()
+    expect(await readFile(join(h.workspaces, file!), 'utf8')).toBe('hello template')
+    const again = await h.request('alice', 'POST', '/agents/environments', { template_id: template.body!['id'] })
+    expect(again.status).toBe(201)
+    const other = await h.request('bob', 'POST', '/agents/environments/templates', { name: 'stolen', files: [{ type: 'file_id', path: '/workspace/x', file_id: upload.body['id'] }] })
+    const denied = await h.request('bob', 'POST', '/agents/environments', { template_id: other.body!['id'] })
+    expect(denied.status).toBe(400)
+  })
+})
