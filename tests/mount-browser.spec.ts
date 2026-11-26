@@ -5,6 +5,7 @@ import {
   BROWSER_GUIDANCE,
   BROWSER_LOCAL_NOTICE,
   BROWSER_MISSING_NOTICE,
+  browserCdpPort,
   browserEnabled,
   browserMcpTool,
   mountBrowserGuidance,
@@ -14,7 +15,7 @@ import { bridgeConfigFromEnv } from '../src/sandbox/remote/stdio-bridge.ts'
 import { validateMcpTool } from '../src/mount-mcp-tools.ts'
 import type { OAIMcpStdioTransport } from '../src/types.ts'
 
-const sandbox = { owner: 'alice', sandboxId: 'sbx_1', workspace: '/workspace' }
+const sandbox = { owner: 'alice', sandboxId: 'sbx_1', workspace: '/workspace', sessionId: 'sess_1' }
 const credentials = { url: 'http://sandbox:3090', key: 'sk-secret' }
 
 describe('browserMcpTool', () => {
@@ -27,11 +28,26 @@ describe('browserMcpTool', () => {
     expect(transport.args).toEqual(['/opt/api/lib/sandbox-stdio-bridge.js'])
     // The bridge reads what the MCP client hands it; the program runs in the sandbox's workspace.
     const config = bridgeConfigFromEnv(transport.env ?? {})
+    const port = browserCdpPort('sess_1')
     expect(config).toEqual({
       url: 'http://sandbox:3090', key: 'sk-secret', owner: 'alice', sandboxId: 'sbx_1', cwd: '/workspace', user: 'agent',
-      cmd: 'playwright-mcp', args: ['--browser', 'chromium', '--isolated', '--headless', '--output-dir', '/workspace/.browser'],
-      env: { PLAYWRIGHT_BROWSERS_PATH: '/opt/ms-playwright' },
+      cmd: '/bin/sh',
+      args: ['-c', expect.stringContaining('exec playwright-mcp --config "$AGENTRY_MCP_CONFIG_PATH" "$@"'), 'sh', '--browser', 'chromium', '--isolated', '--headless', '--output-dir', '/workspace/.browser'],
+      env: {
+        PLAYWRIGHT_BROWSERS_PATH: '/opt/ms-playwright',
+        AGENTRY_MCP_CONFIG_PATH: `/tmp/agentry-browser-${String(port)}.json`,
+        AGENTRY_MCP_CONFIG: JSON.stringify({ browser: { launchOptions: { args: [`--remote-debugging-port=${String(port)}`] } } }),
+      },
     })
+  })
+
+  it('opens a DevTools port on the sandbox loopback, one per session, for the live view', () => {
+    expect(browserCdpPort('sess_1')).toBe(browserCdpPort('sess_1'))
+    expect(browserCdpPort('sess_1')).not.toBe(browserCdpPort('sess_2'))
+    for (const id of ['a', 'b', 'sess_x', 'sess_0123456789']) {
+      expect(browserCdpPort(id)).toBeGreaterThanOrEqual(20_000)
+      expect(browserCdpPort(id)).toBeLessThan(40_000)
+    }
   })
 
   it('keeps the service key out of the command line', () => {

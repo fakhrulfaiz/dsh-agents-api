@@ -11,6 +11,7 @@
  * The tool is built at mount time (create and resume) and never stored in the
  * session's saved config; the service key travels in the bridge's environment.
  */
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -53,7 +54,20 @@ export interface BrowserSandbox {
   sandboxId: string
   /** The sandbox's workspace path (inside the sandbox). */
   workspace: string
+  /** The chat's session id (picks the browser's DevTools port). */
+  sessionId: string
 }
+
+/**
+ * The DevTools port of a session's browser on the sandbox's loopback (20000-39999), derived from the session
+ * id so the live view (`browser-live.ts`) finds it and two chats on one sandbox do not collide.
+ */
+export function browserCdpPort(sessionId: string): number {
+  return 20_000 + (createHash('sha256').update(sessionId).digest().readUInt32BE(0) % 20_000)
+}
+
+/** Writes the Playwright MCP config (launch arguments) to a file, then starts playwright-mcp with it. */
+const START_WITH_CONFIG = 'printf "%s" "$AGENTRY_MCP_CONFIG" > "$AGENTRY_MCP_CONFIG_PATH" && exec playwright-mcp --config "$AGENTRY_MCP_CONFIG_PATH" "$@"'
 
 /**
  * The in-memory MCP tool that starts the browser inside `sandbox`.
@@ -62,7 +76,10 @@ export interface BrowserSandbox {
  * @param bridgePath - the bridge program (default: beside this module).
  */
 export function browserMcpTool(sandbox: BrowserSandbox, credentials: { url: string; key: string }, bridgePath = DEFAULT_BRIDGE_PATH): OAIMcpTool {
-  const command = ['playwright-mcp', '--browser', 'chromium', '--isolated', '--headless', '--output-dir', `${sandbox.workspace.replace(/\/+$/, '')}/.browser`]
+  // Chromium also listens for DevTools on the sandbox's loopback, so the live view can screencast it.
+  const port = browserCdpPort(sandbox.sessionId)
+  const command = ['/bin/sh', '-c', START_WITH_CONFIG, 'sh', '--browser', 'chromium', '--isolated', '--headless', '--output-dir', `${sandbox.workspace.replace(/\/+$/, '')}/.browser`]
+  const mcpConfig = { browser: { launchOptions: { args: [`--remote-debugging-port=${String(port)}`] } } }
   return {
     type: 'mcp',
     server_label: BROWSER_SERVER_LABEL,
@@ -79,7 +96,11 @@ export function browserMcpTool(sandbox: BrowserSandbox, credentials: { url: stri
         [BRIDGE_ENV.cwd]: sandbox.workspace,
         [BRIDGE_ENV.user]: 'agent',
         [BRIDGE_ENV.command]: JSON.stringify(command),
-        [BRIDGE_ENV.programEnv]: JSON.stringify({ PLAYWRIGHT_BROWSERS_PATH: SANDBOX_BROWSERS_PATH }),
+        [BRIDGE_ENV.programEnv]: JSON.stringify({
+          PLAYWRIGHT_BROWSERS_PATH: SANDBOX_BROWSERS_PATH,
+          AGENTRY_MCP_CONFIG_PATH: `/tmp/agentry-browser-${String(port)}.json`,
+          AGENTRY_MCP_CONFIG: JSON.stringify(mcpConfig),
+        }),
       },
     },
   }

@@ -43,12 +43,13 @@ import { mountAgentInstructions } from './mount-instructions.ts'
 import { AGENTRY_PRESET_ID } from './preset.ts'
 import { copyIntoSandboxUploads, MAX_ARTIFACT_BYTES, providerRows, type AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
 import { sandboxCredentials, sandboxStartErrorIn, type SandboxPresets } from './sandbox/presets.ts'
-import { SandboxApiError } from '@agentry/sandbox/client'
+import { SandboxApiError, type EnvdClient } from '@agentry/sandbox/client'
 import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
 import { sweepStaged, type InstallDeps } from './skills/install.ts'
 import { SkillInstallApi } from './skills/routes.ts'
 import { builtinTemplate, BUILTIN_TEMPLATES, isBuiltinTemplateId } from './environment/builtin-templates.ts'
 import { TerminalError, TerminalHub } from './sandbox/terminals.ts'
+import { BrowserLiveError, BrowserLiveHub, startRelay, type LiveEvent, type RelayProcess } from './sandbox/browser-live.ts'
 import { forgetWorkspaceAlias, workspaceOf } from './sandbox/workspace-alias.ts'
 import { DeliverablesCache } from './history/deliverables-cache.ts'
 import type { DeliverableEntry } from './history/deliverables.ts'
@@ -63,7 +64,7 @@ import { mountComposioAppTools } from './mount-composio-app-tools.ts'
 import { mountScheduleGuidance } from './mount-schedule-guidance.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
-import { BRIDGE_HOST_CWD, browserEnabled, browserMcpTool, mountBrowserGuidance, validateBrowserField, type BrowserSandbox } from './mount-browser.ts'
+import { BRIDGE_HOST_CWD, browserCdpPort, browserEnabled, browserMcpTool, mountBrowserGuidance, validateBrowserField, type BrowserSandbox } from './mount-browser.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
 import { slashCommandItem } from './items.ts'
@@ -176,6 +177,10 @@ export interface GatewayOptions {
   browserDefault?: boolean
   /** The sandbox stdio bridge program (tests); default `lib/sandbox-stdio-bridge.js`. */
   browserBridgePath?: string
+  /** Most frames a second the live browser view sends (`browser.liveFps`, default 4). */
+  browserLiveFps?: number
+  /** Starts the live-view relay in a sandbox (tests); default `startRelay`. */
+  startBrowserRelay?: (envd: EnvdClient, port: number, intervalMs: number) => RelayProcess
   /** GitHub endpoints for skill imports (tests point it at a fake). */
   skillsGithub?: GithubDeps
   /** Host skill discovery sources hidden from the catalog (developer folders). */
@@ -291,6 +296,8 @@ export class AgentsGateway {
   private readonly skillInstallApi: SkillInstallApi
   /** Deliverables per session, reused until the session changes. */
   private readonly terminals = new TerminalHub()
+  private readonly browserLive: BrowserLiveHub
+  private readonly startBrowserRelay: (envd: EnvdClient, port: number, intervalMs: number) => RelayProcess
   private readonly deliverablesCache = new DeliverablesCache<DeliverableEntry>(500)
   private readonly skillsGithub: GithubDeps | undefined
   private readonly composio: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
@@ -350,6 +357,8 @@ export class AgentsGateway {
     this.composio = options.composio ?? { serverLabel: 'composio', approvalVerbs: DEFAULT_APPROVAL_VERBS, approvalSlugs: [] }
     this.browserDefault = options.browserDefault ?? false
     this.browserBridgePath = options.browserBridgePath
+    this.browserLive = new BrowserLiveHub({ minIntervalMs: Math.round(1000 / Math.min(10, Math.max(1, options.browserLiveFps ?? 4))) })
+    this.startBrowserRelay = options.startBrowserRelay ?? startRelay
     this.skillInstallApi = new SkillInstallApi(this.installDeps(), options.skillsGithub)
     const skillsApi = new SkillsApi({
       skills: options.skills,
@@ -450,6 +459,7 @@ export class AgentsGateway {
       { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts/*path', handler: (_req, res, url, params, p) => this.getArtifact(res, params, p.owner, url.searchParams.get('download') === '1') },
       { method: 'GET', pattern: '/agents/sessions/:session_id/renders/pdf/*path', handler: (req, res, _url, params, p) => renderOfficePdf(this.officeRender, req, res, p.owner, routeParam(params, 'session_id'), params['path'] ?? '') },
       { method: 'GET', pattern: '/agents/sessions/:session_id/deliverables', handler: (_req, res, _url, params, p) => this.listDeliverables(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/browser/live', handler: (req, res, _url, params, p) => this.streamBrowserLive(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts', handler: (_req, res, _url, params, p) => this.listArtifacts(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id/items', handler: (_req, res, _url, params, p) => this.listSubagentTurnItems(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id', handler: (_req, res, _url, params, p) => this.getSubagentTurn(res, params, p.owner) },
@@ -945,7 +955,7 @@ export class AgentsGateway {
         sessionId,
         meta: { cwd },
         agentOptions,
-        setup: this.buildAgentSetup(resolved, pending, cwd, owner, environment),
+        setup: this.buildAgentSetup(sessionId, resolved, pending, cwd, owner, environment),
       })
       this.handles.set(sessionId, handle)
       // Sandbox sessions start in full access: the container is the boundary (the agent has sudo there), and
@@ -1726,7 +1736,7 @@ export class AgentsGateway {
    * held for the agent's lifetime.
    * @returns the sandbox the session runs in, or `undefined` for a local chat.
    */
-  private async mountSessionPreset(agentCtx: Context, owner: OwnerId, environment: OAIEnvironmentConfig | undefined): Promise<BrowserSandbox | undefined> {
+  private async mountSessionPreset(agentCtx: Context, owner: OwnerId, environment: OAIEnvironmentConfig | undefined): Promise<Omit<BrowserSandbox, 'sessionId'> | undefined> {
     const environmentId = environment?.type === 'sandbox' ? environment.environment_id : undefined
     const record = environmentId === undefined ? undefined : await this.store.environments.get(owner, environmentId)
     if (environmentId !== undefined && record === undefined) throw new Error(`environment ${environmentId} no longer exists; this session cannot run`)
@@ -1769,12 +1779,13 @@ export class AgentsGateway {
 
   /**
    * Agent composition shared by create and resume.
+   * @param sessionId - the session being set up.
    * @param resolved - session agent.
    * @param pending - the session's parked function calls.
    * @param cwd - session working directory.
    * @returns the `agents.create` / `agents.resume` setup callback.
    */
-  private buildAgentSetup(resolved: OAIAgent, pending: PendingFunctionCalls, cwd: string, owner: OwnerId, environment?: OAIEnvironmentConfig): AgentSetup {
+  private buildAgentSetup(sessionId: string, resolved: OAIAgent, pending: PendingFunctionCalls, cwd: string, owner: OwnerId, environment?: OAIEnvironmentConfig): AgentSetup {
     const functionTools = resolved.tools.filter(
       (tool): tool is OAIFunctionTool => tool.type === 'function',
     )
@@ -1842,7 +1853,7 @@ export class AgentsGateway {
       mountScheduleGuidance(agentCtx)
       mountFunctionTools(agentCtx, functionTools, pending)
       await mountMcpTools(agentCtx, mcpToolsFrom(resolved.tools), cwd)
-      await this.mountBrowser(agentCtx, resolved, sandbox)
+      await this.mountBrowser(agentCtx, resolved, sandbox === undefined ? undefined : { ...sandbox, sessionId })
       mountComposio(agentCtx, {
         grants: effectiveGrants(resolved),
         approvalVerbs: new Set(this.composio.approvalVerbs),
@@ -1873,7 +1884,7 @@ export class AgentsGateway {
       const handle = await this.ctx.agents.resume({
         resumeSessionId: SessionId(row.id),
         agentOptions: await this.agentOptionsFor(config.agent),
-        setup: this.buildAgentSetup(config.agent, pending, cwd, row.ownerId, config.environment),
+        setup: this.buildAgentSetup(row.id, config.agent, pending, cwd, row.ownerId, config.environment),
       })
       if (await this.store.sessions.get(row.id, 'any') === undefined) {
         // Deleted while the resume was in flight: undo it.
@@ -2451,7 +2462,10 @@ export class AgentsGateway {
       json(res, status, { error: { type: 'invalid_request_error', code: e instanceof SandboxApiError ? e.code : 'sandbox_error', message: errorMessage(e) } })
       return
     }
-    if (action !== 'start') this.terminals.closeEnvironment(record.id)
+    if (action !== 'start') {
+      this.terminals.closeEnvironment(record.id)
+      this.browserLive.closeEnvironment(record.id)
+    }
     if (action === 'reset') forgetWorkspaceAlias(sandboxId)
     await this.getEnvironment(res, params, owner)
   }
@@ -2523,6 +2537,53 @@ export class AgentsGateway {
     })
   }
 
+  /**
+   * `GET /agents/sessions/{id}/browser/live`: the chat's browser as SSE `frame` events (base64 JPEG, url,
+   * title) and `idle` events with a `reason` while there is nothing to show. Read-only; the relay runs in the
+   * sandbox, so no sandbox address or key reaches the client.
+   */
+  private async streamBrowserLive(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const sessionId = routeParam(params, 'session_id')
+    const row = await this.requireSession(res, owner, sessionId)
+    if (!row) return
+    const sandbox = await this.sandboxOfSession(owner, sessionId)
+    const sandboxId = sandbox?.record.provider_metadata['sandbox_id']
+    const send = (event: LiveEvent): void => {
+      if (res.writableEnded || res.destroyed) return
+      if (event.kind === 'frame') writeEvent(res, 'frame', { data: event.data, url: event.url, title: event.title, width: event.width ?? null, height: event.height ?? null, timestamp: event.ts })
+      else if (event.kind === 'idle') writeEvent(res, 'idle', { reason: event.reason })
+      else res.end()
+    }
+    let detach: (() => void) | undefined
+    if (sandbox !== undefined && sandboxId !== undefined && browserEnabled(configOf(row).agent, this.browserDefault)) {
+      const envd = sandbox.provider.api(owner).envd(sandboxId)
+      const port = browserCdpPort(sessionId)
+      try {
+        writeSSEHeaders(res)
+        detach = this.browserLive.attach(
+          { owner, sessionId, environmentId: sandbox.record.id },
+          () => this.startBrowserRelay(envd, port, this.browserLive.intervalMs),
+          send,
+        )
+      } catch (error) {
+        if (error instanceof BrowserLiveError) {
+          writeEvent(res, 'error', { code: error.code, message: error.message })
+          res.end()
+          return
+        }
+        throw error
+      }
+    } else {
+      writeSSEHeaders(res)
+      send({ kind: 'idle', reason: sandbox === undefined ? 'not_sandbox' : 'browser_off' })
+    }
+    const ping = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n') }, 20_000)
+    req.on('close', () => {
+      clearInterval(ping)
+      detach?.()
+    })
+  }
+
   private async terminalCall(req: IncomingMessage | undefined, res: ServerResponse, params: Record<string, string>, owner: OwnerId, action: 'input' | 'resize' | 'close'): Promise<void> {
     const environmentId = routeParam(params, 'environment_id')
     if (!await this.store.environments.get(owner, environmentId)) {
@@ -2579,6 +2640,7 @@ export class AgentsGateway {
    */
   private async destroyEnvironment(record: EnvironmentRecord): Promise<void> {
     this.terminals.closeEnvironment(record.id)
+    this.browserLive.closeEnvironment(record.id)
     forgetWorkspaceAlias(record.provider_metadata['sandbox_id'] ?? '')
     const provider = this.sandboxes.get(record.provider)
     if (provider === undefined) {

@@ -199,6 +199,8 @@ export interface Config extends RuntimeConfigInput {
   browser?: {
     /** Whether agents whose `browser` field is absent or null get it (default false). */
     default?: boolean
+    /** Most frames a second the live browser view (`/agents/sessions/{id}/browser/live`) sends, 1 to 10 (default 4). */
+    liveFps?: number
   }
   /** Slash-command catalog served by `GET /agents/commands`. */
   commands?: {
@@ -228,7 +230,7 @@ export interface Config extends RuntimeConfigInput {
 /** `Config` after validation: `auth`, `prefix`, `database`, and `workspaces` are always present; `codebox` and `dataDir` never are. */
 export type ResolvedConfig = Omit<Config, 'auth' | 'prefix' | 'database' | 'codebox' | 'dataDir' | 'skills' | 'commands' | 'uploads' | 'composio' | 'browser'> & {
   auth: ResolvedAuthConfig
-  browser: { default: boolean }
+  browser: { default: boolean; liveFps: number }
   skills: { cacheTtlSeconds: number; dir: string; builtinDir: string; workspaceSkills: boolean }
   commands: { cacheTtlSeconds: number; allow: string[] }
   composio: { serverLabel: string; approvalVerbs: string[]; approvalSlugs: string[] }
@@ -288,7 +290,8 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
   }).default({ cacheTtlSeconds: 60, allow: [...DEFAULT_COMMANDS_ALLOW] }),
   browser: z.object({
     default: z.boolean().default(false),
-  }).default({ default: false }),
+    liveFps: z.number().default(4),
+  }).default({ default: false, liveFps: 4 }),
   composio: z.object({
     serverLabel: z.string().default('composio'),
     approvalVerbs: z.array(z.string()).default([...DEFAULT_APPROVAL_VERBS]),
@@ -482,6 +485,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     skillsRoot: config.skills.dir,
     composio: config.composio,
     browserDefault: config.browser.default,
+    browserLiveFps: config.browser.liveFps,
     skillsHiddenSources: DEVELOPER_SKILL_SOURCES.filter(source => !(config.skills.workspaceSkills && source.startsWith('project-'))),
     ...(runtime.artifacts === undefined ? {} : { artifacts: runtime.artifacts }),
     ...(staging === undefined ? {} : { files: { staging, limits: config.uploads } }),

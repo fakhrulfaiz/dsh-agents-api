@@ -2559,6 +2559,34 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/browser/live:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: session_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: streamSessionBrowserLive
+      summary: "Live, read-only view of the chat's browser as server-sent events"
+      description: |
+        Sandbox chats whose agent has the web browser on get a relay inside the sandbox that screencasts
+        the page the agent last opened or navigated (Chrome DevTools on the sandbox's loopback). It starts
+        with the first reader, is shared by every reader of the session, and stops about 10 s after the
+        last one leaves, or when the environment is stopped, reset or deleted (the stream then ends).
+        Frames are capped at `browser.liveFps` a second (default 4). Events:
+        - `frame`: `{ data: base64 JPEG, url, title, width, height, timestamp }` (a new reader first gets the last frame).
+        - `idle`: `{ reason }`, nothing to show: `not_started` (no browser open yet, or the sandbox is not running),
+          `no_browser` (the sandbox image has no browser; use the built-in Web browser template), `browser_off`
+          (the agent's `browser` is off), `not_sandbox` (the chat does not run in a sandbox).
+        - `error`: `{ code: too_many_live_views, message }` when the owner already has 4 live views open; the stream ends.
+      responses:
+        "200":
+          description: An SSE stream.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "404": { description: Session not found. }
   /v1/agents/sessions/{session_id}/artifacts:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
