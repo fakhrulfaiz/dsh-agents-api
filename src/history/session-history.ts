@@ -6,7 +6,7 @@
  * Nothing is cached, so a read always reflects the log.
  */
 
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionQueryError, type SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import { paginate, type ListQuery } from '../http.ts'
 import type { OAIListResponse, OAISubagent, OAITurn } from '../types.ts'
@@ -88,6 +88,11 @@ export interface SessionHistory {
    * @returns the children, oldest first.
    */
   subagents(parentId: string, agentId: string, childId?: string): Promise<LoggedSubagent[]>
+  /**
+   * @param sessionId - session id.
+   * @returns the raw Session log, oldest first; empty when the log is missing.
+   */
+  events(sessionId: string): Promise<readonly SessionEvent[]>
 }
 
 /**
@@ -179,6 +184,9 @@ export function createSessionHistory(sessionQuery: Pick<SessionQueryEngine, 'rea
         })
       }
       return rebuilt
+    },
+    async events(sessionId) {
+      return (await read(sessionId))?.events ?? []
     },
     async workspace(sessionId) {
       const cwd = (await read(sessionId))?.session.cwd

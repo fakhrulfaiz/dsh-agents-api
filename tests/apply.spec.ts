@@ -68,8 +68,8 @@ describe('apply', () => {
     apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60, dir: '/tmp/agentry-skills', builtinDir: '/tmp/builtins', workspaceSkills: false }, commands: { cacheTtlSeconds: 60, allow: ["goal", "plan", "compact", "export"] }, composio: { serverLabel: 'composio', approvalVerbs: ['SEND'], approvalSlugs: [] }, browser: { default: false }, uploads: uploadsOff })
     apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60, dir: '/tmp/agentry-skills', builtinDir: '/tmp/builtins', workspaceSkills: false }, commands: { cacheTtlSeconds: 60, allow: ["goal", "plan", "compact", "export"] }, composio: { serverLabel: 'composio', approvalVerbs: ['SEND'], approvalSlugs: [] }, browser: { default: false }, uploads: uploadsOff })
     expect(register).toHaveBeenCalledTimes(4)
-    // Per apply: four approval-bridge listeners (two answerers, session/event, session/disposed), the three gateway listeners, and the schedule resolver.
-    expect(listeners).toHaveLength(16)
+    // Per apply: four approval-bridge listeners (two answerers, session/event, session/disposed), the four gateway listeners (session/event, tools/pre-execute, commands/change, session/disposed), and the schedule resolver.
+    expect(listeners).toHaveLength(18)
     expect(byName.has('schedule/resolve-agent')).toBe(true)
     byName.get('session/event')!({ id: 'missing', header: {} }, { type: 'turn/start', seq: 1, time: 1, data: {} })
     await Promise.all(effects)

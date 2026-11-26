@@ -2322,6 +2322,186 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/changes:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      summary: List turns that changed workspace files
+      description: "Turns with a recorded summary, newest first. Local chats use the Host's workspace-changes recorder (git snapshots when the workspace is a repository, otherwise file-tool edits); sandbox chats use a shadow git repository inside the sandbox. Summaries are kept in memory only."
+      tags:
+        - Sessions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, data]
+                properties:
+                  object:
+                    type: string
+                    enum: [list]
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [turn_id, total, added, deleted, outside]
+                      properties:
+                        turn_id:
+                          type: string
+                        total:
+                          type: integer
+                        added:
+                          type: integer
+                        deleted:
+                          type: integer
+                        outside:
+                          type: integer
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/turns/{turn_id}/changes:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/TurnId"
+    get:
+      summary: List the files a turn changed
+      tags:
+        - Sessions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, turn_id, available, total, added, deleted, outside, files]
+                properties:
+                  object:
+                    type: string
+                    enum: [agent.session.turn.changes]
+                  turn_id:
+                    type: string
+                  available:
+                    type: boolean
+                    description: "False when nothing was recorded for the turn or the summary is gone (summaries are kept in memory only, so an API restart loses them)."
+                  total:
+                    type: integer
+                    description: "Changed files inside the workspace, including any beyond the 500 listed."
+                  added:
+                    type: integer
+                  deleted:
+                    type: integer
+                  outside:
+                    type: integer
+                    description: "Changed files outside the workspace: counted, never listed or served."
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      required: [index, path, display, added, deleted]
+                      properties:
+                        index:
+                          type: integer
+                          description: "The file's index for the diff route."
+                        path:
+                          type: string
+                        display:
+                          type: string
+                        added:
+                          type: integer
+                        deleted:
+                          type: integer
+                        binary:
+                          type: boolean
+                        oversized:
+                          type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/turns/{turn_id}/changes/{index}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/TurnId"
+      - name: index
+        in: path
+        required: true
+        schema:
+          type: integer
+          minimum: 0
+    get:
+      summary: Compare one changed file before and after a turn
+      description: "404 when the index is not a listed file (files outside the workspace are never served) or the summary or snapshots are gone."
+      tags:
+        - Sessions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, kind, path, display]
+                properties:
+                  object:
+                    type: string
+                    enum: [agent.session.turn.change]
+                  kind:
+                    type: string
+                    enum: [text, binary, oversized]
+                  path:
+                    type: string
+                  display:
+                    type: string
+                  before:
+                    type: boolean
+                    description: "Whether the file existed at turn start (text only)."
+                  after:
+                    type: boolean
+                  coarse:
+                    type: boolean
+                    description: "Every line shown as replaced (the line comparison took too long)."
+                  hunks:
+                    type: array
+                    items:
+                      type: object
+                      required: [old_start, old_lines, new_start, new_lines, lines]
+                      properties:
+                        old_start:
+                          type: integer
+                        old_lines:
+                          type: integer
+                        new_start:
+                          type: integer
+                        new_lines:
+                          type: integer
+                        lines:
+                          type: array
+                          description: "Each line keeps its `+`, `-` or space prefix."
+                          items:
+                            type: string
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
   /v1/agents/sessions/{session_id}/turns/{turn_id}:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -2456,6 +2636,89 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/renders/pdf/{path}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/FilePath"
+    get:
+      summary: Render an Office file as PDF
+      description: "Converts a `doc`, `docx`, `xls`, `xlsx`, `ppt` or `pptx` file in the session's workspace (local folder, sandbox or artifact store) to PDF with the Host's Office-to-PDF service. Conversions run in the API process (2 at a time, 60 s each); the service caches PDFs by content. Send the `ETag` back in `If-None-Match` to get a 304 while the file is unchanged."
+      tags:
+        - Sessions
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "The PDF."
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: '`"<size>:<mtime>"` of the source file.'
+            X-Agentry-Missing-Fonts:
+              schema:
+                type: string
+              description: "Comma-separated, URL-encoded font families the conversion did not have; absent when none."
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "304":
+          description: "The source is unchanged since the given `ETag`."
+        "400":
+          description: "Bad path, or `unsupported_format` for a file that is not an Office document."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "`source_changed`: the file changed during the conversion."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: "`file_too_large`: the file is over 50 MB, or the PDF over 100 MB."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: "`invalid_document`: the file could not be read as a document."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: "`render_failed`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: "`render_unavailable` (no converter in this profile), `render_busy` (with `Retry-After: 5`), `sandbox_unavailable`, or `store_unavailable`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "504":
+          description: "`render_timeout`: the conversion took longer than 60 s."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /v1/agents/sessions/{session_id}/subagents:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
