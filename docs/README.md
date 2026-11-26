@@ -12,6 +12,7 @@ Package-local reference and change notes for `@agentry/api`.
 
 | Note | Summary |
 | --- | --- |
+| [2026-11-26-stream-items.md](changes/2026-11-26-stream-items.md) | The session stream carries the full item log (`<n>.<sub>` item frame ids), live-only `subagent.*` events, attachment file ids on streamed user messages, and assistant text without the reasoning prefix |
 | [2026-11-23-agentry-general-agent.md](changes/2026-11-23-agentry-general-agent.md) | Agentry identity preset, per-agent skills and installs, command allow-list, Composio grants and connect requests |
 | [2026-11-10-redact-mcp-secrets.md](changes/2026-11-10-redact-mcp-secrets.md) | MCP `headers` and `env` values returned masked as `***` by every session and saved-agent response and SSE event; storage and recovery keep real values |
 | [2026-11-10-attachments.md](changes/2026-11-10-attachments.md) | Chat file attachments: `/agents/files` upload, content, and delete; `input_image` / `input_file` parts; workspace `uploads/` copy; item parts; TTL sweeper; `FileStore` seam |

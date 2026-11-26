@@ -71,8 +71,8 @@ import { openAttached, type AttachmentsPort } from './files/attached.ts'
 import { AttachmentIngest, type AttachedFiles } from './files/ingest.ts'
 import { FilesApi, uploadedFileSource, type FilesRuntime } from './files/api.ts'
 import { SkillsApi, type SkillTarget } from './skills.ts'
-import { SessionRegistry } from './session-registry.ts'
-import { WireProjector, type ProjectionBase } from './history/projector.ts'
+import { SessionRegistry, subagentResource } from './session-registry.ts'
+import { compareFramePositions, framePosition, frameSseId, parseFrameId, WireProjector, type FramePosition, type ProjectionBase } from './history/projector.ts'
 import type { SessionHistory } from './history/session-history.ts'
 import { NO_STORED_CONFIG } from './recovery.ts'
 import { findMaskedSecret, MASKED_SECRET, redactAgentSecrets } from './redact.ts'
@@ -731,7 +731,7 @@ export class AgentsGateway {
       req.on('close', () => {
         unsubscribe()
       })
-      writeEvent(res, projector.created.event.type, projector.created.event, projector.created.id)
+      writeEvent(res, projector.created.event.type, projector.created.event, frameSseId(projector.created))
       if (hasInput) {
         startTurn()
       } else {
@@ -1229,12 +1229,18 @@ export class AgentsGateway {
     writeSSEHeaders(res)
     const header = req.headers['last-event-id']
     const raw = Array.isArray(header) ? header[0] : header
-    const parsed = raw === undefined || raw === '' ? undefined : Number(raw)
-    const lastId = parsed === undefined ? undefined : Number.isFinite(parsed) ? parsed : 0
+    // An unreadable id replays everything.
+    const lastId: FramePosition | undefined = raw === undefined || raw === '' ? undefined : parseFrameId(raw) ?? { id: 0, sub: 0 }
 
     let open = true
-    const write = (evt: OAISessionEvent, sseId: number | undefined): void => {
-      if (open) writeEvent(res, evt.type, evt, sseId)
+    // Frames are written in order through one chain, because an item frame with attachments waits for its file ids.
+    let chain = Promise.resolve()
+    const write = (evt: OAISessionEvent, sseId: string | undefined): void => {
+      chain = chain
+        .then(() => this.streamedEvent(owner, sessionId, evt))
+        .then((ready) => {
+          if (open) writeEvent(res, ready.type, ready, sseId)
+        }, () => undefined)
     }
     if (lastId === undefined) {
       const unsubscribe = this.sessionRegistry.subscribe(sessionId, write)
@@ -1254,7 +1260,7 @@ export class AgentsGateway {
 
     // Subscribe before folding: frames produced while the log is read are buffered, then flushed after the replayed ones.
     let replaying = true
-    const buffered: Array<{ evt: OAISessionEvent; sseId: number | undefined }> = []
+    const buffered: Array<{ evt: OAISessionEvent; sseId: string | undefined }> = []
     const unsubscribe = this.sessionRegistry.subscribe(sessionId, (evt, sseId) => {
       if (replaying) buffered.push({ evt, sseId })
       else write(evt, sseId)
@@ -1266,8 +1272,8 @@ export class AgentsGateway {
     let lastWritten = lastId
     try {
       for (const frame of await this.history.wireEvents(baseOf(row), lastId)) {
-        write(frame.event, frame.id)
-        lastWritten = frame.id
+        write(frame.event, frameSseId(frame))
+        lastWritten = framePosition(frame)
       }
     } catch (error: unknown) {
       unsubscribe()
@@ -1277,9 +1283,10 @@ export class AgentsGateway {
       return
     }
     for (const { evt, sseId } of buffered) {
-      if (sseId !== undefined && sseId <= lastWritten) continue
+      const position = sseId === undefined ? undefined : parseFrameId(sseId)
+      if (position !== undefined && compareFramePositions(position, lastWritten) <= 0) continue
       write(evt, sseId)
-      if (sseId !== undefined) lastWritten = sseId
+      if (position !== undefined) lastWritten = position
     }
     // Pending approvals are not in the log, so replay cannot show them: tell this client once.
     const live = this.sessionRegistry.getOAISession(sessionId)
@@ -1287,6 +1294,25 @@ export class AgentsGateway {
       write({ type: 'agent.session.requires_action', event_id: mintEventId(), session: live }, undefined)
     }
     replaying = false
+  }
+
+  /**
+   * A stream event as the client receives it: a user message item's
+   * attachments are named by their file ids, as in `GET .../items`.
+   * @param owner - session owner.
+   * @param sessionId - session id.
+   * @param evt - wire event.
+   * @returns the event to write.
+   */
+  private async streamedEvent(owner: OwnerId, sessionId: string, evt: OAISessionEvent): Promise<OAISessionEvent> {
+    if (!('item' in evt) || evt.item.type !== 'message' || !evt.item.content.some(part => 'attachment_id' in part)) return evt
+    try {
+      const [item] = await withFileIds(this.store, owner, sessionId, [evt.item])
+      return { ...evt, item } as OAISessionEvent
+    } catch {
+      // The store is unavailable: the message still shows, without its file links.
+      return evt
+    }
   }
 
   /**
@@ -2416,14 +2442,14 @@ export class AgentsGateway {
     if (!await this.requireSession(res, owner, sessionId)) return
     json(res, 200, {
       object: 'list',
-      data: this.sessionRegistry.listSubagents(sessionId).map(projectSubagent),
+      data: this.sessionRegistry.listSubagents(sessionId).map(subagentResource),
     })
   }
 
   private async getSubagent(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const located = await this.requireSubagent(res, params, owner)
     if (!located) return
-    json(res, 200, projectSubagent(located.child))
+    json(res, 200, subagentResource(located.child))
   }
 
   private async listSubagentTurns(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -2685,22 +2711,6 @@ function maskHostCatalog<T extends { name: string }>(
     out = out.filter(row => !deny.has(row.name))
   }
   return out
-}
-
-/**
- * Wire shape for a subagent. Turns and items stay on their own routes.
- * @param child - stored child.
- */
-function projectSubagent(child: SubagentState): Omit<SubagentState, 'turns' | 'items' | 'currentTurnId'> {
-  return {
-    id: child.id,
-    object: child.object,
-    session_id: child.session_id,
-    parent_session_id: child.parent_session_id,
-    status: child.status,
-    created_at: child.created_at,
-    ...(child.closed_at !== undefined ? { closed_at: child.closed_at } : {}),
-  }
 }
 
 /**

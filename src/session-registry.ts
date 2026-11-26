@@ -11,12 +11,13 @@ import { randomUUID } from 'node:crypto'
 import { mintEventId } from './bridge.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { applySessionUpdate } from './session-resource.ts'
-import type { StatusChange, StoredSessionItem, WireProjector, WireStep } from './history/projector.ts'
+import { frameSseId, type StatusChange, type StoredSessionItem, type WireProjector, type WireStep } from './history/projector.ts'
 import { ItemTimer } from './history/item-timer.ts'
 import type {
   OAIAgentSession,
   OAIRequiredAction,
   OAISessionEvent,
+  OAISubagent,
   OAITurn,
   SessionConfig,
   UpdateSessionParams,
@@ -47,10 +48,28 @@ export interface RegisteredSessionState {
 }
 
 /**
- * Receives each wire frame of a session. `sseId` is the frame's `id`, or
- * `undefined` for an ephemeral event, which replay never returns.
+ * Receives each wire frame of a session. `sseId` is the frame's SSE `id`
+ * (`<n>` or `<n>.<sub>`), or `undefined` for an ephemeral event, which replay
+ * never returns.
  */
-export type SessionListener = (event: OAISessionEvent, sseId: number | undefined) => void
+export type SessionListener = (event: OAISessionEvent, sseId: string | undefined) => void
+
+/**
+ * Wire shape for a subagent. Turns and items stay on their own routes.
+ * @param child - stored child.
+ * @returns the `agent.session.subagent` resource.
+ */
+export function subagentResource(child: SubagentState): OAISubagent {
+  return {
+    id: child.id,
+    object: child.object,
+    session_id: child.session_id,
+    parent_session_id: child.parent_session_id,
+    status: child.status,
+    created_at: child.created_at,
+    ...(child.closed_at !== undefined ? { closed_at: child.closed_at } : {}),
+  }
+}
 
 /** Live session directory plus SSE fan-out. */
 export class SessionRegistry {
@@ -175,7 +194,7 @@ export class SessionRegistry {
     const projector = this.sessions.get(sessionId)?.projector
     if (!projector) return undefined
     const step = projector.apply(event)
-    for (const frame of step.frames) this.fanOut(sessionId, frame.event, frame.id)
+    for (const frame of step.frames) this.fanOut(sessionId, frame.event, frameSseId(frame))
     return step
   }
 
@@ -231,7 +250,7 @@ export class SessionRegistry {
   }
 
   /** Listener throws are ignored so one disconnected client cannot drop the rest. */
-  private fanOut(sessionId: string, event: OAISessionEvent, sseId: number | undefined): void {
+  private fanOut(sessionId: string, event: OAISessionEvent, sseId: string | undefined): void {
     const set = this.subscribers.get(sessionId)
     if (!set) return
     for (const listener of set) {
@@ -265,6 +284,7 @@ export class SessionRegistry {
       items: [],
     }
     this.subagents.set(key, child)
+    this.emitEphemeral(parentId, { type: 'agent.session.subagent.created', event_id: mintEventId(), session_id: parentId, subagent: subagentResource(child) })
     return child
   }
 
@@ -278,6 +298,7 @@ export class SessionRegistry {
     if (!child || child.status === 'closed') return
     child.status = 'closed'
     child.closed_at = Math.floor(Date.now() / 1000)
+    this.emitEphemeral(parentId, { type: 'agent.session.subagent.closed', event_id: mintEventId(), session_id: parentId, subagent: subagentResource(child) })
   }
 
   /**
@@ -322,7 +343,13 @@ export class SessionRegistry {
     }
     child.turns.push(turn)
     child.currentTurnId = turn.id
+    this.#childUpdated(parentId, child, turn)
     return turn
+  }
+
+  /** Tell the parent's subscribers that a child turn opened or ended. */
+  #childUpdated(parentId: string, child: SubagentState, turn: OAITurn): void {
+    this.emitEphemeral(parentId, { type: 'agent.session.subagent.updated', event_id: mintEventId(), session_id: parentId, subagent: subagentResource(child), turn: { ...turn } })
   }
 
   /**
@@ -359,6 +386,7 @@ export class SessionRegistry {
     turn.completed_at = now
     if (error) turn.error = error
     if (child.currentTurnId === turnId) delete child.currentTurnId
+    this.#childUpdated(parentId, child, turn)
     return turn
   }
 
@@ -371,7 +399,22 @@ export class SessionRegistry {
   appendChildItems(parentId: string, childId: string, items: readonly StoredSessionItem[]): void {
     const child = this.ensureSubagent(parentId, childId)
     if (!child || items.length === 0) return
-    child.items.push(...items.map(item => ({ ...item, subagent_id: childId })))
+    const stored = items.map(item => ({ ...item, subagent_id: childId }))
+    child.items.push(...stored)
+    for (const item of stored) {
+      // A tool call waits for its output; everything else is final when saved.
+      const type = item.type === 'function_call' || item.type === 'command_execution'
+        ? 'agent.session.subagent.item.added'
+        : 'agent.session.subagent.item.done'
+      this.emitEphemeral(parentId, {
+        type,
+        event_id: mintEventId(),
+        session_id: parentId,
+        subagent_id: childId,
+        turn_id: item.turn_id ?? child.currentTurnId ?? 'turn_default',
+        item: { ...item },
+      })
+    }
   }
 
   /**

@@ -193,6 +193,26 @@ describe('SSE replay', () => {
     expect(new Set(frameIds(text)).size).toBe(frameIds(text).length)
   })
 
+  it('streams item frames with sub-numbered ids and resumes from one', async () => {
+    const store = new MemoryStore()
+    const query = new FakeSessionQuery()
+    const process = await startProcess(store, query)
+    const id = await createSession(process.origin)
+    process.feed(id, logEvent('turn/start', { turn: 1 }, 1))
+    process.feed(id, user(2))
+    process.feed(id, logEvent('assistant/message', { message: { content: [{ type: 'text', text: 'ok' }] } }, 3))
+    const allIds = (text: string) => [...text.matchAll(/^id: ([\d.]+)$/gmu)].map(match => match[1])
+    const whole = await readStream(await fetch(`${process.origin}/v1/agents/sessions/${id}/events`, { headers: { 'last-event-id': '0' } }), text => allIds(text).length >= 9)
+    // The user message is an item frame after frame 4 (turn.in_progress).
+    expect(allIds(whole)).toEqual(['1', '2', '3', '4', '4.1', '5', '6', '7', '8'])
+    expect(whole).toContain('"role":"user"')
+    // An old integer id still resumes at the same place; a sub id resumes after that item frame.
+    const fromFour = await readStream(await fetch(`${process.origin}/v1/agents/sessions/${id}/events`, { headers: { 'last-event-id': '4' } }), text => allIds(text).length >= 5)
+    expect(allIds(fromFour)).toEqual(['4.1', '5', '6', '7', '8'])
+    const fromItem = await readStream(await fetch(`${process.origin}/v1/agents/sessions/${id}/events`, { headers: { 'last-event-id': '4.1' } }), text => allIds(text).length >= 4)
+    expect(allIds(fromItem)).toEqual(['5', '6', '7', '8'])
+  })
+
   it('live frames carry the ids a later replay assigns', async () => {
     const store = new MemoryStore()
     const query = new FakeSessionQuery()

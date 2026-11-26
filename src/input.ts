@@ -84,6 +84,8 @@ export function textFromContent(content: unknown): string {
   for (const block of content) {
     if (block === null || typeof block !== 'object') continue
     const rec = block as Record<string, unknown>
+    // Reasoning is its own item; an assistant message's content repeats it in front of the text.
+    if (rec.type === 'reasoning') continue
     if (typeof rec.text === 'string') {
       parts.push(rec.text)
       continue

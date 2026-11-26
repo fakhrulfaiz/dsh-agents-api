@@ -679,6 +679,22 @@ export type OAISessionEvent =
   | { type: 'agent.session.turn.output_text.delta'; event_id: string; item_id: string; output_index: number; content_index: number; session_id: string; turn_id: string; delta: string }
   | { type: 'agent.session.turn.output_text.done'; event_id: string; item_id: string; output_index: number; content_index: number; session_id: string; turn_id: string; text: string }
   | { type: 'error'; event_id: string; session_id?: string; error: { message: string; type?: string; code?: string } }
+  | { type: 'agent.session.subagent.created'; event_id: string; session_id: string; subagent: OAISubagent }
+  | { type: 'agent.session.subagent.updated'; event_id: string; session_id: string; subagent: OAISubagent; turn: OAITurn }
+  | { type: 'agent.session.subagent.closed'; event_id: string; session_id: string; subagent: OAISubagent }
+  | { type: 'agent.session.subagent.item.added'; event_id: string; session_id: string; subagent_id: string; turn_id: string; item: OAISessionItem & { subagent_id: string } }
+  | { type: 'agent.session.subagent.item.done'; event_id: string; session_id: string; subagent_id: string; turn_id: string; item: OAISessionItem & { subagent_id: string } }
+
+/** A Host child session observed under an Agents API session (`/subagents`). Turns and items stay on their own routes. */
+export interface OAISubagent {
+  id: string
+  object: 'agent.session.subagent'
+  session_id: string
+  parent_session_id: string
+  status: 'active' | 'closed'
+  created_at: number
+  closed_at?: number
+}
 
 /** Local calendar time of an `at` timing. */
 export interface ScheduleLocalAt {
