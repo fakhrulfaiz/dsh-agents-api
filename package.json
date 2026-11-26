@@ -63,6 +63,7 @@
     "@deepseek-ai/dsh-ssh": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-subprocess-ssh": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-system-prompt": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-tool-schedule": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-user-approval": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-user-questions": ">=0.2.2-rc.1",
@@ -94,6 +95,9 @@
       "optional": true
     },
     "@deepseek-ai/dsh-subprocess-ssh": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-schedule": {
       "optional": true
     }
   },

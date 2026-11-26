@@ -45,6 +45,7 @@ interface CatalogRow {
 function fakeSchedule(rows: CatalogRow[]): { service: ScheduleService; rows: CatalogRow[]; deleted: string[]; failCatalog: boolean } {
   const state = { rows, deleted: [] as string[], failCatalog: false }
   const service = {
+    deliveryLimits: () => ({ newSessionIntervalSeconds: 60 }),
     catalog: async () => {
       if (state.failCatalog) throw new Error('schedule store offline')
       return state.rows.map(row => ({ ...row, involvedSessionIds: row.involvedSessionIds ?? [] }))
