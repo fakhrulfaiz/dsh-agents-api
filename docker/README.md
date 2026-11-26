@@ -44,6 +44,14 @@ and set `AGENTRY_PUBLIC_URL`.
 
 **Agentry Sandbox** works from the container too: set `AGENTRY_SANDBOX_URL` (e.g.
 `http://host.docker.internal:3090` for the service on this machine) and `AGENTRY_SANDBOX_KEY`.
+To run the service from this compose file as well (Linux Docker host), set `COMPOSE_PROFILES=sandbox`
+in `.env` plus `AGENTRY_SANDBOX_SECRET` (at least 32 bytes, keep it stable) and optionally
+`AGENTRY_SANDBOX_ADMIN_KEY`: it starts `ghcr.io/fakhrulfaiz/agentry-sandbox-service` and its own Postgres
+database (`sandbox-postgres`, volume `sandbox-postgres-data`, same `POSTGRES_PASSWORD`). The service
+container mounts `/var/run/docker.sock` (it creates the sandbox containers; the sandboxes never get the
+socket) and uses the host network, so it listens on port 3090 of the host (`AGENTRY_SANDBOX_HOST=127.0.0.1`
+keeps it off other interfaces, but then the API container cannot reach it; keys are required either way).
+Why the socket is acceptable: the agentry-sandbox `docker/README.md`.
 Nothing is shared on disk: each sandbox keeps its workspace in its own Docker volume, mounted
 inside the sandbox at the API's path name, and every file goes through envd.
 

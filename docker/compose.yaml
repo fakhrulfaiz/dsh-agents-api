@@ -4,6 +4,8 @@
 #   docker login ghcr.io                  # only if the package is private
 #   docker compose up -d
 #
+# Optional: COMPOSE_PROFILES=sandbox in .env also runs Agentry Sandbox with its own Postgres (see the sandbox service below).
+#
 # Update: change AGENTRY_API_TAG in .env (or the tag below), then `docker compose pull && docker compose up -d`.
 # Logs: `docker compose logs -f api`. Each GitHub Release attaches this file with its tag pinned.
 name: agentry-api
@@ -45,6 +47,48 @@ services:
     volumes:
       - api-data:/data
 
+  # Agentry Sandbox: the service that runs agents' sandboxes (COMPOSE_PROFILES=sandbox, alongside
+  # `full` for the bundled API). Set AGENTRY_SANDBOX_KEY and AGENTRY_SANDBOX_SECRET in .env, and
+  # AGENTRY_SANDBOX_URL=http://host.docker.internal:3090 plus the same AGENTRY_SANDBOX_KEY for the API.
+  # It drives this machine's Docker through the mounted socket (the sandboxes never get it) and needs
+  # the host network, so Linux only: see https://github.com/fakhrulfaiz/agentry-sandbox/blob/main/docker/README.md
+  sandbox:
+    profiles: [sandbox]
+    image: ghcr.io/fakhrulfaiz/agentry-sandbox-service:${AGENTRY_SANDBOX_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      sandbox-postgres:
+        condition: service_healthy
+    network_mode: host
+    env_file: .env
+    environment:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: ${AGENTRY_SANDBOX_DB_PORT:-55433}
+      # Reachable from the API's container at http://host.docker.internal:3090; keys are required.
+      AGENTRY_SANDBOX_HOST: ${AGENTRY_SANDBOX_HOST:-0.0.0.0}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  sandbox-postgres:
+    profiles: [sandbox]
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agentry
+      POSTGRES_DB: agentry_sandbox
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # The service is on the host network, so it reaches this database on a loopback port.
+    ports:
+      - "127.0.0.1:${AGENTRY_SANDBOX_DB_PORT:-55433}:5432"
+    volumes:
+      - sandbox-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentry -d agentry_sandbox"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
 volumes:
   postgres-data:
   api-data:
+  sandbox-postgres-data:
