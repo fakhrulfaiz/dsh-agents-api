@@ -13,8 +13,14 @@ import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { OAIMcpTool } from './types.ts'
 
-/** URL path prefix the relay is served under. */
+/** URL path prefix the relay is served under (relay URLs are `<prefix><token>`). */
 export const RELAY_PATH_PREFIX = '/internal/mcp-relay/'
+/**
+ * The web-server route for the relay. DSH's web server matches a prefix route `p` only for `p` and `p/<rest>`,
+ * so the registered path has no trailing slash: registered as `RELAY_PATH_PREFIX` it never matched, every relay
+ * request fell through to the web UI (405 on POST), and Composio was disconnected in every new chat.
+ */
+export const RELAY_ROUTE_PATH = RELAY_PATH_PREFIX.replace(/\/+$/u, '')
 
 const COMPOSIO_HOST = 'connect.composio.dev'
 const MAX_BODY_BYTES = 20 * 1024 * 1024

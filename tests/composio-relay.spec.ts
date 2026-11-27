@@ -4,7 +4,7 @@ import { mkdtemp, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { ComposioRelay, RELAY_PATH_PREFIX, parseUpstream, relayEnabled } from '../src/composio-relay.ts'
+import { ComposioRelay, RELAY_PATH_PREFIX, RELAY_ROUTE_PATH, parseUpstream, relayEnabled } from '../src/composio-relay.ts'
 import type { OAIMcpTool } from '../src/types.ts'
 
 interface Upstream { url: string; calls: string[]; delayMs: number; sessions: number; expireNext: boolean; close(): Promise<void> }
@@ -232,3 +232,15 @@ async function vi_waitFor(check: () => boolean | Promise<boolean>, ms = 3000): P
   }
   throw new Error('timed out waiting')
 }
+
+describe('relay route', () => {
+  // DSH's web server (packages/host/webserver, prefix table) matches a prefix `p` only for `p` and `p/<rest>`.
+  const dshPrefixMatches = (prefix: string, pathname: string) => pathname === prefix || pathname.startsWith(`${prefix}/`)
+
+  it('registers a path the DSH web server matches for every relay URL', () => {
+    expect(RELAY_ROUTE_PATH.endsWith('/')).toBe(false)
+    expect(dshPrefixMatches(RELAY_ROUTE_PATH, `${RELAY_PATH_PREFIX}abc123`)).toBe(true)
+    // The old registration (with the trailing slash) never matched a relay URL.
+    expect(dshPrefixMatches(RELAY_PATH_PREFIX, `${RELAY_PATH_PREFIX}abc123`)).toBe(false)
+  })
+})

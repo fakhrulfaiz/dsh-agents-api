@@ -22,7 +22,7 @@
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { loadBuiltins, type BuiltinSkill } from './skills/resolve.ts'
-import { ComposioRelay, RELAY_PATH_PREFIX, relayEnabled } from './composio-relay.ts'
+import { ComposioRelay, RELAY_ROUTE_PATH, relayEnabled } from './composio-relay.ts'
 import { DEFAULT_APPROVAL_VERBS } from './mount-composio.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Context } from '@deepseek-ai/cordis'
@@ -589,7 +589,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     ctx.effect(
       () => ctx.webServer.register({
         kind: 'prefix',
-        path: RELAY_PATH_PREFIX,
+        path: RELAY_ROUTE_PATH,
         handler: (req: IncomingMessage, res: ServerResponse) => relay.handle(req, res),
       }),
       'agents-api: composio relay',
