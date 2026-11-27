@@ -67,7 +67,7 @@ describe('apply', () => {
     const { ctx, register, listeners, byName, effects } = fakeContext()
     apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60, dir: '/tmp/agentry-skills', builtinDir: '/tmp/builtins', workspaceSkills: false }, commands: { cacheTtlSeconds: 60, allow: ["goal", "plan", "compact", "export"] }, composio: { serverLabel: 'composio', approvalVerbs: ['SEND'], approvalSlugs: [] }, browser: { default: false, liveFps: 4 }, uploads: uploadsOff })
     apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60, dir: '/tmp/agentry-skills', builtinDir: '/tmp/builtins', workspaceSkills: false }, commands: { cacheTtlSeconds: 60, allow: ["goal", "plan", "compact", "export"] }, composio: { serverLabel: 'composio', approvalVerbs: ['SEND'], approvalSlugs: [] }, browser: { default: false, liveFps: 4 }, uploads: uploadsOff })
-    expect(register).toHaveBeenCalledTimes(4)
+    expect(register).toHaveBeenCalledTimes(6)
     // Per apply: four approval-bridge listeners (two answerers, session/event, session/disposed), the six gateway listeners (session/event, tools/pre-execute for sandbox changes, tools/pre-execute and tools/post-execute for browser take-over, commands/change, session/disposed), and the schedule resolver.
     expect(listeners).toHaveLength(22)
     expect(byName.has('schedule/resolve-agent')).toBe(true)

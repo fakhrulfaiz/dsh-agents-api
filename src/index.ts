@@ -22,6 +22,7 @@
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { loadBuiltins, type BuiltinSkill } from './skills/resolve.ts'
+import { ComposioRelay, RELAY_PATH_PREFIX, relayEnabled } from './composio-relay.ts'
 import { DEFAULT_APPROVAL_VERBS } from './mount-composio.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Context } from '@deepseek-ai/cordis'
@@ -468,6 +469,14 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     })
     ctx.effect(() => () => { void sandboxPresets?.dispose() })
   }
+  const relay = relayEnabled()
+    ? new ComposioRelay({
+      serverLabel: config.composio.serverLabel,
+      origin: () => ctx.webServer.getOrigin(),
+      cacheDir: process.env['AGENTRY_COMPOSIO_RELAY_CACHE_DIR'] ?? `${process.env['HOME'] ?? ''}/.dsh/agentry-composio-relay`,
+      warn: message => ctx.logger.warn(message),
+    })
+    : undefined
   const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth, message => ctx.logger.warn(message)), prefix, undefined, sessionRegistry, {
     sandboxes,
     ...(sandboxPresets === undefined ? {} : { sandboxPresets }),
@@ -484,6 +493,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     builtinSkills: () => builtinSkills,
     skillsRoot: config.skills.dir,
     composio: config.composio,
+    ...(relay === undefined ? {} : { composioRelay: relay }),
     browserDefault: config.browser.default,
     browserLiveFps: config.browser.liveFps,
     skillsHiddenSources: DEVELOPER_SKILL_SOURCES.filter(source => !(config.skills.workspaceSkills && source.startsWith('project-'))),
@@ -567,6 +577,17 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     }),
     'agents-api: /health',
   )
+
+  if (relay !== undefined) {
+    ctx.effect(
+      () => ctx.webServer.register({
+        kind: 'prefix',
+        path: RELAY_PATH_PREFIX,
+        handler: (req: IncomingMessage, res: ServerResponse) => relay.handle(req, res),
+      }),
+      'agents-api: composio relay',
+    )
+  }
 
   ctx.effect(
     () => ctx.webServer.register({
