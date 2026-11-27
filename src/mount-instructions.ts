@@ -41,6 +41,7 @@ export const AGENTS_API_GUIDANCE_ORDER = 11
 export const AGENTS_API_GUIDANCE_TEXT = [
   'Do not search the whole filesystem (`/`, `/mnt`, or a home-wide `find`); stay inside the workspace.',
   "For office files (docx, pptx, xlsx), use the matching office skill's own scripts instead of looking for Python or Node libraries.",
+  'When a task creates more than one file, put them in one folder named for the task (for example `sales-report/`), not loose in the workspace root, unless the user names a place or the files belong in an existing project\'s structure. The folder stays in the workspace, so later chats can find and reuse it; mention the folder in your answer.',
 ].join('\n')
 
 /**
