@@ -17,7 +17,7 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 | `GET` `POST` `DELETE` | `/agents/environments/templates/{id}` | Retrieve, update, or delete one template |
 | `GET` | `/agents/environments/runtimes` | Extension. The bundled Node, Python and pnpm versions and Python packages shared by every agent, or `available: false` |
 | `GET` | `/agents/environments/providers` | Extension. List sandbox providers with their capabilities and the default |
-| `POST` `GET` | `/agents/environments` | Create or list environments (`agent.environment`). The default `local` provider makes a directory `<workspaces>/<owner>/<environment_id>/`; `template_id` or `provider` selects another. See [sandbox.md](sandbox.md) |
+| `POST` `GET` | `/agents/environments` | Create or list environments (`agent.environment`). The default `local` provider makes a directory `<workspaces>/<owner>/<environment_id>/`; `template_id` or `provider` selects another. On the `sandbox` provider the create answers 201 at once with `status: pending` (`sandbox.state: provisioning`) and finishes in the background; poll the environment until `connected` or `failed`. See [sandbox.md](sandbox.md) |
 | `GET` `POST` `DELETE` | `/agents/environments/{id}` | Retrieve (status `failed` when the directory is gone), rename (`POST {"name"}`, extension; empty clears it), or delete one environment and its directory |
 | `POST` `GET` | `/agents/environments/{id}/files` | Write or list files in the environment workspace |
 | `GET` | `/agents/environments/{id}/files/{path}` | Read one environment file |

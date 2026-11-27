@@ -29,6 +29,17 @@ vi.mock('@deepseek-ai/dsh-mcp-client', () => ({
 
 const servers: Server[] = []
 const TEST_OWNER = ownerId('test')
+
+/** Create an environment and wait for the background setup to finish (the create answers `pending`). */
+async function createSettled(call: (path: string, init?: RequestInit) => Promise<Response>, body: string): Promise<{ id: string; status: string; error?: string; [key: string]: unknown }> {
+  const created = (await (await call('/agents/environments', { method: 'POST', body })).json()) as { id: string; status: string }
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const env = (await (await call(`/agents/environments/${created.id}`)).json()) as { id: string; status: string; error?: string }
+    if (env.status !== 'pending') return env
+    await new Promise<void>(resolve => setTimeout(resolve, 25))
+  }
+  throw new Error('environment stayed pending')
+}
 const environments = createLocalProvider(join(tmpdir(), 'agentry-gateway-spec'))
 
 async function seedAgent(store: MemoryStore, params: CreateAgentParams): Promise<OAIAgent> {
@@ -1273,7 +1284,7 @@ describe('sandbox environments through the gateway', () => {
       const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
       const providers = (await (await call('/agents/environments/providers')).json()) as { data: { name: string; available: boolean }[] }
       expect(providers.data.map((p) => [p.name, p.available])).toEqual(expect.arrayContaining([['local', true], ['sandbox', true]]))
-      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string; provider: string; status: string }
+      const env = (await createSettled(call, JSON.stringify({ provider: 'sandbox' }))) as { id: string; provider: string; status: string }
       expect(env).toMatchObject({ provider: 'sandbox', status: 'connected', sandbox: { state: 'running' } })
       const stopped = await call(`/agents/environments/${env.id}/stop`, { method: 'POST' })
       expect(stopped.status).toBe(200)
@@ -1281,7 +1292,7 @@ describe('sandbox environments through the gateway', () => {
       expect((await call(`/agents/environments/${env.id}/start`, { method: 'POST' })).status).toBe(200)
       expect((await call(`/agents/environments/${env.id}/reset`, { method: 'POST', body: JSON.stringify({ keep_workspace: false }) })).status).toBe(200)
       expect(svc.backend.calls.some((c) => c.endsWith('keep=false'))).toBe(true)
-      const second = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { status: string; error?: string }
+      const second = (await createSettled(call, JSON.stringify({ provider: 'sandbox' }))) as { status: string; error?: string }
       expect(second).toMatchObject({ status: 'failed', error: expect.stringContaining('limit 1') })
       const local = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ name: 'Scratch' }) })).json()) as { id: string; name?: string; sandbox?: unknown }
       expect(local.name).toBe('Scratch')
@@ -1319,9 +1330,9 @@ describe('environment place', () => {
     const svc = await startTestService()
     try {
       const call = await setup(svc)
-      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox', place: 'local' }) })).json()) as { status: string; sandbox?: { place?: string } }
+      const env = (await createSettled(call, JSON.stringify({ provider: 'sandbox', place: 'local' }))) as { status: string; sandbox?: { place?: string } }
       expect(env).toMatchObject({ status: 'connected', sandbox: { place: 'local' } })
-      const bad = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox', place: 'nowhere' }) })).json()) as { status: string; error?: string }
+      const bad = (await createSettled(call, JSON.stringify({ provider: 'sandbox', place: 'nowhere' }))) as { status: string; error?: string }
       expect(bad.status).toBe('failed')
     } finally {
       await svc.close()
@@ -1358,7 +1369,7 @@ describe('sessions on Agentry Sandbox environments', () => {
       const api = new AgentsGateway(fake.ctx, openAuthenticator, '/v1', store, new SessionRegistry(), { ...testGatewayOptions(registry), sandboxPresets })
       const base = await listen((req, res) => api.handle(req, res))
       const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
-      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string }
+      const env = (await createSettled(call, JSON.stringify({ provider: 'sandbox' }))) as { id: string }
       const session = (body: object) => call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, ...body }) })
       expect((await session({ environment: { type: 'sandbox', environment_id: env.id } })).status).toBe(200)
       expect((await session({ environment: { type: 'sandbox', environment_id: env.id } })).status).toBe(200)
@@ -1421,7 +1432,7 @@ describe('workspace data of sandbox sessions', () => {
       const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), { ...testGatewayOptions(registry), sandboxPresets })
       const base = await listen((req, res) => api.handle(req, res))
       const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
-      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string }
+      const env = (await createSettled(call, JSON.stringify({ provider: 'sandbox' }))) as { id: string }
       const sbx = (await (await call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment: { type: 'sandbox', environment_id: env.id } }) })).json()) as { id: string }
       const workspace = (await Promise.all([...svc.ownersSeen].map((o) => svc.service.list(o)))).flat()[0]!.template.workspacePath!
       files.set(`${workspace}/report.md`, '# from the sandbox')
@@ -1464,7 +1475,7 @@ describe('failed sandbox environments never fall back to the host (review C1)', 
       const base = await listen((req, res) => api.handle(req, res))
       const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
       svc.backend.failNextCreate('quota: limit 1 reached')
-      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string; status: string }
+      const env = (await createSettled(call, JSON.stringify({ provider: 'sandbox' }))) as { id: string; status: string }
       expect(env.status).toBe('failed')
       const attach = await call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment: { type: 'sandbox', environment_id: env.id } }) })
       expect(attach.status).toBe(409)
@@ -1499,7 +1510,7 @@ describe('a sandbox that cannot start (review I1)', () => {
       const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), { ...testGatewayOptions(registry), sandboxPresets })
       const base = await listen((req, res) => api.handle(req, res))
       const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
-      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox' }) })).json()) as { id: string }
+      const env = (await createSettled(call, JSON.stringify({ provider: 'sandbox' }))) as { id: string }
       const res = await call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment: { type: 'sandbox', environment_id: env.id } }) })
       expect(res.status).toBe(503)
       const body = JSON.stringify(await res.json())
@@ -1539,7 +1550,7 @@ describe('built-in templates', () => {
       expect((await call('/agents/environments/templates/tpl_builtin_offline', { method: 'POST', body: '{"name":"x"}' })).status).toBe(400)
       expect((await call('/agents/environments/templates/tpl_builtin_offline', { method: 'DELETE' })).status).toBe(400)
       // An environment can start from one.
-      const env = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox', template_id: 'tpl_builtin_data_science' }) })).json()) as { status: string; template_id?: string }
+      const env = (await createSettled(call, JSON.stringify({ provider: 'sandbox', template_id: 'tpl_builtin_data_science' }))) as { status: string; template_id?: string }
       expect(env).toMatchObject({ status: 'connected', template_id: 'tpl_builtin_data_science' })
       // Without the isolated sandbox there are none.
       const plain = new SandboxRegistry('local')
@@ -1713,5 +1724,118 @@ describe('session create answers before the agent setup finishes', () => {
     expect((await deleted).status).toBe(200)
     expect(agents.get(id)?.followup).not.toHaveBeenCalled()
     expect(await store.sessions.get(id, TEST_OWNER)).toBeUndefined()
+  })
+})
+
+describe('environment create in the background', () => {
+  type FakeCreate = { status: 'pending' | 'connected' | 'failed'; workspacePath: string; handle?: Record<string, string>; error?: string }
+  const setup = async () => {
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const gate: { release: (result: FakeCreate) => void } = { release: () => undefined }
+    const state = {
+      destroyed: [] as string[],
+      created: 0,
+      adopt: undefined as undefined | (() => Promise<FakeCreate | undefined>),
+      sandboxStatus: 'connected' as 'pending' | 'connected' | 'failed',
+    }
+    const fake = {
+      kind: 'sandbox',
+      capabilities: { templateFields: [], files: false, exec: false },
+      create: () => {
+        state.created++
+        return new Promise<FakeCreate>(resolve => { gate.release = resolve })
+      },
+      adopt: () => (state.adopt ?? (async () => undefined))(),
+      status: async (record: { provider_metadata: Record<string, string> }) => {
+        if (record.provider_metadata['sandbox_id'] === undefined) throw new Error('environment has no sandbox')
+        return state.sandboxStatus
+      },
+      destroy: async (record: { provider_metadata: Record<string, string> }) => { state.destroyed.push(record.provider_metadata['sandbox_id'] ?? '') },
+    }
+    const registry = new SandboxRegistry('sandbox')
+    registry.register(fake as never)
+    const store = new MemoryStore()
+    await store.ensureOwner(TEST_OWNER)
+    const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), testGatewayOptions(registry))
+    api.environmentAdoption = { pollMs: 5, maxMs: 2000 }
+    const base = await listen((req, res) => api.handle(req, res))
+    const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+    const post = async () => (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({ provider: 'sandbox', name: 'Big' }) })).json()) as { id: string; status: string; error?: string; sandbox?: { state: string }; name?: string }
+    const get = async (id: string) => (await (await call(`/agents/environments/${id}`)).json()) as { id: string; status: string; error?: string; sandbox?: { state: string }; provider_metadata: Record<string, string> }
+    const until = async (id: string, status: string) => {
+      for (let i = 0; i < 200; i++) {
+        const env = await get(id)
+        if (env.status === status) return env
+        await new Promise<void>(resolve => setTimeout(resolve, 10))
+      }
+      throw new Error(`environment never became ${status}`)
+    }
+    return { gate, state, post, get, until, call, store, api }
+  }
+  const handle = { sandbox_id: 'sbx_1', workspace_directory: '/workspace' }
+
+  it('answers pending as provisioning before create resolves, then connects', async () => {
+    const { gate, post, get, until } = await setup()
+    const env = await post()
+    expect(env).toMatchObject({ status: 'pending', name: 'Big', sandbox: { state: 'provisioning' } })
+    expect(await get(env.id)).toMatchObject({ status: 'pending', sandbox: { state: 'provisioning' } })
+    gate.release({ status: 'connected', workspacePath: '/workspace', handle })
+    const done = await until(env.id, 'connected')
+    expect(done.provider_metadata).toMatchObject({ sandbox_id: 'sbx_1', name: 'Big' })
+  })
+
+  it('stores a failed create with its error', async () => {
+    const { gate, post, until } = await setup()
+    const env = await post()
+    gate.release({ status: 'failed', workspacePath: '', error: 'out of memory' })
+    expect(await until(env.id, 'failed')).toMatchObject({ error: 'out of memory' })
+  })
+
+  it('adopts a sandbox the service kept making after the create timed out', async () => {
+    const { gate, state, post, until } = await setup()
+    let polls = 0
+    state.adopt = async () => (++polls < 3 ? { status: 'pending', workspacePath: '/workspace', handle } : { status: 'connected', workspacePath: '/workspace', handle })
+    const env = await post()
+    gate.release({ status: 'failed', workspacePath: '', error: 'Agentry Sandbox is not reachable: The operation was aborted due to timeout' })
+    const done = await until(env.id, 'connected')
+    expect(done.provider_metadata['sandbox_id']).toBe('sbx_1')
+    expect(done.error).toBeUndefined()
+  })
+
+  it('keeps the failure when a timed-out create left no sandbox', async () => {
+    const { gate, post, until } = await setup()
+    const env = await post()
+    gate.release({ status: 'failed', workspacePath: '', error: 'The operation was aborted due to timeout' })
+    expect(await until(env.id, 'failed')).toMatchObject({ error: expect.stringContaining('timeout') })
+  })
+
+  it('destroys what a setup made when the environment was deleted meanwhile', async () => {
+    const { gate, state, post, call } = await setup()
+    const env = await post()
+    expect((await call(`/agents/environments/${env.id}`, { method: 'DELETE' })).status).toBe(200)
+    expect((await call(`/agents/environments/${env.id}`)).status).toBe(404)
+    gate.release({ status: 'connected', workspacePath: '/workspace', handle })
+    for (let i = 0; i < 100 && state.destroyed.length === 0; i++) await new Promise<void>(resolve => setTimeout(resolve, 10))
+    expect(state.destroyed).toEqual(['sbx_1'])
+    expect((await call(`/agents/environments/${env.id}`)).status).toBe(404)
+  })
+
+  it('marks a pending record nobody is setting up (API restarted) as interrupted', async () => {
+    const { store, get, call } = await setup()
+    await store.environments.create(TEST_OWNER, { id: 'env_orphan', object: 'environment', status: 'pending', provider: 'sandbox', provider_metadata: {}, created_at: 1 })
+    const listed = (await (await call('/agents/environments')).json()) as { data: { id: string; status: string; error?: string }[] }
+    expect(listed.data.find(e => e.id === 'env_orphan')).toMatchObject({ status: 'failed', error: 'Setup was interrupted.' })
+    expect(await get('env_orphan')).toMatchObject({ status: 'failed' })
+  })
+
+  it('keeps in-chat provisioning synchronous', async () => {
+    const { gate, state, api } = await setup()
+    let resolved = false
+    const pending = api.provisionEnvironment(TEST_OWNER, { provider: 'sandbox' }).then(env => { resolved = true; return env })
+    await new Promise<void>(resolve => setTimeout(resolve, 30))
+    expect(state.created).toBe(1)
+    expect(resolved).toBe(false)
+    gate.release({ status: 'connected', workspacePath: '/workspace', handle })
+    expect(await pending).toMatchObject({ status: 'connected' })
   })
 })

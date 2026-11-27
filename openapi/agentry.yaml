@@ -1731,7 +1731,7 @@ paths:
               $ref: "#/components/schemas/CreateEnvironmentRequest"
       responses:
         "201":
-          description: Created
+          description: Created. On the sandbox provider the setup runs in the background, so the answer may have `status` `pending` and `sandbox.state` `provisioning`; poll `GET /v1/agents/environments/{environment_id}` until it is `connected` or `failed` (with `error`).
           content:
             application/json:
               schema:
