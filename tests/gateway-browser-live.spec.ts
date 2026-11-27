@@ -112,6 +112,20 @@ describe('browser live route', () => {
     expect(startBrowserRelay).toHaveBeenCalledWith(envd, browserCdpPort('sess_on'), 100)
   })
 
+  it('sends the agent\'s pointer and focus as events', async () => {
+    const { base, relays } = await start()
+    const got = await events(`${base}/sess_on/browser/live`, 2, () => {
+      void vi.waitFor(() => { expect(relays).toHaveLength(1) }).then(() => {
+        relays[0]!.write('{"type":"pointer","action":"down","x":10,"y":20,"ts":7}\n')
+        relays[0]!.write('{"type":"focus","x":1,"y":2,"width":3,"height":4,"ts":8}\n')
+      })
+    })
+    expect(got).toEqual([
+      { event: 'pointer', data: { action: 'down', x: 10, y: 20, timestamp: 7 } },
+      { event: 'focus', data: { x: 1, y: 2, width: 3, height: 4, timestamp: 8 } },
+    ])
+  })
+
   it('says the sandbox image has no browser', async () => {
     const { base, relays } = await start()
     const got = await events(`${base}/sess_on/browser/live`, 1, () => {
