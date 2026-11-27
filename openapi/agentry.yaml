@@ -4651,6 +4651,16 @@ components:
                 - { const: all }
             started_at: { type: [integer, "null"] }
             last_used_at: { type: [integer, "null"] }
+            progress:
+              type: object
+              description: "Present only while `state` is `provisioning`: where the setup is. A record whose sandbox does not exist yet reports `starting`."
+              required: [stage, updated_at]
+              properties:
+                stage: { type: string, enum: [pulling_image, starting, preparing, installing_packages, copying_runtime, writing_files, running_setup, finishing] }
+                step: { type: integer, minimum: 1, description: "`running_setup` only: the command being run." }
+                steps: { type: integer, minimum: 1, description: "`running_setup` only: how many setup commands there are." }
+                detail: { type: string, maxLength: 120, description: "`running_setup` only: the command, cut to 120 characters." }
+                updated_at: { type: integer, description: Unix seconds. }
         provider_metadata:
           type: object
           description: Extension. Provider-owned handle; `workspace_directory` for `local`.

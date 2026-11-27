@@ -3035,7 +3035,7 @@ export class AgentsGateway {
     // No sandbox id: the background setup is still running (or the record is about to be settled), or the setup failed.
     if (record.provider === 'sandbox' && record.provider_metadata['sandbox_id'] === undefined && (record.status === 'pending' || record.status === 'failed')) {
       const name = record.provider_metadata['name']
-      return { ...out, ...(name !== undefined ? { name } : {}), sandbox: { state: record.status === 'pending' ? 'provisioning' : 'failed' } }
+      return { ...out, ...(name !== undefined ? { name } : {}), sandbox: record.status === 'pending' ? { state: 'provisioning', progress: { stage: 'starting', updated_at: Math.floor(Date.now() / 1000) } } : { state: 'failed' } }
     }
     const name = record.provider_metadata['name']
     return { ...out, ...(name !== undefined ? { name } : {}), ...(sandbox !== undefined ? { sandbox } : {}) }
