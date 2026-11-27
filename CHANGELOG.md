@@ -5,6 +5,7 @@ Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
 ## Unreleased
 
+- 2026-11-28: The dev profile (`cordis.patch.yml`) can also accept Keycloak tokens next to the dev key: set `AGENTRY_KEYCLOAK_ISSUER` (and optionally `AGENTRY_KEYCLOAK_AUDIENCE`, default `agentry-api`) before `scripts/dev.sh`. Unset, nothing changes. Used for the web app's Keycloak live check.
 ## 0.3.0 — 2026-11-28
 
 - 2026-11-28: Fixed Composio being disconnected in every new chat since the Composio relay landed. The relay route was registered as `/internal/mcp-relay/` (trailing slash); DSH's web server matches a prefix `p` only for `p` and `p/<rest>`, so no relay URL ever matched, requests fell through to the web UI (405 on POST), and the agent's Composio MCP client gave up (`gmail_search_emails` answered `unknown tool "mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL"`). The route is now `RELAY_ROUTE_PATH` (`/internal/mcp-relay`). Found and checked in a live chat.
