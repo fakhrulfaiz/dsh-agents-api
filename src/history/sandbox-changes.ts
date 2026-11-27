@@ -70,7 +70,9 @@ export function snapshotScript(sessionId: string, dir: string): string {
   return [
     'set -e',
     `cd ${sq(dir)}`,
-    `if [ ! -d ${sq(g)} ]; then mkdir -p /tmp/agentry-changes && git init -q --bare ${sq(g)} && printf '%s\\n' node_modules/ __pycache__/ .venv/ > ${sq(`${g}/info/exclude`)}; fi`,
+    `if [ ! -d ${sq(g)} ]; then mkdir -p /tmp/agentry-changes && git init -q --bare ${sq(g)}; fi`,
+    // Rewritten every time so shadow repositories made before `.browser/` was excluded pick it up too.
+    `mkdir -p ${sq(`${g}/info`)} && printf '%s\\n' node_modules/ __pycache__/ .venv/ /.browser/ > ${sq(`${g}/info/exclude`)}`,
     env(sessionId, dir),
     'git -c core.autocrlf=false -c core.safecrlf=false add -A --ignore-errors -- . >/dev/null 2>&1 || true',
     'git write-tree',
