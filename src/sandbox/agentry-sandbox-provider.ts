@@ -17,7 +17,7 @@ import type { OwnerId } from '../auth/authenticator.ts'
 import { directorySegment } from '../environment/local.ts'
 import type { CreateEnvironmentInput, EnvironmentCreateResult } from '../environment/provider.ts'
 import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplateConfig } from '../environment-types.ts'
-import type { SandboxSummary } from '../environment/environment-compat.ts'
+import type { SandboxProgress, SandboxSummary } from '../environment/environment-compat.ts'
 import type { SandboxProvider } from './contract.ts'
 
 export interface AgentrySandboxOptions {
@@ -247,7 +247,8 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
     async describe(record) {
       try {
         const s = await quickApi(ownerOf(record)).get(meta(record).id)
-        return { state: s.state, image: s.image, place: s.place, ...(s.gpus ? { gpus: s.gpus } : {}), started_at: s.started_at, last_used_at: s.last_used_at }
+        const progress = s.state === 'provisioning' ? (s as { progress?: SandboxProgress | null }).progress : undefined
+        return { state: s.state, image: s.image, place: s.place, ...(s.gpus ? { gpus: s.gpus } : {}), started_at: s.started_at, last_used_at: s.last_used_at, ...(progress ? { progress } : {}) }
       } catch (e) {
         return { state: e instanceof SandboxApiError && e.status === 404 ? 'gone' : 'unknown', ...(record.provider_metadata['image'] ? { image: record.provider_metadata['image'] } : {}) }
       }

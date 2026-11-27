@@ -52,6 +52,17 @@ export interface SdkEnvironment {
   sandbox?: SandboxSummary
 }
 
+/** Where a sandbox's setup is, while it is `provisioning` (the sandbox service's `progress`). */
+export interface SandboxProgress {
+  stage: 'pulling_image' | 'starting' | 'preparing' | 'installing_packages' | 'copying_runtime' | 'writing_files' | 'running_setup' | 'finishing'
+  /** `running_setup` only: which command, of how many. */
+  step?: number
+  steps?: number
+  /** `running_setup` only: the command, cut to 120 characters. */
+  detail?: string
+  updated_at: number
+}
+
 export interface SandboxSummary {
   state: 'provisioning' | 'running' | 'stopped' | 'failed' | 'deleting' | 'gone' | 'unknown'
   image?: string
@@ -59,6 +70,8 @@ export interface SandboxSummary {
   gpus?: number | 'all'
   started_at?: number | null
   last_used_at?: number | null
+  /** Only while `state` is `provisioning`. */
+  progress?: SandboxProgress
 }
 
 const text = (value: unknown): string => (typeof value === 'string' ? value : '')

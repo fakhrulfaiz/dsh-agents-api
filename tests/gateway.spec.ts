@@ -1778,7 +1778,7 @@ describe('environment create in the background', () => {
     const { gate, post, get, until } = await setup()
     const env = await post()
     expect(env).toMatchObject({ status: 'pending', name: 'Big', sandbox: { state: 'provisioning' } })
-    expect(await get(env.id)).toMatchObject({ status: 'pending', sandbox: { state: 'provisioning' } })
+    expect(await get(env.id)).toMatchObject({ status: 'pending', sandbox: { state: 'provisioning', progress: { stage: 'starting' } } })
     gate.release({ status: 'connected', workspacePath: '/workspace', handle })
     const done = await until(env.id, 'connected')
     expect(done.provider_metadata).toMatchObject({ sandbox_id: 'sbx_1', name: 'Big' })
