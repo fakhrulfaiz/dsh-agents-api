@@ -128,6 +128,7 @@ export class SessionRegistry {
       environment: config.environment,
       metadata: config.metadata,
       vaultIds: config.vault_ids,
+      projectId: config.project_id ?? null,
     }
     return projector.snapshot()
   }
@@ -142,7 +143,7 @@ export class SessionRegistry {
     const base = this.sessions.get(id)?.projector.base
     if (!base) return undefined
     const config = applySessionUpdate(
-      { agent: base.agent, environment: base.environment, metadata: base.metadata, vault_ids: base.vaultIds },
+      { agent: base.agent, environment: base.environment, metadata: base.metadata, vault_ids: base.vaultIds, project_id: base.projectId ?? null },
       params,
     )
     return config === undefined ? undefined : this.applyConfig(id, config)

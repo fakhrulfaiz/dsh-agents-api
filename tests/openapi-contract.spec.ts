@@ -330,7 +330,7 @@ describe('OpenAPI schema fixtures', () => {
   const agent = { id: 'agent_1', object: 'agent', created_at: 1, updated_at: 1, name: null, instructions: null, model: 'm', metadata: {}, tools: [] }
   const session = (required_actions: unknown[]) => ({
     id: 'sess_1', object: 'agent.session', created_at: 1, last_active_at: 1, status: 'requires_action', error: null,
-    metadata: {}, vault_ids: [], agent, environment: { type: 'none' }, required_actions, usage: null,
+    metadata: {}, vault_ids: [], project_id: null, agent, environment: { type: 'none' }, required_actions, usage: null,
   })
 
   it('accepts every required action variant', () => {

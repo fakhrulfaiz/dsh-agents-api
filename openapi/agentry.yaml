@@ -2175,7 +2175,7 @@ paths:
         "500":
           $ref: "#/components/responses/ServerError"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/SessionConflict"
         "413":
           description: "`message_too_large`: the files of the message total more than `uploads.maxMessageBytes`."
           content:
@@ -2190,7 +2190,7 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
-      description: "Send `agent` and/or `agent_id`. With `stream: true` the response is a `text/event-stream` of `SessionEvent` frames (see the events operation) instead of JSON. The response does not wait for the agent's setup (MCP connections): a create with input answers `in_progress` and the message starts once the agent is ready. A setup failure later marks the session `failed` (ephemeral `error` and `agent.session.failed` on the stream) instead of answering 500."
+      description: "Send `agent` and/or `agent_id`. With `project_id`, the chat attaches to that Project and inherits its agent and environment unless the request supplies its own. A foreign or archived Project is refused. With `stream: true` the response is a `text/event-stream` of `SessionEvent` frames (see the events operation) instead of JSON. The response does not wait for the agent's setup (MCP connections): a create with input answers `in_progress` and the message starts once the agent is ready. A setup failure later marks the session `failed` (ephemeral `error` and `agent.session.failed` on the stream) instead of answering 500."
     get:
       summary: List sessions, newest first
       tags:
@@ -2209,6 +2209,12 @@ paths:
             additionalProperties:
               type: string
           description: "Agentry extension. `metadata[key]=value` keeps only sessions whose metadata has that key with that exact value; several keys must all match. Applies before paging, so every page is complete."
+        - name: project_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Agentry extension. Keep only sessions attached to this Project; an empty value keeps only unfiled sessions. Applies before paging, so every page is complete."
       responses:
         "200":
           description: OK
@@ -2291,10 +2297,10 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/SessionConflict"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
-      description: Changes `agent.model` and `agent.reasoning.effort` on the live agent from the next model step; `service_tier` and `metadata` are stored only.
+      description: Changes `agent.model` and `agent.reasoning.effort` on the live agent from the next model step; `service_tier` and `metadata` are stored only. A `project_id` moves the chat into a Project, or `null` makes it unfiled.
     delete:
       summary: Delete a session
       tags:
@@ -3410,6 +3416,12 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
     ProjectConflict:
       description: "`project_has_sessions`: the project still has chats and cannot be deleted."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    SessionConflict:
+      description: "`project_archived` (a chat cannot be created on or moved into an archived Project), `session_setting_not_live`, `session_not_resumable`, or `session_setup_failed`."
       content:
         application/json:
           schema:
@@ -4947,6 +4959,11 @@ components:
           type: array
           items:
             type: string
+        project_id:
+          oneOf:
+            - type: string
+            - type: "null"
+          description: "Agentry extension. Project this chat belongs to; `null` means unfiled."
         agent:
           $ref: "#/components/schemas/Agent"
         environment:
@@ -4968,6 +4985,7 @@ components:
         - error
         - metadata
         - vault_ids
+        - project_id
         - agent
         - environment
         - required_actions
@@ -5041,6 +5059,11 @@ components:
           type: string
         environment:
           $ref: "#/components/schemas/EnvironmentConfig"
+        project_id:
+          description: "Agentry extension. Project to attach the new chat to; a missing or `null` value leaves it unfiled. A foreign or archived id is refused."
+          oneOf:
+            - type: string
+            - type: "null"
         metadata:
           oneOf:
             - type: object
@@ -5097,6 +5120,11 @@ components:
               - type: string
               - type: "null"
           description: "Agentry extension. Sets the given keys and leaves the others; a `null` value deletes the key. The merge is atomic in the store, so concurrent merges of different keys both survive. Applied after `metadata` when both are sent."
+        project_id:
+          description: "Agentry extension. Move the chat into a Project, or `null` to make it unfiled. A foreign or archived id is refused."
+          oneOf:
+            - type: string
+            - type: "null"
     Turn:
       type: object
       properties:

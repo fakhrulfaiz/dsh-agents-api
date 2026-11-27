@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { ownerId, type Authenticator } from '../src/auth/authenticator.ts'
+import { materializeAgent } from '../src/agent-records.ts'
 import { createLocalProvider } from '../src/environment/local.ts'
 import { AgentsGateway } from '../src/gateway.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
@@ -82,10 +83,16 @@ const WORKSPACE = { type: 'local', workspace_directory: '/tmp/agentry-project-sp
 const DEFAULT_WORKSPACE = { type: 'local', workspace_directory: '/tmp/agentry-project-default' } as const
 const DETAILS = { name: 'Work', agent_id: 'agent_1', environment: WORKSPACE, pinned: true }
 
-async function createProject(call: Awaited<ReturnType<typeof start>>['call']): Promise<any> {
-  const { status, body } = await call('alice', 'POST', '/agents/projects', DETAILS)
+async function createProject(call: Awaited<ReturnType<typeof start>>['call'], overrides: Record<string, unknown> = {}): Promise<any> {
+  const { status, body } = await call('alice', 'POST', '/agents/projects', { ...DETAILS, ...overrides })
   expect(status).toBe(201)
   return body
+}
+
+/** Save an agent owned by Alice for a Project default or a session override. */
+async function seedAgent(store: MemoryStore, model: string, instructions: string) {
+  await store.ensureOwner(ALICE)
+  return store.agents.create(ALICE, materializeAgent({ model, instructions }))
 }
 
 describe('/agents/projects', () => {
@@ -204,5 +211,148 @@ describe('/agents/projects', () => {
     expect(status).toBe(409)
     expect(body.error.code).toBe('project_has_sessions')
     expect(await store.projects.get(ALICE, created.id)).toBeDefined()
+  })
+})
+
+describe('/agents/sessions on projects', () => {
+  it('creates a session on a project using its defaults', async () => {
+    const { call, store } = await start()
+    const agent = await seedAgent(store, 'deepseek-chat', 'Project instructions')
+    const project = await createProject(call, { agent_id: agent.id, environment: WORKSPACE })
+
+    const { status, body } = await call('alice', 'POST', '/agents/sessions', { project_id: project.id })
+    expect(status).toBe(200)
+    expect(body.project_id).toBe(project.id)
+    expect(body.agent.id).toBe(agent.id)
+    expect(body.agent.model).toBe('deepseek-chat')
+    expect(body.agent.instructions).toBe('Project instructions')
+    expect(body.environment).toEqual(WORKSPACE)
+
+    const row = await store.sessions.get(body.id, ALICE)
+    expect(row?.projectId).toBe(project.id)
+    expect(row?.body?.project_id).toBe(project.id)
+  })
+
+  it('keeps explicit create overrides while attaching the project', async () => {
+    const { call, store } = await start()
+    const projectAgent = await seedAgent(store, 'deepseek-chat', 'Project instructions')
+    const explicitAgent = await seedAgent(store, 'deepseek-chat', 'Explicit instructions')
+    const project = await createProject(call, { agent_id: projectAgent.id, environment: WORKSPACE })
+
+    const inline = await call('alice', 'POST', '/agents/sessions', {
+      project_id: project.id,
+      agent: { model: 'deepseek-explicit', instructions: 'Inline' },
+      environment: DEFAULT_WORKSPACE,
+    })
+    expect(inline.status).toBe(200)
+    expect(inline.body.project_id).toBe(project.id)
+    expect(inline.body.agent.model).toBe('deepseek-explicit')
+    expect(inline.body.agent.instructions).toBe('Inline')
+    expect(inline.body.environment).toEqual(DEFAULT_WORKSPACE)
+
+    const saved = await call('alice', 'POST', '/agents/sessions', {
+      project_id: project.id,
+      agent_id: explicitAgent.id,
+      environment: DEFAULT_WORKSPACE,
+    })
+    expect(saved.status).toBe(200)
+    expect(saved.body.project_id).toBe(project.id)
+    expect(saved.body.agent.id).toBe(explicitAgent.id)
+    expect(saved.body.agent.instructions).toBe('Explicit instructions')
+    expect(saved.body.environment).toEqual(DEFAULT_WORKSPACE)
+
+    expect((await store.sessions.get(saved.body.id, ALICE))?.projectId).toBe(project.id)
+    expect((await call('alice', 'GET', `/agents/projects/${project.id}`)).body).toMatchObject({
+      agent_id: projectAgent.id,
+      environment: WORKSPACE,
+    })
+  })
+
+  it('refuses a session on an archived project', async () => {
+    const { call, store } = await start()
+    const project = await createProject(call)
+    const body = { agent: { model: 'deepseek-chat' }, project_id: project.id }
+
+    const foreign = await call('bob', 'POST', '/agents/sessions', body)
+    expect(foreign.status).toBe(404)
+    expect(foreign.body.error.code).toBe('resource_not_found')
+
+    expect((await call('alice', 'POST', `/agents/projects/${project.id}/archive`)).status).toBe(200)
+    const refused = await call('alice', 'POST', '/agents/sessions', body)
+    expect(refused.status).toBe(409)
+    expect(refused.body.error.code).toBe('project_archived')
+    expect((await store.sessions.list({ owner: ALICE, limit: 20 })).data).toEqual([])
+  })
+
+  it('moves a session into a project and back to unfiled', async () => {
+    const { call, store } = await start()
+    const project = await createProject(call)
+    const created = await call('alice', 'POST', '/agents/sessions', { agent: { model: 'deepseek-chat' } })
+    expect(created.status).toBe(200)
+    expect(created.body.project_id).toBeNull()
+    const path = `/agents/sessions/${created.body.id}`
+
+    const moved = await call('alice', 'POST', path, { project_id: project.id })
+    expect(moved.status).toBe(200)
+    expect(moved.body.project_id).toBe(project.id)
+    expect((await store.sessions.get(created.body.id, ALICE))?.projectId).toBe(project.id)
+
+    const unfiled = await call('alice', 'POST', path, { project_id: null })
+    expect(unfiled.status).toBe(200)
+    expect(unfiled.body.project_id).toBeNull()
+    expect((await store.sessions.get(created.body.id, ALICE))?.projectId).toBeNull()
+
+    const movedWithMerge = await call('alice', 'POST', path, { project_id: project.id, metadata_merge: { moved: 'yes' } })
+    expect(movedWithMerge.status).toBe(200)
+    expect(movedWithMerge.body.project_id).toBe(project.id)
+    expect(movedWithMerge.body.metadata.moved).toBe('yes')
+    expect((await store.sessions.get(created.body.id, ALICE))?.projectId).toBe(project.id)
+    expect((await call('alice', 'POST', path, { project_id: null })).body.project_id).toBeNull()
+
+    const bobSession = await call('bob', 'POST', '/agents/sessions', { agent: { model: 'deepseek-chat' } })
+    const foreign = await call('bob', 'POST', `/agents/sessions/${bobSession.body.id}`, { project_id: project.id })
+    expect(foreign.status).toBe(404)
+    expect(foreign.body.error.code).toBe('resource_not_found')
+    expect((await store.sessions.get(bobSession.body.id, ownerId('bob')))?.projectId).toBeNull()
+
+    await call('alice', 'POST', `/agents/projects/${project.id}/archive`)
+    const archived = await call('alice', 'POST', path, { project_id: project.id })
+    expect(archived.status).toBe(409)
+    expect(archived.body.error.code).toBe('project_archived')
+    expect((await store.sessions.get(created.body.id, ALICE))?.projectId).toBeNull()
+  })
+
+  it('lists sessions by project_id with pagination', async () => {
+    const { call } = await start()
+    const project = await createProject(call)
+    const ids: string[] = []
+    for (let i = 0; i < 3; i += 1) {
+      const created = await call('alice', 'POST', '/agents/sessions', {
+        agent: { model: 'deepseek-chat' },
+        project_id: project.id,
+        metadata: { order: String(i) },
+      })
+      expect(created.status).toBe(200)
+      ids.push(created.body.id)
+    }
+    const unfiled = await call('alice', 'POST', '/agents/sessions', { agent: { model: 'deepseek-chat' } })
+    expect(unfiled.body.project_id).toBeNull()
+
+    const newestFirst = [...ids].reverse()
+    const firstPage = await call('alice', 'GET', `/agents/sessions?project_id=${project.id}&limit=2`)
+    expect(firstPage.status).toBe(200)
+    expect(firstPage.body.data.map((row: { id: string }) => row.id)).toEqual(newestFirst.slice(0, 2))
+    expect(firstPage.body.data.every((row: { project_id: string | null }) => row.project_id === project.id)).toBe(true)
+    expect(firstPage.body.has_more).toBe(true)
+
+    const secondPage = await call('alice', 'GET', `/agents/sessions?project_id=${project.id}&limit=2&after=${firstPage.body.last_id}`)
+    expect(secondPage.status).toBe(200)
+    expect(secondPage.body.data.map((row: { id: string }) => row.id)).toEqual([newestFirst[2]])
+    expect(secondPage.body.has_more).toBe(false)
+
+    const unfiledPage = await call('alice', 'GET', '/agents/sessions?project_id=')
+    expect(unfiledPage.body.data.map((row: { id: string }) => row.id)).toEqual([unfiled.body.id])
+    const foreign = await call('bob', 'GET', `/agents/sessions?project_id=${project.id}`)
+    expect(foreign.body.data).toEqual([])
   })
 })

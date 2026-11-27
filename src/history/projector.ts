@@ -99,6 +99,8 @@ export interface ProjectionBase {
   environment: OAIEnvironmentConfig
   metadata: Record<string, string>
   vaultIds: string[]
+  /** Project this chat belongs to; absent on older projections means unfiled. */
+  projectId?: string | null
 }
 
 /** Session status after an event, and the error text that goes with it. */
@@ -187,6 +189,7 @@ export class WireProjector {
       error: this.error,
       metadata: this.base.metadata,
       vault_ids: this.base.vaultIds,
+      project_id: this.base.projectId ?? null,
       agent: redactAgentSecrets(this.base.agent),
       environment: this.base.environment,
       required_actions: [...this.#required, ...this.#interaction],

@@ -371,6 +371,8 @@ export interface OAIAgentSession {
   error: string | null
   metadata: Record<string, string>
   vault_ids: string[]
+  /** Project this chat belongs to; `null` means unfiled. */
+  project_id: string | null
   agent: OAIAgent
   environment: OAIEnvironmentConfig
   required_actions: OAIRequiredAction[]
@@ -386,6 +388,8 @@ export interface SessionConfig {
   environment: OAIEnvironmentConfig
   metadata: Record<string, string>
   vault_ids: string[]
+  /** Mirrors `SessionIndexRow.projectId` so the live projection can show moves; absent on older rows. */
+  project_id?: string | null
 }
 
 /**
@@ -401,6 +405,8 @@ export interface CreateSessionParams {
   /** Saved agent id from `POST /v1/agents`. */
   agent_id?: string
   environment?: OAIEnvironmentConfig
+  /** Project to attach the new chat to; absent or `null` leaves it unfiled. */
+  project_id?: string | null
   metadata?: Record<string, string> | null
   vault_ids?: string[]
   input?: string | OAIInputMessage[]
@@ -410,7 +416,7 @@ export interface CreateSessionParams {
 /**
  * Body for `POST /v1/agents/sessions/{session_id}`.
  *
- * Only `model`, `reasoning.effort`, `service_tier`, and `metadata` may change.
+ * Only `model`, `reasoning.effort`, `service_tier`, `metadata`, and `project_id` may change.
  * `agent` and `reasoning` merge supplied fields; `metadata` replaces the map;
  * `metadata_merge` (Agentry) merges keys into it.
  */
@@ -421,6 +427,8 @@ export interface UpdateSessionParams {
     service_tier?: ServiceTier | null
   }
   metadata?: Record<string, string> | null
+  /** Move the chat into a Project, or `null` to make it unfiled. Archived and foreign ids are refused. */
+  project_id?: string | null
   /**
    * Agentry extension: change single metadata keys without replacing the map.
    * A `null` value deletes the key. Applied after `metadata` when both are sent.

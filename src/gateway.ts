@@ -85,6 +85,7 @@ import type { SessionHistory } from './history/session-history.ts'
 import { NO_STORED_CONFIG } from './recovery.ts'
 import { findMaskedSecret, MASKED_SECRET, redactAgentSecrets } from './redact.ts'
 import { applySessionUpdate, baseOf, configOf, sessionFromRow } from './session-resource.ts'
+import { resolveProjectDefaults } from './session-project.ts'
 import { writeEvent, writeSSEHeaders } from './sse.ts'
 import type { ArtifactS3Config } from './artifacts.ts'
 import { artifactContentDisposition, artifactContentType, getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath, statWorkspaceArtifact } from './artifacts.ts'
@@ -684,6 +685,20 @@ export class AgentsGateway {
     return project
   }
 
+  /**
+   * A Project a session may attach to: it must belong to the caller and be active.
+   * @param owner - calling principal.
+   * @param id - project id from a session body.
+   * @returns the active Project.
+   * @throws AgentsApiRequestError 404 when missing or foreign, 409 `project_archived` when archived.
+   */
+  private async activeProject(owner: OwnerId, id: string): Promise<OAIProject> {
+    const project = await this.store.projects.get(owner, id)
+    if (project === undefined) throw new AgentsApiRequestError(`Project "${id}" not found`, 404, 'resource_not_found')
+    if (project.status === 'archived') throw new AgentsApiRequestError(`Project "${id}" is archived; chats cannot be created on or moved into it`, 409, 'project_archived')
+    return project
+  }
+
   private async createProject(req: IncomingMessage, res: ServerResponse, owner: OwnerId): Promise<void> {
     const parsed = parseProjectInput(await readBody(req), false)
     if ('error' in parsed) {
@@ -993,7 +1008,7 @@ export class AgentsGateway {
    * @param owner - owner recorded on the session.
    * @param params - session body; `input` and `stream` do not apply.
    * @returns the new session resource, status `idle`.
-   * @throws AgentsApiRequestError 400 for an invalid agent, tool, workspace, or reasoning effort, or 404 for an unknown `agent_id`.
+   * @throws AgentsApiRequestError 400 for an invalid agent, tool, workspace, or reasoning effort, 404 for an unknown `agent_id` or foreign Project, or 409 `project_archived` for an archived one.
    * @throws SessionCreateError when the agent or the index row cannot be created; nothing stays registered.
    * @throws StoreUnavailableError when the store is unavailable.
    */
@@ -1018,6 +1033,9 @@ export class AgentsGateway {
    * @throws StoreUnavailableError when the store is unavailable, after the same cleanup.
    */
   private async provisionSession(owner: OwnerId, body: CreateSessionParams, background?: { queued: boolean }): Promise<ProvisionedSession> {
+    const requestedProject = sessionProjectId(body.project_id)
+    const project = requestedProject === null || requestedProject === undefined ? null : await this.activeProject(owner, requestedProject)
+    body = resolveProjectDefaults(body, project)
     const resolved = await this.resolveSessionAgent(body, owner)
     const toolError = validateMountableTools(resolved.tools)
     if (toolError) throw new AgentsApiRequestError(toolError, 400, 'bad_request')
@@ -1051,6 +1069,7 @@ export class AgentsGateway {
       environment,
       metadata: body.metadata ?? {},
       vault_ids: body.vault_ids ?? [],
+      project_id: body.project_id ?? null,
     }
     const now = new Date()
     const base: ProjectionBase = {
@@ -1060,6 +1079,7 @@ export class AgentsGateway {
       environment: config.environment,
       metadata: config.metadata,
       vaultIds: config.vault_ids,
+      projectId: config.project_id ?? null,
     }
     const projector = new WireProjector(base, false)
     if (background?.queued === true) projector.status = 'in_progress'
@@ -1099,8 +1119,7 @@ export class AgentsGateway {
       ownerId: owner,
       agentId: typeof body.agent_id === 'string' && body.agent_id !== '' ? body.agent_id : null,
       environmentId: null,
-      // New sessions start unfiled; project selection is resolved before this insert when supported.
-      projectId: null,
+      projectId: config.project_id ?? null,
       dshSessionId: sessionId,
       status,
       lastError: null,
@@ -1243,10 +1262,13 @@ export class AgentsGateway {
     const query = listQuery(url)
     const after = query.after === undefined ? undefined : await this.store.sessions.get(query.after, owner)
     const metadata = metadataFilter(url)
+    const projectParam = url.searchParams.get('project_id')
+    const projectId = projectParam === null ? undefined : (projectParam === '' ? null : projectParam)
     const page = await this.store.sessions.list({
       owner,
       limit: query.limit,
       ...(metadata === undefined ? {} : { metadata }),
+      ...(projectId === undefined ? {} : { projectId }),
       ...(after === undefined ? {} : { cursor: encodeSessionCursor(after.createdAt, after.id) }),
     })
     json(res, 200, {
@@ -1296,17 +1318,20 @@ export class AgentsGateway {
   }
 
   /**
-   * Apply a settings update: validate, retarget the live agent when the model
-   * or reasoning effort changed, then write the index, then the live projection.
+   * Apply a settings update: validate (including a Project move), retarget the
+   * live agent when the model or reasoning effort changed, then write the index,
+   * then the live projection.
    * @param row - the session's index row.
    * @param owner - calling principal.
    * @param body - update body.
    * @returns the updated resource, or `undefined` when the row disappeared.
-   * @throws AgentsApiRequestError 400 when `agent.model` would be empty, or 409 `session_setting_not_live` when the live agent cannot take the change; nothing is stored then.
+   * @throws AgentsApiRequestError 400 when `agent.model` would be empty, 404 for a foreign or missing Project, 409 `project_archived` for an archived one, or 409 `session_setting_not_live` when the live agent cannot take the change; nothing is stored then.
    */
   private async changeSettings(row: SessionIndexRow, owner: OwnerId, body: UpdateSessionParams): Promise<OAIAgentSession | undefined> {
+    const projectId = sessionProjectId(body.project_id)
+    if (projectId !== undefined && projectId !== null) await this.activeProject(owner, projectId)
     const current = configOf(row)
-    const next = applySessionUpdate(current, body)
+    const next = applySessionUpdate(current, { ...body, ...(projectId === undefined ? {} : { project_id: projectId }) })
     if (next === undefined) {
       throw new AgentsApiRequestError('Field "agent.model" cannot be null or empty', 400, 'bad_request')
     }
@@ -1315,13 +1340,19 @@ export class AgentsGateway {
       throw new AgentsApiRequestError('Field "metadata_merge" must map keys to strings or null', 400, 'bad_request')
     }
     // A merge-only update skips the whole-row write below, which would overwrite a concurrent merge with this request's stale copy.
-    if (body.agent === undefined && body.metadata === undefined && merge !== undefined) return this.mergeSessionMetadata(row, owner, merge)
+    if (body.agent === undefined && body.metadata === undefined && merge !== undefined) {
+      if (projectId === undefined) return this.mergeSessionMetadata(row, owner, merge)
+      const moved = await this.store.sessions.update(row.id, owner, { projectId })
+      if (!moved) return undefined
+      return this.mergeSessionMetadata(row, owner, merge)
+    }
     if (next.agent.model !== current.agent.model || next.agent.reasoning?.effort !== current.agent.reasoning?.effort) {
       await this.applyLiveModel(row, next.agent, current.agent.model)
     }
     const updated = await this.store.sessions.update(row.id, owner, {
       model: next.agent.model,
       reasoningEffort: next.agent.reasoning?.effort ?? null,
+      ...(projectId === undefined ? {} : { projectId }),
       body: next,
     })
     if (!updated) return undefined
@@ -1339,7 +1370,7 @@ export class AgentsGateway {
   private async mergeSessionMetadata(row: SessionIndexRow, owner: OwnerId, merge: Record<string, string | null>): Promise<OAIAgentSession | undefined> {
     const updated = await this.store.sessions.mergeMetadata(row.id, owner, merge)
     if (updated?.body == null) return undefined
-    return this.sessionRegistry.applyConfig(row.id, updated.body) ?? sessionFromRow(updated)
+    return this.sessionRegistry.applyConfig(row.id, configOf(updated)) ?? sessionFromRow(updated)
   }
 
   /**
@@ -3331,6 +3362,21 @@ function parseProjectInput(raw: Record<string, unknown>, partial: boolean): { va
     value.pinned = raw.pinned
   }
   return { value }
+}
+
+/**
+ * Read the `project_id` of a session create or update body. `null` (and an
+ * empty string, as sent by a query form) means unfiled; `undefined` leaves the
+ * current attachment alone.
+ * @param value - raw body field.
+ * @returns the project id, `null` for unfiled, or `undefined` when omitted.
+ * @throws AgentsApiRequestError 400 when the value is not a string or null.
+ */
+function sessionProjectId(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null || value === '') return null
+  if (typeof value !== 'string') throw new AgentsApiRequestError('Field "project_id" must be a string or null', 400, 'bad_request')
+  return value
 }
 
 /**

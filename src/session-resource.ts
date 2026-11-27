@@ -14,7 +14,8 @@ import type { OAIAgentSession, ReasoningEffort, SessionConfig, UpdateSessionPara
  * @returns the stored setup, or the stand-in for a row without one.
  */
 export function configOf(row: SessionIndexRow): SessionConfig {
-  if (row.body !== null) return row.body
+  // The index column is authoritative for attachment, including rows whose stored setup predates it.
+  if (row.body !== null) return { ...row.body, project_id: row.projectId }
   const created = Math.floor(row.createdAt.getTime() / 1000)
   return {
     agent: {
@@ -32,6 +33,7 @@ export function configOf(row: SessionIndexRow): SessionConfig {
     environment: { type: 'none' },
     metadata: {},
     vault_ids: [],
+    project_id: row.projectId,
   }
 }
 
@@ -48,6 +50,7 @@ export function baseOf(row: SessionIndexRow): ProjectionBase {
     environment: config.environment,
     metadata: config.metadata,
     vaultIds: config.vault_ids,
+    projectId: row.projectId,
   }
 }
 
@@ -69,6 +72,7 @@ export function sessionFromRow(row: SessionIndexRow): OAIAgentSession {
     error: row.lastError,
     metadata: config.metadata,
     vault_ids: config.vault_ids,
+    project_id: row.projectId,
     agent: redactAgentSecrets(config.agent),
     environment: config.environment,
     required_actions: [],
@@ -78,7 +82,7 @@ export function sessionFromRow(row: SessionIndexRow): OAIAgentSession {
 
 /**
  * Apply a session-settings update. Only `model`, `reasoning.effort`,
- * `service_tier`, and `metadata` change; `metadata: null` clears the map.
+ * `service_tier`, `metadata`, and `project_id` change; `metadata: null` clears the map.
  * @param config - current setup.
  * @param params - update body.
  * @returns the new setup, or `undefined` when `agent.model` is null or empty.
@@ -102,9 +106,11 @@ export function applySessionUpdate(config: SessionConfig, params: UpdateSessionP
       agent = { ...agent, updated_at: now }
     }
   }
+  const projectId = params.project_id === undefined ? config.project_id : params.project_id
   return {
     ...config,
     agent,
     metadata: params.metadata === undefined ? config.metadata : (params.metadata ?? {}),
+    ...(projectId === undefined ? {} : { project_id: projectId }),
   }
 }
