@@ -15,3 +15,7 @@ State is in memory only. After an API restart the browsers are gone with it, and
 ## Task folders
 
 `AGENTS_API_GUIDANCE_TEXT` (`src/mount-instructions.ts`) gains a third line: put the files of a multi-file task in one task-named folder, unless the user names a place or an existing project structure applies, and mention the folder in the answer. The workspace stays shared across chats.
+
+## Changes recorder ignores `.browser/`
+
+Playwright MCP writes page snapshots and console logs to `<workspace>/.browser`. The sandbox recorder (`src/history/sandbox-changes.ts`, shadow git with `git add -A`) counted them as changed files. Its shadow `info/exclude` now includes `/.browser/`, written on every snapshot (not only at init) so older shadow repositories are fixed too. Local chats use DSH's own recorder, which is not in this repository and was not changed.
