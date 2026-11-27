@@ -18,11 +18,19 @@
  * The listeners run first (`prepend`): the DSH web remote bridge, mounted
  * earlier, otherwise holds every request while a DSH web tab is connected and
  * the Agents API client never sees it. They claim only requests whose agent is
- * a registered Agents API session and call `next()` for everything else, so
- * the DSH web UI keeps
- * answering its own sessions. A subagent's `agent.session.id` is its child id,
- * which is never registered: its approvals fall through and fail closed.
- * Timed questions (`wait.timed`) need a client claim over RPC; they are not
+ * a registered Agents API session, or a subagent (header `origin: subagent`)
+ * of one, and call `next()` for everything else, so the DSH web UI keeps
+ * answering its own sessions. A subagent's request surfaces on its parent
+ * session as an `approval` action marked with `subagent_id`, and the parent's
+ * `approval_response` answers it; it stays pending until answered or until the
+ * child's own turn ends (the parent's turn ending does not cancel it, because
+ * a child can outlive the parent's turn).
+ *
+ * Questions from a subagent never reach this listener: `UserQuestionService.ask`
+ * refuses any agent that is not a live root (`DELEGATED_CALLER`) before the
+ * waterfall runs, timed (`askTimed`) or not, and tells the child to put the
+ * question in its final result. Timed questions of a root session
+ * (`wait.timed`) need a client claim over RPC (`attachWait`); they are not
  * claimed. Pending requests live in memory only: after a restart DSH repair
  * closes the turn, so no approval is pending and an old id is not found.
  */
@@ -68,14 +76,39 @@ export interface ApprovalBridge {
   cancelAll(sessionId: string): void
 }
 
+/** The Agents API session a request is shown on. */
+export interface ClaimedSession {
+  /** Agents API session id. */
+  sessionId: string
+  /** Set when the request came from this subagent (Host child session id) of the session. */
+  subagentId?: string
+}
+
+/**
+ * Which Agents API session owns an agent: its own session when registered,
+ * else the registered parent of a subagent.
+ * @param agent - agent behind a DSH request.
+ * @param isRegistered - whether a session id is a live Agents API session.
+ * @returns the claim, or `undefined` to delegate the request.
+ */
+export function claimAgent(agent: Pick<Agent, 'session'>, isRegistered: (sessionId: string) => boolean): ClaimedSession | undefined {
+  const session = agent.session
+  if (isRegistered(session.id)) return { sessionId: session.id }
+  const parent = session.header?.parentSession
+  if (session.header?.origin === 'subagent' && parent !== undefined && isRegistered(parent)) {
+    return { sessionId: parent, subagentId: session.id }
+  }
+  return undefined
+}
+
 /** Collaborators supplied by the plugin. */
 export interface ApprovalBridgeDeps {
   /**
    * Which Agents API session owns an agent.
    * @param agent - agent behind a DSH request.
-   * @returns the Agents API session id, or `undefined` to delegate the request.
+   * @returns the claim, or `undefined` to delegate the request.
    */
-  claims(agent: Agent): string | undefined
+  claims(agent: Agent): ClaimedSession | undefined
   /**
    * Called after the pending set of a session changed.
    * @param sessionId - Agents API session id.
@@ -84,7 +117,8 @@ export interface ApprovalBridgeDeps {
   onChange(sessionId: string, actions: OAIRequiredAction[]): void
 }
 
-type Entry = { action: ApprovalAction; detach: () => void } & (
+/** `source` is the session that asked: the claimed session itself, or its subagent. */
+type Entry = { action: ApprovalAction; source: string; detach: () => void } & (
   | { kind: 'approval'; settle: (outcome: ApprovalOutcome) => void }
   | { kind: 'question'; questions: readonly AskUserQuestionItem[]; settle: (answer: AskUserQuestionAnswer) => void; reject: (error: Error) => void }
 )
@@ -150,20 +184,35 @@ export function installApprovalBridge(ctx: Context, deps: ApprovalBridgeDeps): A
     notify(sessionId)
   }
 
-  const takeAsked = (sessionId: string, req: ApprovalRequestEvent): string => {
-    const queue = asked.get(sessionId) ?? []
+  /** Cancel every pending request that `source` asked, whichever session shows it. */
+  const cancelSource = (source: string): void => {
+    for (const [sessionId, entries] of [...pending]) {
+      const ids = [...entries.values()].filter(entry => entry.source === source).map(entry => entry.action.id)
+      for (const id of ids) {
+        const entry = remove(sessionId, id)
+        if (entry !== undefined) cancel(entry)
+      }
+      if (ids.length > 0) notify(sessionId)
+    }
+  }
+
+  const takeAsked = (source: string, req: ApprovalRequestEvent): string => {
+    const queue = asked.get(source) ?? []
     const index = queue.findIndex(row => row.toolName === req.toolName && row.callId === req.callId)
     if (index === -1) return `appr_${randomUUID().replaceAll('-', '')}`
     return queue.splice(index, 1)[0]!.id
   }
 
   ctx.effect(() => ctx.on('approval/request', (req: ApprovalRequestEvent, next: () => Promise<ApprovalOutcome>) => {
-    const sessionId = deps.claims(req.agent)
-    if (sessionId === undefined || req.signal?.aborted === true) return next()
-    const id = takeAsked(sessionId, req)
+    const claim = deps.claims(req.agent)
+    if (claim === undefined || req.signal?.aborted === true) return next()
+    const { sessionId, subagentId } = claim
+    const source = req.agent.session.id
+    const id = takeAsked(source, req)
     return new Promise<ApprovalOutcome>((resolve) => {
       add(sessionId, {
         kind: 'approval',
+        source,
         detach: () => undefined,
         settle: resolve,
         action: {
@@ -174,18 +223,21 @@ export function installApprovalBridge(ctx: Context, deps: ApprovalBridgeDeps): A
           options: ['approve', 'deny'],
           tool_name: req.toolName,
           ...(req.callId === undefined ? {} : { call_id: req.callId }),
+          ...(subagentId === undefined ? {} : { subagent_id: subagentId }),
         },
       }, req.signal)
     })
   }, { prepend: true }), 'agents-api: approval answerer')
 
   ctx.effect(() => ctx.on('user-questions/request', (req: AskUserQuestionRequestEvent, next: () => Promise<AskUserQuestionAnswer>) => {
-    const sessionId = req.agent === undefined ? undefined : deps.claims(req.agent)
-    if (sessionId === undefined || req.wait?.timed === true || req.signal?.aborted === true) return next()
+    const claim = req.agent === undefined ? undefined : deps.claims(req.agent)
+    if (claim === undefined || req.wait?.timed === true || req.signal?.aborted === true) return next()
+    const { sessionId, subagentId } = claim
     const only = req.questions.length === 1 ? req.questions[0] : undefined
     return new Promise<AskUserQuestionAnswer>((resolve, reject) => {
       add(sessionId, {
         kind: 'question',
+        source: req.agent!.session.id,
         questions: req.questions,
         detach: () => undefined,
         settle: resolve,
@@ -197,6 +249,7 @@ export function installApprovalBridge(ctx: Context, deps: ApprovalBridgeDeps): A
           prompt: req.questions.map(item => item.question).join('\n'),
           options: only?.options?.map(option => option.label) ?? [],
           ...(only === undefined ? { questions: req.questions } : {}),
+          ...(subagentId === undefined ? {} : { subagent_id: subagentId }),
         },
       }, req.signal)
     })
@@ -213,14 +266,16 @@ export function installApprovalBridge(ctx: Context, deps: ApprovalBridgeDeps): A
       const index = queue?.findIndex(row => row.id === event.data.id) ?? -1
       if (index !== -1) queue!.splice(index, 1)
     } else if (event.type === 'turn/end') {
-      // Approvals are turn-enclosed: whatever is still pending belongs to a finished turn.
-      bridge.cancelAll(session.id)
+      // Approvals are turn-enclosed: whatever this session asked belongs to a finished turn.
+      // A subagent's requests shown on this session are its own turn's, so they stay.
+      cancelSource(session.id)
     }
   }), 'agents-api: approval ids')
 
   ctx.effect(() => ctx.on('session/disposed', (session: Session) => {
     asked.delete(session.id)
     bridge.cancelAll(session.id)
+    cancelSource(session.id)
   }), 'agents-api: approval cleanup')
 
   const bridge: ApprovalBridge = {

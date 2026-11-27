@@ -12,7 +12,7 @@
  * - Items: `GET /v1/agents/sessions/{session_id}/items`
  * - Turns: `GET /v1/agents/sessions/{session_id}/turns`, `GET /v1/agents/sessions/{session_id}/turns/{turn_id}`
  * - Environments, artifacts, and subagents under the same prefix
- * - `GET /health` on the webserver, outside `/v1`
+ * - `GET /health` on the webserver, outside `/v1`: 200 once the store is open, 503 before or after a failed start
  *
  * Reference: https://developers.openai.com/api/docs/guides/agents-api
  *
@@ -22,6 +22,7 @@
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { loadBuiltins, type BuiltinSkill } from './skills/resolve.ts'
+import { ComposioRelay, RELAY_ROUTE_PATH, relayEnabled } from './composio-relay.ts'
 import { DEFAULT_APPROVAL_VERBS } from './mount-composio.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Context } from '@deepseek-ai/cordis'
@@ -40,8 +41,8 @@ import { firstThen, type Authenticator, type OwnerId } from './auth/authenticato
 import { API_KEY_HASH_PATTERN, createApiKeyAuthenticator, type ApiKeyEntry } from './auth/api-keys.ts'
 import { createKeycloakAuthenticator } from './auth/keycloak.ts'
 import { createStaticKeyAuthenticator } from './auth/static-key.ts'
-import { installApprovalBridge } from './approvals/approval-bridge.ts'
-import { bridgeChildSessionEvent } from './bridge.ts'
+import { claimAgent, installApprovalBridge } from './approvals/approval-bridge.ts'
+import { bridgeChildSessionEvent, mintEventId } from './bridge.ts'
 import { createLocalProvider, directorySegment } from './environment/local.ts'
 import { createAgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
 import { agentryPresetRows, createSandboxPresets, setSandboxCredentials, setSandboxPrepare, type PresetRegistryLike, type SandboxPresets } from './sandbox/presets.ts'
@@ -52,6 +53,9 @@ import { DEFAULT_ALLOWED_MEDIA_TYPES, stagingDirectory, validateUploads, type Up
 import { createFilesystemFileStore, type FileStore } from './files/file-store.ts'
 import { startSweeper } from './files/sweeper.ts'
 import { AgentsGateway } from './gateway.ts'
+import type { OfficeToPdfLike } from './render/office-api.ts'
+import type { WorkspaceChangesLike } from './history/turn-changes.ts'
+import { watchJobs, type JobRegistryLike } from './jobs.ts'
 import { errorMessage } from './http.ts'
 import { createSessionHistory } from './history/session-history.ts'
 import { recoverSessions, recoveryUnavailable } from './recovery.ts'
@@ -193,6 +197,13 @@ export interface Config extends RuntimeConfigInput {
     /** Extra tool slugs that always ask first (default none). */
     approvalSlugs?: string[]
   }
+  /** The web browser (Playwright MCP). It runs only inside Agentry Sandbox chats; there is no host browser. */
+  browser?: {
+    /** What agents whose `browser` field is absent or null get: `auto` (when the chat's sandbox has the browser), `on` or `off`; `true`/`false` mean on/off (default `auto`). */
+    default?: 'auto' | 'on' | 'off' | boolean
+    /** Most frames a second the live browser view (`/agents/sessions/{id}/browser/live`) sends, 1 to 15 (default 10). */
+    liveFps?: number
+  }
   /** Slash-command catalog served by `GET /agents/commands`. */
   commands?: {
     /** Seconds a catalog is cached in memory; 0 disables caching (default 60). Finite and non-negative. */
@@ -219,8 +230,9 @@ export interface Config extends RuntimeConfigInput {
 }
 
 /** `Config` after validation: `auth`, `prefix`, `database`, and `workspaces` are always present; `codebox` and `dataDir` never are. */
-export type ResolvedConfig = Omit<Config, 'auth' | 'prefix' | 'database' | 'codebox' | 'dataDir' | 'skills' | 'commands' | 'uploads' | 'composio'> & {
+export type ResolvedConfig = Omit<Config, 'auth' | 'prefix' | 'database' | 'codebox' | 'dataDir' | 'skills' | 'commands' | 'uploads' | 'composio' | 'browser'> & {
   auth: ResolvedAuthConfig
+  browser: { default: 'auto' | 'on' | 'off' | boolean; liveFps: number }
   skills: { cacheTtlSeconds: number; dir: string; builtinDir: string; workspaceSkills: boolean }
   commands: { cacheTtlSeconds: number; allow: string[] }
   composio: { serverLabel: string; approvalVerbs: string[]; approvalSlugs: string[] }
@@ -278,6 +290,10 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
     cacheTtlSeconds: z.number().default(60),
     allow: z.array(z.string()).default([...DEFAULT_COMMANDS_ALLOW]),
   }).default({ cacheTtlSeconds: 60, allow: [...DEFAULT_COMMANDS_ALLOW] }),
+  browser: z.object({
+    default: z.union([z.boolean(), z.const('auto'), z.const('on'), z.const('off')]).default('auto'),
+    liveFps: z.number().default(10),
+  }).default({ default: 'auto', liveFps: 10 }),
   composio: z.object({
     serverLabel: z.string().default('composio'),
     approvalVerbs: z.array(z.string()).default([...DEFAULT_APPROVAL_VERBS]),
@@ -423,7 +439,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   const staging = stagingDir === undefined ? undefined : createFilesystemFileStore(stagingDir)
   const sessionRegistry = new SessionRegistry()
   const approvals = installApprovalBridge(ctx, {
-    claims: agent => sessionRegistry.get(agent.session.id)?.id,
+    claims: agent => claimAgent(agent, id => sessionRegistry.get(id) !== undefined),
     onChange: (sessionId, actions) => gateway.setInteractionActions(sessionId, actions),
   })
   let builtinSkills: readonly BuiltinSkill[] = []
@@ -454,6 +470,14 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     })
     ctx.effect(() => () => { void sandboxPresets?.dispose() })
   }
+  const relay = relayEnabled()
+    ? new ComposioRelay({
+      serverLabel: config.composio.serverLabel,
+      origin: () => ctx.webServer.getOrigin(),
+      cacheDir: process.env['AGENTRY_COMPOSIO_RELAY_CACHE_DIR'] ?? `${process.env['HOME'] ?? ''}/.dsh/agentry-composio-relay`,
+      warn: message => ctx.logger.warn(message),
+    })
+    : undefined
   const gateway = new AgentsGateway(ctx, createAuthenticator(config.auth, message => ctx.logger.warn(message)), prefix, undefined, sessionRegistry, {
     sandboxes,
     ...(sandboxPresets === undefined ? {} : { sandboxPresets }),
@@ -470,10 +494,21 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     builtinSkills: () => builtinSkills,
     skillsRoot: config.skills.dir,
     composio: config.composio,
+    ...(relay === undefined ? {} : { composioRelay: relay }),
+    browserDefault: config.browser.default,
+    browserLiveFps: config.browser.liveFps,
     skillsHiddenSources: DEVELOPER_SKILL_SOURCES.filter(source => !(config.skills.workspaceSkills && source.startsWith('project-'))),
     ...(runtime.artifacts === undefined ? {} : { artifacts: runtime.artifacts }),
     ...(staging === undefined ? {} : { files: { staging, limits: config.uploads } }),
     attachments: () => ctx.get('attachments'),
+    officeToPdf: () => ctx.get('officeToPdf') as OfficeToPdfLike | undefined,
+    workspaceChanges: () => ctx.get('workspaceChanges') as WorkspaceChangesLike | undefined,
+    jobs: () => ctx.get('jobs') as JobRegistryLike | undefined,
+  })
+
+  // Job start, stop and finish reach the owning session's stream as ephemeral events (src/jobs.ts).
+  ctx.inject(['jobs'], (jobsCtx) => {
+    jobsCtx.effect(() => watchJobs(jobsCtx.get('jobs') as JobRegistryLike, (sessionId, event) => { sessionRegistry.emitEphemeral(sessionId, event) }, mintEventId), 'agents-api: job events')
   })
 
   if (staging !== undefined) ctx.effect(() => verifyStaging(staging, stagingDir!), 'agents-api: upload staging')
@@ -498,11 +533,34 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     const parent = session.header?.parentSession
     if (session.header?.origin === 'subagent' && parent && sessionRegistry.get(parent)) {
-      bridgeChildSessionEvent(parent, session.id, event, sessionRegistry)
+      bridgeChildSessionEvent(parent, session.id, event, sessionRegistry, session.header.createdAt)
       return
     }
     gateway.applySessionEvent(session.id, event)
   })
+  // A sandbox session's tools wait for its turn-start snapshot (src/history/sandbox-changes.ts), as DSH's recorder does for local ones.
+  ctx.on('tools/pre-execute', (async (exec: { agent?: { session?: { id?: unknown } } }, next: () => Promise<unknown>) => {
+    const id = exec.agent?.session?.id
+    if (id !== undefined) await gateway.changesSettled(String(id))
+    return next()
+  }) as never)
+  // While the user has control of a chat's browser (live view take-over), its browser tools wait; after a
+  // hand-back the agent is told to look at the page again (src/sandbox/browser-control.ts).
+  ctx.on('tools/pre-execute', (async (exec: { name: string; signal?: AbortSignal; agent?: { session?: { id?: unknown } } }, next: () => Promise<unknown>) => {
+    const id = exec.agent?.session?.id
+    if (id === undefined || !exec.name.startsWith('mcp__browser__')) return next()
+    const decision = await gateway.browserToolGate(String(id), exec.name, exec.signal)
+    return decision.kind === 'allow' ? next() : decision
+  }) as never)
+  ctx.on('tools/post-execute', (async (exec: { name: string; agent?: { session?: { id?: unknown } } }, result: { isError?: boolean; content?: ReadonlyArray<{ type?: string }> }, next: () => Promise<{ kind: string; content?: unknown }>) => {
+    const decision = await next()
+    const id = exec.agent?.session?.id
+    if (id === undefined || decision.kind !== 'accept' || !exec.name.startsWith('mcp__browser__')) return decision
+    const note = gateway.browserLookNote(String(id), exec.name, result.isError === true)
+    if (note === undefined) return decision
+    const content = Array.isArray(decision.content) ? decision.content as unknown[] : [...(result.content ?? [])]
+    return { ...decision, content: [{ type: 'text', text: note }, ...content] }
+  }) as never)
   ctx.on('commands/change', () => {
     gateway.invalidateCommands()
   })
@@ -518,13 +576,25 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
       kind: 'exact',
       path: '/health',
       handler: (_req: IncomingMessage, res: ServerResponse) => {
-        res.statusCode = 200
+        const { status, body } = healthResponse(gateway.storeStatus())
+        res.statusCode = status
         res.setHeader('Content-Type', 'application/json')
-        res.end(JSON.stringify({ ok: true, service: 'agents-api' }))
+        res.end(JSON.stringify(body))
       },
     }),
     'agents-api: /health',
   )
+
+  if (relay !== undefined) {
+    ctx.effect(
+      () => ctx.webServer.register({
+        kind: 'prefix',
+        path: RELAY_ROUTE_PATH,
+        handler: (req: IncomingMessage, res: ServerResponse) => relay.handle(req, res),
+      }),
+      'agents-api: composio relay',
+    )
+  }
 
   ctx.effect(
     () => ctx.webServer.register({
@@ -534,6 +604,17 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     }),
     `agents-api: ${prefix}`,
   )
+}
+
+/**
+ * The `/health` answer: 200 once the store is attached (so `/v1` can serve), 503 while it
+ * opens or after it failed to start. Container health checks and launchers wait on it.
+ * @param store - the gateway's store state.
+ * @returns status code and JSON body.
+ */
+export function healthResponse(store: ReturnType<AgentsGateway['storeStatus']>): { status: number; body: Record<string, unknown> } {
+  if (store.state === 'ready') return { status: 200, body: { ok: true, service: 'agents-api' } }
+  return { status: 503, body: { ok: false, service: 'agents-api', store: store.state, ...(store.state === 'failed' ? { error: store.error } : {}) } }
 }
 
 /**

@@ -18,6 +18,7 @@ let root: string
 beforeEach(async () => {
   svc = await startTestService()
   root = await mkdtemp(join(tmpdir(), 'agentry-sbx-'))
+  shared = await mkdtemp(join(tmpdir(), 'agentry-shared-ws-'))
   files = new Map()
   // A tiny envd: /files read and write, and filesystem.ListDir.
   envd = http.createServer((req, res) => {
@@ -73,7 +74,8 @@ afterEach(async () => {
   await new Promise<void>((r) => envd.close(() => r()))
 })
 
-const provider = () => createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root })
+let shared: string
+const provider = () => createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root, sharedWorkspace: shared })
 const record = (handle: Record<string, string>): EnvironmentRecord => ({ id: 'env_1', object: 'environment', status: 'connected', provider: 'sandbox', provider_metadata: handle, created_at: 1 }) as EnvironmentRecord
 
 describe('sandbox environment provider', () => {
@@ -103,18 +105,27 @@ describe('sandbox environment provider', () => {
     expect(await p.describe(r)).toMatchObject({ state: 'gone' })
   })
 
-  it('creates a sandbox mounted at a host placeholder path, reports status and destroys it', async () => {
+  it('creates a sandbox whose disk mounts at /workspace (host placeholder kept), reports status and destroys it', async () => {
     const p = provider()
     const created = await p.create(OWNER, 'env_1', { template: { image: 'python:3.13', packages: { system: ['jq'], python: ['rich'] }, setup_commands: [{ command: 'echo hi' }], network: { access: 'disabled' } } })
     expect(created.status).toBe('connected')
-    expect(created.workspacePath).toBe(join(root, 'owner-a', 'sandbox-env_1'))
-    expect((await stat(created.workspacePath)).isDirectory()).toBe(true)
-    expect(created.handle).toMatchObject({ workspace_directory: created.workspacePath, sandbox_id: expect.stringMatching(/^sbx_/), image: 'python:3.13' })
+    const placeholder = join(root, 'owner-a', 'sandbox-env_1')
+    expect(created.workspacePath).toBe(shared)
+    expect((await stat(placeholder)).isDirectory()).toBe(true)
+    expect(created.handle).toMatchObject({ workspace_directory: shared, host_placeholder: placeholder, sandbox_id: expect.stringMatching(/^sbx_/), image: 'python:3.13' })
     const sbx = await svc.service.get('owner-a', created.handle!.sandbox_id!)
-    expect(sbx.template).toMatchObject({ image: 'python:3.13', packages: ['jq'], network: false, workspacePath: created.workspacePath, setupCommands: ['echo hi', "python3 -m pip install --user --break-system-packages 'rich' || python3 -m pip install --user 'rich'"] })
+    expect(sbx.template).toMatchObject({ image: 'python:3.13', packages: ['jq'], network: false, workspacePath: shared, setupCommands: ['echo hi', "python3 -m pip install --user --break-system-packages 'rich' || python3 -m pip install --user 'rich'"] })
     expect(await p.status(record(created.handle!))).toBe('connected')
     await p.destroy(record(created.handle!))
     await expect(svc.service.get('owner-a', created.handle!.sandbox_id!)).rejects.toThrow()
+    await expect(stat(placeholder)).rejects.toThrow()
+  })
+
+  it('mounts at /workspace even when the API host has no such folder (it is checked inside the sandbox)', async () => {
+    const p = createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root, sharedWorkspace: join(root, 'no-such-folder') })
+    const created = await p.create(OWNER, 'env_2', {})
+    expect(created.workspacePath).toBe(join(root, 'no-such-folder'))
+    expect(created.handle).toMatchObject({ workspace_directory: join(root, 'no-such-folder'), host_placeholder: join(root, 'owner-a', 'sandbox-env_2') })
   })
 
   it('reads, writes and lists workspace files through the sandbox', async () => {
@@ -172,5 +183,51 @@ describe('sandbox environment provider', () => {
     const p = createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root })
     expect((await p.create(OWNER, 'env_a', {})).status).toBe('connected')
     expect(await p.create(OWNER, 'env_b', {})).toMatchObject({ status: 'failed', error: expect.stringContaining('limit 1') })
+  })
+})
+
+describe('places', () => {
+  const backend = (over: Record<string, unknown>) => ({
+    id: 'local', name: 'This computer', default: true, kind: 'docker', available: true, version: '1',
+    capabilities: { persistent: true, reset: true, keepFilesOnReset: true, isolated: true, network: true, resources: true, gpu: false, envdBuiltIn: false, runsAsRoot: true, templateFields: [] },
+    default_image: { name: 'img:1' }, ...over,
+  })
+  const stub = async (rows: unknown[]) => {
+    const server = http.createServer((_req, res) => void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ object: 'list', data: rows })))
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, close: () => server.close() }
+  }
+
+  it('providerRows lists every Agentry Sandbox place, default first', async () => {
+    const { providerRows } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const s = await stub([backend({}), backend({ id: 'gpu1', name: 'GPU box', kind: 'docker-ssh', default: false, gpus: { count: 2, models: ['A100'] }, capabilities: { ...backend({}).capabilities, gpu: true } }), backend({ id: 'e2b1', name: 'E2B', kind: 'e2b', default: false, capabilities: { ...backend({}).capabilities, keepFilesOnReset: false } }), backend({ id: 'down', name: 'Down', default: false, available: false, reason: 'ssh refused' })])
+    try {
+      const provider = createAgentrySandboxProvider({ url: s.url, key: 'k', workspacesRoot: root })
+      const rows = await providerRows({ list: () => [{ name: 'sandbox', capabilities: {}, default: false }], get: () => provider })
+      expect(rows[0]).toMatchObject({ name: 'sandbox', available: true, default_image: { name: 'img:1' } })
+      const places = (rows[0] as unknown as { places: Record<string, unknown>[] }).places
+      expect(places.map((p) => p['id'])).toEqual(['local', 'gpu1', 'e2b1', 'down'])
+      expect(places[0]).toMatchObject({ id: 'local', default: true, available: true, capabilities: { reset: true, keepFilesOnReset: true, isolated: true, gpu: false } })
+      expect(places[2]).toMatchObject({ capabilities: { keepFilesOnReset: false } })
+      expect(places[1]).toMatchObject({ gpus: { count: 2, models: ['A100'] }, capabilities: { gpu: true } })
+      expect(places[3]).toMatchObject({ available: false, reason: 'ssh refused' })
+    } finally { s.close() }
+  })
+
+  it('availability is true when any place is available', async () => {
+    const s = await stub([backend({ available: false, reason: 'docker is down' }), backend({ id: 'b', default: false })])
+    try {
+      expect(await createAgentrySandboxProvider({ url: s.url, key: 'k', workspacesRoot: root }).availability()).toMatchObject({ available: true })
+    } finally { s.close() }
+    const none = await stub([backend({ available: false, reason: 'docker is down' })])
+    try {
+      expect(await createAgentrySandboxProvider({ url: none.url, key: 'k', workspacesRoot: root }).availability()).toMatchObject({ available: false, reason: 'docker is down' })
+    } finally { none.close() }
+  })
+
+  it('toServiceTemplate passes place and gpus', async () => {
+    const { toServiceTemplate } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    expect(toServiceTemplate({ place: 'gpu1', gpus: 'all' })).toMatchObject({ place: 'gpu1', gpus: 'all' })
+    expect(toServiceTemplate({ gpus: 2 }).gpus).toBe(2)
   })
 })

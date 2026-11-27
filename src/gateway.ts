@@ -2,13 +2,14 @@
  * HTTP dispatcher for the OpenAI Agents API.
  *
  * Route order is load-bearing: `/agents/sessions`, `/agents/tools`, `/agents/skills`,
- * `/agents/commands`, `/agents/schedules`, and `/agents/files` are matched before
- * `/agents/:agent_id` so those literal segments are never captured as an agent id.
+ * `/agents/commands`, `/agents/schedules`, `/agents/files`, and `/agents/projects`
+ * are matched before `/agents/:agent_id` so those literal segments are never
+ * captured as an agent id.
  */
 
-import { mkdir, stat } from 'node:fs/promises'
+import { mkdir, readFile, stat } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
@@ -29,6 +30,7 @@ import {
   json,
   listQuery,
   matchRoute,
+  metadataFilter,
   normalizePath,
   notFound,
   paginate,
@@ -41,11 +43,19 @@ import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
 import { mountAgentInstructions } from './mount-instructions.ts'
 import { AGENTRY_PRESET_ID } from './preset.ts'
 import { copyIntoSandboxUploads, MAX_ARTIFACT_BYTES, providerRows, type AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
-import { sandboxStartErrorIn, type SandboxPresets } from './sandbox/presets.ts'
-import { SandboxApiError } from '@agentry/sandbox/client'
+import { sandboxCredentials, sandboxStartErrorIn, type SandboxPresets } from './sandbox/presets.ts'
+import { runInEnvd, SandboxApiError, type EnvdClient } from '@agentry/sandbox/client'
 import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
 import { sweepStaged, type InstallDeps } from './skills/install.ts'
 import { SkillInstallApi } from './skills/routes.ts'
+import { builtinTemplate, BUILTIN_TEMPLATES, isBuiltinTemplateId } from './environment/builtin-templates.ts'
+import { TerminalError, TerminalHub } from './sandbox/terminals.ts'
+import { BrowserLiveError, BrowserLiveHub, recordingsDirOf, startRelay, type LiveEvent, type RelayProcess } from './sandbox/browser-live.ts'
+import { BrowserRecorder } from './sandbox/browser-recording.ts'
+import { mountBrowserRecordingTools } from './mount-browser-recording.ts'
+import { parseInputEvents } from './sandbox/browser-input.ts'
+import { browserLookNote, browserToolGate, type BrowserGateDecision } from './sandbox/browser-control.ts'
+import { forgetWorkspaceAlias, workspaceOf } from './sandbox/workspace-alias.ts'
 import { DeliverablesCache } from './history/deliverables-cache.ts'
 import type { DeliverableEntry } from './history/deliverables.ts'
 import { mountSkillTools } from './skills/tools.ts'
@@ -55,38 +65,49 @@ import type { GithubDeps } from './skills/github.ts'
 import { resolveAgentSkills, validateSkillSelection, type BuiltinSkill } from './skills/resolve.ts'
 import { mountAgentTools } from './mount-agent-tools.ts'
 import { mountSandboxTools } from './mount-sandbox-tools.ts'
+import { mountComposioAppTools } from './mount-composio-app-tools.ts'
 import { mountScheduleGuidance } from './mount-schedule-guidance.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
+import type { ComposioRelay } from './composio-relay.ts'
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
+import { BRIDGE_HOST_CWD, browserPorts, BROWSER_PROBE_COMMAND, browserMcpTool, browserMode, normalizeBrowserDefault, type BrowserMode, mountBrowserGuidance, validateBrowserField, type BrowserSandbox } from './mount-browser.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
 import { slashCommandItem } from './items.ts'
 import { COMMAND_NAME, CommandsApi, commandNotFound, type CommandService, type CommandTarget } from './commands.ts'
 import { withFileIds } from './files/item-parts.ts'
+import { toolImageSource } from './files/tool-images.ts'
 import { openAttached, type AttachmentsPort } from './files/attached.ts'
 import { AttachmentIngest, type AttachedFiles } from './files/ingest.ts'
 import { FilesApi, uploadedFileSource, type FilesRuntime } from './files/api.ts'
+import type { FileSource, ServedFile } from './files/content.ts'
 import { SkillsApi, type SkillTarget } from './skills.ts'
-import { SessionRegistry } from './session-registry.ts'
-import { WireProjector, type ProjectionBase } from './history/projector.ts'
+import { SessionRegistry, subagentResource } from './session-registry.ts'
+import { compareFramePositions, framePosition, frameSseId, parseFrameId, WireProjector, type FramePosition, type ProjectionBase } from './history/projector.ts'
 import type { SessionHistory } from './history/session-history.ts'
 import { NO_STORED_CONFIG } from './recovery.ts'
 import { findMaskedSecret, MASKED_SECRET, redactAgentSecrets } from './redact.ts'
 import { applySessionUpdate, baseOf, configOf, sessionFromRow } from './session-resource.ts'
+import { resolveProjectDefaults } from './session-project.ts'
 import { writeEvent, writeSSEHeaders } from './sse.ts'
 import type { ArtifactS3Config } from './artifacts.ts'
-import { artifactContentDisposition, artifactContentType, getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath } from './artifacts.ts'
+import { artifactContentDisposition, artifactContentType, getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath, statWorkspaceArtifact } from './artifacts.ts'
+import { ChangesApi } from './history/changes-api.ts'
+import { SandboxChanges, type SandboxTarget } from './history/sandbox-changes.ts'
+import type { WorkspaceChangesLike } from './history/turn-changes.ts'
+import { JobsApi, type JobRegistryLike } from './jobs.ts'
+import { renderOfficePdf, WorkspaceUnavailableError, type OfficeToPdfLike, type SessionFile } from './render/office-api.ts'
 import { directorySegment } from './environment/local.ts'
-import type { CreateEnvironmentInput } from './environment/provider.ts'
+import type { CreateEnvironmentInput, EnvironmentCreateResult } from './environment/provider.ts'
 import { readRuntimeInfo } from './environment/runtime-info.ts'
 import { toSdkEnvironment, type SdkEnvironment } from './environment/environment-compat.ts'
 import { absoluteFilePath, parseFileListQuery, parseFileWrite, selectFilePage, type SdkEnvironmentFile } from './environment/file-compat.ts'
 import { normalizeTemplateConfig, parseTemplateInput, toSdkTemplate, unsupportedFields } from './environment/template-compat.ts'
 import type { SandboxProvider } from './sandbox/contract.ts'
 import type { SandboxRegistry } from './sandbox/registry.ts'
-import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, EnvironmentTemplateConfig, OAISandboxEnvironment } from './environment-types.ts'
+import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplate, EnvironmentTemplateConfig, OAISandboxEnvironment, TemplateFileInput } from './environment-types.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { SubagentState } from './session-registry.ts'
+import type { LoggedSubagent } from './history/session-history.ts'
 import {
   StoreUnavailableError,
   encodeSessionCursor,
@@ -104,6 +125,7 @@ import type {
   OAIHostToolsConfig,
   OAIInputEvent,
   OAIOpenAIHostedEnvironment,
+  OAIProject,
   OAIRequiredAction,
   OAISessionEvent,
   OAIToolResultInputEvent,
@@ -160,6 +182,18 @@ export interface GatewayOptions {
   skillsRoot?: string
   /** Composio grant enforcement and send approvals (`composio` config). */
   composio?: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
+  /** Relay that Composio MCP tools are pointed at so agent setup does not wait for the connector (`composio-relay.ts`). */
+  composioRelay?: ComposioRelay
+  /** What agents without a `browser` value do (`browser.default`: auto, on or off; `true`/`false` mean on/off; default auto). */
+  browserDefault?: BrowserMode | boolean
+  /** Whether the sandbox behind `envd` has the browser (default: runs `command -v playwright-mcp` as `agent`). */
+  sandboxHasBrowser?: (envd: EnvdClient) => Promise<boolean>
+  /** The sandbox stdio bridge program (tests); default `lib/sandbox-stdio-bridge.js`. */
+  browserBridgePath?: string
+  /** Most frames a second the live browser view sends (`browser.liveFps`, default 10, at most 15). */
+  browserLiveFps?: number
+  /** Starts the live-view relay in a sandbox (tests); default `startRelay`. */
+  startBrowserRelay?: (envd: EnvdClient, port: number, intervalMs: number, recordingsDir?: string) => RelayProcess
   /** GitHub endpoints for skill imports (tests point it at a fake). */
   skillsGithub?: GithubDeps
   /** Host skill discovery sources hidden from the catalog (developer folders). */
@@ -169,6 +203,12 @@ export interface GatewayOptions {
   files?: FilesRuntime
   /** The DSH attachment service when the profile provides one, read at call time. */
   attachments?: () => AttachmentsPort | undefined
+  /** DSH's Office-to-PDF service when the profile provides one, read at call time (absent: renders answer 503). */
+  officeToPdf?: () => OfficeToPdfLike | undefined
+  /** DSH's workspace-changes service when the profile provides one, read at call time (absent: local chats list no changes). */
+  workspaceChanges?: () => WorkspaceChangesLike | undefined
+  /** DSH's background job registry (`ctx.jobs`), read at call time. */
+  jobs?: () => JobRegistryLike | undefined
 }
 
 /** A session created by `provisionSession`: projector registered, agent live, index row written, no turn started. */
@@ -181,6 +221,56 @@ export interface ProvisionedSession {
   base: ProjectionBase
   /** Resolved session agent. */
   resolved: OAIAgent
+  /**
+   * Background create only: start building the agent. Until it is live, requests
+   * that need it wait; `first` is the queued first message, started once setup
+   * ends (or dropped when a cancel or delete arrived meanwhile).
+   */
+  start?: (first?: QueuedFirstMessage) => void
+}
+
+/** The first message of a session whose agent is still being set up. */
+export interface QueuedFirstMessage {
+  /** Start the turn; the agent is live. */
+  begin: () => void
+  /** Drop the message (release staged files). */
+  drop: () => void
+}
+
+/** An agent setup that runs after `POST /agents/sessions` answered. */
+interface SetupJob {
+  /** Resolves (never rejects) once the agent is live or its setup failed. */
+  readonly settled: Promise<void>
+  /** Set by a cancel or delete during setup: the queued first message is dropped, not started. */
+  dropQueued: boolean
+}
+
+/** `error` on the wire and `last_error` for a session whose background setup failed. */
+const SETUP_FAILED = 'The session could not be set up'
+
+/**
+ * Map an agent-create failure to what the caller sees.
+ * @param error - failure from the sandbox preflight, `agents.create`, or the index insert.
+ * @returns a store outage as is, 400 for an invalid MCP config, 503 `sandbox_unavailable`, else `SessionCreateError`.
+ */
+function createFailure(error: unknown): Error {
+  if (error instanceof StoreUnavailableError || error instanceof AgentsApiRequestError) return error
+  if (error instanceof AgentsApiMcpConfigError) return new AgentsApiRequestError(error.message, 400, 'bad_request')
+  const sandboxDown = sandboxStartErrorIn(error)
+  if (sandboxDown !== undefined) return new AgentsApiRequestError(sandboxDown.message, 503, 'sandbox_unavailable')
+  return new SessionCreateError(error)
+}
+
+/**
+ * Text shown for a failed background setup: the reason when it is safe to show
+ * (invalid MCP config, sandbox down), else a generic line; `AGENTRY_DEBUG_ERRORS=1`
+ * appends the cause (it can name host paths, so never in production).
+ * @param error - setup failure.
+ */
+function setupFailureMessage(error: unknown): string {
+  const mapped = createFailure(error)
+  if (mapped instanceof AgentsApiRequestError) return mapped.message
+  return process.env['AGENTRY_DEBUG_ERRORS'] === '1' ? `${SETUP_FAILED}: ${errorMessage(error)}` : SETUP_FAILED
 }
 
 /**
@@ -198,6 +288,10 @@ export class AgentsGateway {
   private readonly statusWrites = new Map<string, Promise<void>>()
   /** Resumes in flight, so two requests do not resume one session twice. */
   private readonly resuming = new Map<string, Promise<void>>()
+  /** Agent setups still running after their create request was answered, by session id. */
+  private readonly setups = new Map<string, SetupJob>()
+  /** Sessions whose background setup failed in this process, with the text shown for it. */
+  private readonly setupFailures = new Map<string, string>()
   private readonly sandboxes: SandboxRegistry
   private readonly sandboxPresets: SandboxPresets | undefined
   private readonly runtimeInfoPath: string | undefined
@@ -205,6 +299,9 @@ export class AgentsGateway {
   private readonly history: SessionHistory
   private readonly approvals: ApprovalBridge
   private readonly schedule: () => ScheduleService | undefined
+  private readonly officeRender: Parameters<typeof renderOfficePdf>[0]
+  /** Per-turn changes of sandbox chats (DSH's recorder cannot see inside a sandbox). */
+  private readonly sandboxChanges: SandboxChanges
   private readonly artifacts: ArtifactS3Config | undefined
   private readonly routes: Route[]
   /** Agentry built-in skills. */
@@ -213,15 +310,28 @@ export class AgentsGateway {
   private readonly skillsRoot: string
   private readonly skillInstallApi: SkillInstallApi
   /** Deliverables per session, reused until the session changes. */
+  private readonly terminals = new TerminalHub()
+  private readonly browserLive: BrowserLiveHub
+  private readonly startBrowserRelay: (envd: EnvdClient, port: number, intervalMs: number, recordingsDir?: string) => RelayProcess
+  /** Browser recordings (`browser_recording_*` tools), stopped at turn end. */
+  readonly browserRecorder: BrowserRecorder
   private readonly deliverablesCache = new DeliverablesCache<DeliverableEntry>(500)
   private readonly skillsGithub: GithubDeps | undefined
+  private readonly composioRelay: ComposioRelay | undefined
   private readonly composio: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
+  private readonly browserDefault: BrowserMode
+  private readonly sandboxHasBrowser: (envd: EnvdClient) => Promise<boolean>
+  /** Auto-mode probe results by sandbox id; forgotten when the sandbox is reset or deleted. */
+  private readonly browserProbes = new Map<string, Promise<boolean>>()
+  private readonly browserBridgePath: string | undefined
   /** Refresh hooks of live sessions' Agentry skill providers, by owner. */
   readonly skillInvalidations = new SkillInvalidations()
   /** Commands Agentry exposes; `undefined` exposes all. */
   private readonly commandsAllow: ReadonlySet<string> | undefined
   private readonly commandsApi: CommandsApi
   private readonly ingest: AttachmentIngest
+  /** Where uploaded bytes are read from (also used to copy template `file_id` files). */
+  private fileSources: FileSource[] = []
   private readonly commands: () => CommandService | undefined
   /** Sessions with a command executing, so a second one is refused instead of interleaving. */
   private readonly commandsRunning = new Set<string>()
@@ -265,7 +375,20 @@ export class AgentsGateway {
     this.builtinSkills = options.builtinSkills ?? (() => [])
     this.skillsRoot = options.skillsRoot ?? ''
     this.skillsGithub = options.skillsGithub
+    this.composioRelay = options.composioRelay
     this.composio = options.composio ?? { serverLabel: 'composio', approvalVerbs: DEFAULT_APPROVAL_VERBS, approvalSlugs: [] }
+    this.browserDefault = normalizeBrowserDefault(options.browserDefault)
+    this.sandboxHasBrowser = options.sandboxHasBrowser ?? (async (envd) => {
+      try {
+        return (await runInEnvd(envd, 'agent', BROWSER_PROBE_COMMAND, { timeoutMs: 5_000 })).code === 0
+      } catch {
+        throw new Error('browser probe failed')
+      }
+    })
+    this.browserBridgePath = options.browserBridgePath
+    this.browserLive = new BrowserLiveHub({ minIntervalMs: Math.round(1000 / Math.min(15, Math.max(1, options.browserLiveFps ?? 10))) })
+    this.browserRecorder = new BrowserRecorder(this.browserLive, { log: (message) => { this.ctx.logger.info(message) } })
+    this.startBrowserRelay = options.startBrowserRelay ?? startRelay
     this.skillInstallApi = new SkillInstallApi(this.installDeps(), options.skillsGithub)
     const skillsApi = new SkillsApi({
       skills: options.skills,
@@ -292,6 +415,26 @@ export class AgentsGateway {
       warn: message => this.ctx.logger.warn(message),
     })
     const attachments = options.attachments ?? (() => undefined)
+    this.sandboxChanges = new SandboxChanges({
+      target: sessionId => this.sandboxTarget(sessionId),
+      warn: message => this.ctx.logger.warn(message),
+    })
+    const changesApi = new ChangesApi({
+      requireSession: (res, owner, sessionId) => this.requireSession(res, owner, sessionId),
+      events: sessionId => this.history.events(sessionId),
+      workspaceChanges: options.workspaceChanges ?? (() => undefined),
+      isSandbox: async (owner, sessionId) => await this.sandboxOfSession(owner, sessionId) !== undefined,
+      sandbox: this.sandboxChanges,
+    })
+    const jobsApi = new JobsApi({
+      requireSession: (res, owner, sessionId) => this.requireSession(res, owner, sessionId),
+      jobs: options.jobs ?? (() => undefined),
+    })
+    this.officeRender = {
+      officeToPdf: options.officeToPdf ?? (() => undefined),
+      requireSession: (res, owner, sessionId) => this.requireSession(res, owner, sessionId),
+      sessionFile: (owner, sessionId, path) => this.sessionFile(owner, sessionId, path),
+    }
     this.ingest = new AttachmentIngest({
       store: () => this.store,
       staging: options.files?.staging,
@@ -299,13 +442,23 @@ export class AgentsGateway {
       attachments,
       warn: message => this.ctx.logger.warn(message),
     })
+    const uploaded = uploadedFileSource({
+      store: () => this.store,
+      staging: options.files?.staging,
+      attached: row => openAttached(row, attachments()),
+    })
+    this.fileSources = [uploaded]
     const filesApi = new FilesApi({
       store: () => this.store,
       runtime: options.files,
-      sources: [uploadedFileSource({
-        store: () => this.store,
-        staging: options.files?.staging,
-        attached: row => openAttached(row, attachments()),
+      sources: [uploaded, toolImageSource({
+        imageRefs: async (owner, sessionId) => {
+          if (await this.store.sessions.get(sessionId, owner) === undefined) return undefined
+          const children = new Set([...this.sessionRegistry.listSubagents(sessionId).map(child => child.id), ...await this.history.subagentIds(sessionId)])
+          const logs = await Promise.all([sessionId, ...children].map(id => this.history.toolImages(id)))
+          return logs.flat()
+        },
+        attachments,
       })],
       warn: message => this.ctx.logger.warn(message),
     })
@@ -313,6 +466,13 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents', handler: (req, res, _url, _params, p) => this.createAgent(req, res, p.owner) },
       { method: 'GET', pattern: '/agents', handler: (_req, res, url, _params, p) => this.listAgents(res, url, p.owner) },
       { method: 'GET', pattern: '/agents/tools', handler: (_req, res, url, _params, p) => this.listHostTools(res, url, p.owner) },
+      { method: 'POST', pattern: '/agents/projects', handler: (req, res, _url, _params, p) => this.createProject(req, res, p.owner) },
+      { method: 'GET', pattern: '/agents/projects', handler: (_req, res, url, _params, p) => this.listProjects(res, url, p.owner) },
+      { method: 'POST', pattern: '/agents/projects/:project_id/archive', handler: (_req, res, _url, params, p) => this.setProjectStatus(res, params, p.owner, true) },
+      { method: 'POST', pattern: '/agents/projects/:project_id/unarchive', handler: (_req, res, _url, params, p) => this.setProjectStatus(res, params, p.owner, false) },
+      { method: 'GET', pattern: '/agents/projects/:project_id', handler: (_req, res, _url, params, p) => this.getProject(res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/projects/:project_id', handler: (req, res, _url, params, p) => this.updateProject(req, res, params, p.owner) },
+      { method: 'DELETE', pattern: '/agents/projects/:project_id', handler: (_req, res, _url, params, p) => this.deleteProject(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/environments/templates', handler: (req, res, _url, _params, p) => this.createTemplate(req, res, p.owner) },
       { method: 'GET', pattern: '/agents/environments/templates', handler: (_req, res, url, _params, p) => this.listTemplates(res, url, p.owner) },
       { method: 'GET', pattern: '/agents/environments/templates/:template_id', handler: (_req, res, _url, params, p) => this.getTemplate(res, params, p.owner) },
@@ -328,12 +488,22 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents/environments/:environment_id/start', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'start') },
       { method: 'POST', pattern: '/agents/environments/:environment_id/stop', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'stop') },
       { method: 'POST', pattern: '/agents/environments/:environment_id/reset', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'reset') },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/terminals', handler: (req, res, _url, params, p) => this.openTerminal(req, res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/:environment_id/terminals/:terminal_id/stream', handler: (req, res, _url, params, p) => this.streamTerminal(req, res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/terminals/:terminal_id/input', handler: (req, res, _url, params, p) => this.terminalCall(req, res, params, p.owner, 'input') },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/terminals/:terminal_id/resize', handler: (req, res, _url, params, p) => this.terminalCall(req, res, params, p.owner, 'resize') },
+      { method: 'DELETE', pattern: '/agents/environments/:environment_id/terminals/:terminal_id', handler: (_req, res, _url, params, p) => this.terminalCall(undefined, res, params, p.owner, 'close') },
       { method: 'GET', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.getEnvironment(res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/environments/:environment_id', handler: (req, res, _url, params, p) => this.updateEnvironment(req, res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.deleteEnvironment(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/sessions', handler: (req, res, url, _params, p) => this.createSession(req, res, url, p.owner) },
       { method: 'GET', pattern: '/agents/sessions', handler: (_req, res, url, _params, p) => this.listSessions(res, url, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts/*path', handler: (_req, res, url, params, p) => this.getArtifact(res, params, p.owner, url.searchParams.get('download') === '1') },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/renders/pdf/*path', handler: (req, res, _url, params, p) => renderOfficePdf(this.officeRender, req, res, p.owner, routeParam(params, 'session_id'), params['path'] ?? '') },
       { method: 'GET', pattern: '/agents/sessions/:session_id/deliverables', handler: (_req, res, _url, params, p) => this.listDeliverables(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/browser/live', handler: (req, res, _url, params, p) => this.streamBrowserLive(req, res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/sessions/:session_id/browser/control', handler: (req, res, _url, params, p) => this.browserControl(req, res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/sessions/:session_id/browser/input', handler: (req, res, _url, params, p) => this.browserInput(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts', handler: (_req, res, _url, params, p) => this.listArtifacts(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id/items', handler: (_req, res, _url, params, p) => this.listSubagentTurnItems(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/subagents/:subagent_id/turns/:turn_id', handler: (_req, res, _url, params, p) => this.getSubagentTurn(res, params, p.owner) },
@@ -345,6 +515,8 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents/sessions/:session_id/events', handler: (req, res, _url, params, p) => this.postEvents(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/events', handler: (req, res, _url, params, p) => this.streamEvents(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/items', handler: (_req, res, url, params, p) => this.listItems(res, url, params, p.owner) },
+      ...changesApi.routes(),
+      ...jobsApi.routes(),
       { method: 'GET', pattern: '/agents/sessions/:session_id/turns/:turn_id', handler: (_req, res, _url, params, p) => this.getTurn(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/turns', handler: (_req, res, url, params, p) => this.listTurns(res, url, params, p.owner) },
       { method: 'POST', pattern: '/agents/sessions/:session_id', handler: (req, res, _url, params, p) => this.updateSession(req, res, params, p.owner) },
@@ -392,6 +564,15 @@ export class AgentsGateway {
     this.#store = undefined
     this.#storeError = message
     this.#knownOwners.clear()
+  }
+
+  /**
+   * Whether requests can be served: the store is attached, still opening, or failed to start.
+   * @returns the state, with the start failure's message when it failed.
+   */
+  storeStatus(): { state: 'ready' } | { state: 'starting' } | { state: 'failed'; error: string } {
+    if (this.#store !== undefined) return { state: 'ready' }
+    return this.#storeError === undefined ? { state: 'starting' } : { state: 'failed', error: this.#storeError }
   }
 
   /** The attached store; a detach during a request surfaces as a store outage. */
@@ -515,6 +696,111 @@ export class AgentsGateway {
     json(res, 200, { object: 'list', data })
   }
 
+  /** A project of this owner, or a 404 response when it is missing or foreign. */
+  private async projectFor(res: ServerResponse, owner: OwnerId, params: Record<string, string>): Promise<OAIProject | undefined> {
+    const id = routeParam(params, 'project_id')
+    const project = await this.store.projects.get(owner, id)
+    if (project === undefined) notFound(res, `Project "${id}" not found`)
+    return project
+  }
+
+  /**
+   * A Project a session may attach to: it must belong to the caller and be active.
+   * @param owner - calling principal.
+   * @param id - project id from a session body.
+   * @returns the active Project.
+   * @throws AgentsApiRequestError 404 when missing or foreign, 409 `project_archived` when archived.
+   */
+  private async activeProject(owner: OwnerId, id: string): Promise<OAIProject> {
+    const project = await this.store.projects.get(owner, id)
+    if (project === undefined) throw new AgentsApiRequestError(`Project "${id}" not found`, 404, 'resource_not_found')
+    if (project.status === 'archived') throw new AgentsApiRequestError(`Project "${id}" is archived; chats cannot be created on or moved into it`, 409, 'project_archived')
+    return project
+  }
+
+  private async createProject(req: IncomingMessage, res: ServerResponse, owner: OwnerId): Promise<void> {
+    const parsed = parseProjectInput(await readBody(req), false)
+    if ('error' in parsed) {
+      badRequest(res, parsed.error)
+      return
+    }
+    const now = Math.floor(Date.now() / 1000)
+    const project: OAIProject = {
+      id: `proj_${randomUUID().replaceAll('-', '')}`,
+      object: 'project',
+      name: parsed.value.name!,
+      status: 'active',
+      pinned: parsed.value.pinned ?? false,
+      agent_id: parsed.value.agent_id ?? null,
+      environment: parsed.value.environment ?? null,
+      archived_at: null,
+      created_at: now,
+      updated_at: now,
+    }
+    json(res, 201, await this.store.projects.create(owner, project))
+  }
+
+  private async listProjects(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
+    const status = url.searchParams.get('status')
+    json(res, 200, await this.store.projects.list({
+      owner,
+      ...listQuery(url),
+      ...(status === 'active' || status === 'archived' || status === 'all' ? { status } : {}),
+    }))
+  }
+
+  private async getProject(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const project = await this.projectFor(res, owner, params)
+    if (project !== undefined) json(res, 200, project)
+  }
+
+  private async updateProject(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const project = await this.projectFor(res, owner, params)
+    if (project === undefined) return
+    const parsed = parseProjectInput(await readBody(req), true)
+    if ('error' in parsed) {
+      badRequest(res, parsed.error)
+      return
+    }
+    const updated = await this.store.projects.update(owner, project.id, {
+      ...project,
+      ...parsed.value,
+      updated_at: Math.floor(Date.now() / 1000),
+    })
+    if (updated === undefined) notFound(res, `Project "${project.id}" not found`)
+    else json(res, 200, updated)
+  }
+
+  private async setProjectStatus(res: ServerResponse, params: Record<string, string>, owner: OwnerId, archive: boolean): Promise<void> {
+    const project = await this.projectFor(res, owner, params)
+    if (project === undefined) return
+    const now = Math.floor(Date.now() / 1000)
+    const updated = await this.store.projects.update(owner, project.id, {
+      ...project,
+      status: archive ? 'archived' : 'active',
+      archived_at: archive ? now : null,
+      updated_at: now,
+    })
+    if (updated === undefined) notFound(res, `Project "${project.id}" not found`)
+    else json(res, 200, updated)
+  }
+
+  private async deleteProject(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const project = await this.projectFor(res, owner, params)
+    if (project === undefined) return
+    const sessions = await this.store.projects.countSessions(owner, project.id)
+    if (sessions > 0) {
+      writeRequestError(res, new AgentsApiRequestError(
+        `Project "${project.id}" still has ${String(sessions)} session(s); archive it instead or move its chats out first`,
+        409,
+        'project_has_sessions',
+      ))
+      return
+    }
+    await this.store.projects.delete(owner, project.id)
+    json(res, 200, { id: project.id, object: 'project.deleted', deleted: true })
+  }
+
   /**
    * Schemas a new session can call.
    *
@@ -558,6 +844,7 @@ export class AgentsGateway {
       const row = await this.store.sessions.get(sessionId, owner)
       if (!row) return undefined
       cwd = this.sessionRegistry.get(row.id)?.workspace ?? await this.history.workspace(row.id)
+      await this.setups.get(row.id)?.settled
       const live = this.ctx.agents.get(SessionId(row.id))
       if (live !== undefined) return { scope: live as SkillViewOptions['scope'], cwd }
     } else {
@@ -582,6 +869,7 @@ export class AgentsGateway {
   private async resolveCommandTarget(owner: OwnerId, sessionId: string): Promise<CommandTarget | undefined> {
     const row = await this.store.sessions.get(sessionId, owner)
     if (!row) return undefined
+    await this.setups.get(row.id)?.settled
     const live = this.ctx.agents.get(SessionId(row.id))
     if (live !== undefined) return { scope: live }
     const presets = (this.ctx as { get?: (name: string) => unknown }).get?.call(this.ctx, 'agentPresets') as {
@@ -657,10 +945,11 @@ export class AgentsGateway {
     const body = await readBody(req) as unknown as CreateSessionParams
     let provisioned: ProvisionedSession
     let fileIds: string[]
+    const userText = userTextFromInput(body.input)
     try {
       fileIds = fileIdsFromInput(body.input)
       await this.ingest.validate(owner, fileIds)
-      provisioned = await this.provisionSession(owner, body)
+      provisioned = await this.provisionSession(owner, body, { queued: (userText !== undefined && userText !== '') || fileIds.length > 0 })
     } catch (error: unknown) {
       if (error instanceof AgentsApiRequestError) {
         writeRequestError(res, error)
@@ -676,6 +965,7 @@ export class AgentsGateway {
       throw error
     }
     const { sessionId, projector, base } = provisioned
+    const start = provisioned.start!
     let attached: AttachedFiles | undefined
     if (fileIds.length > 0) {
       try {
@@ -696,13 +986,21 @@ export class AgentsGateway {
     const stream = body.stream === true
       || url.searchParams.get('stream') === 'true'
       || (req.headers.accept ?? '').includes('text/event-stream')
-    const userText = userTextFromInput(body.input)
     const hasInput = (userText !== undefined && userText !== '') || attached !== undefined
-    const startTurn = (): void => {
-      void this.triggerTurn(sessionId, userText ?? '', attached).catch((error: unknown) => {
-        this.emitError(sessionId, error)
-      })
-    }
+    const first: QueuedFirstMessage | undefined = hasInput
+      ? {
+          begin: () => {
+            void this.triggerTurn(sessionId, userText ?? '', attached).catch((error: unknown) => {
+              this.emitError(sessionId, error)
+              // The row said `in_progress` while the message was queued; no turn started.
+              if (projector.status === 'idle') this.recordStatus(sessionId, 'idle', null)
+            })
+          },
+          drop: () => {
+            void attached?.rollback()
+          },
+        }
+      : undefined
 
     if (stream) {
       writeSSEHeaders(res)
@@ -712,21 +1010,14 @@ export class AgentsGateway {
       req.on('close', () => {
         unsubscribe()
       })
-      writeEvent(res, projector.created.event.type, projector.created.event, projector.created.id)
-      if (hasInput) {
-        startTurn()
-      } else {
-        this.sessionRegistry.emitEphemeral(sessionId, {
-          type: 'agent.session.idle',
-          event_id: mintEventId(),
-          session: oaiSession,
-        })
-      }
+      writeEvent(res, projector.created.event.type, projector.created.event, frameSseId(projector.created))
+      // Setup emits `agent.session.idle` when no message is queued, or the turn's events, or `error` and `agent.session.failed`.
+      start(first)
       return
     }
 
-    if (hasInput) startTurn()
     json(res, 200, await this.sessionPayload(oaiSession, base, owner))
+    start(first)
   }
 
   /**
@@ -736,7 +1027,7 @@ export class AgentsGateway {
    * @param owner - owner recorded on the session.
    * @param params - session body; `input` and `stream` do not apply.
    * @returns the new session resource, status `idle`.
-   * @throws AgentsApiRequestError 400 for an invalid agent, tool, workspace, or reasoning effort, or 404 for an unknown `agent_id`.
+   * @throws AgentsApiRequestError 400 for an invalid agent, tool, workspace, or reasoning effort, 404 for an unknown `agent_id` or foreign Project, or 409 `project_archived` for an archived one.
    * @throws SessionCreateError when the agent or the index row cannot be created; nothing stays registered.
    * @throws StoreUnavailableError when the store is unavailable.
    */
@@ -747,19 +1038,30 @@ export class AgentsGateway {
   /**
    * Resolve the session agent, prepare its workspace, register its projector,
    * create its agent, and insert its index row. Starts no turn.
+   *
+   * With `background`, the index row is written first (status `in_progress` when a
+   * first message is queued, else `idle`) and the agent is built only when the
+   * caller calls `start`, so the create request does not wait for MCP connections.
+   * A Sandbox environment's preset is still checked before the row is written.
    * @param owner - owner recorded on the session.
    * @param body - session body; `input` and `stream` are ignored.
-   * @returns the session id, its live projector and projection base, and the resolved agent.
+   * @param background - build the agent after answering; `queued` says whether a first message waits for it.
+   * @returns the session id, its live projector and projection base, the resolved agent, and `start` for a background create.
    * @throws AgentsApiRequestError 400 for an invalid agent, tool, workspace, or reasoning effort, or 404 for an unknown `agent_id`.
    * @throws SessionCreateError when `agents.create` or the index insert fails; the projector, handle, and agent are removed first.
    * @throws StoreUnavailableError when the store is unavailable, after the same cleanup.
    */
-  private async provisionSession(owner: OwnerId, body: CreateSessionParams): Promise<ProvisionedSession> {
+  private async provisionSession(owner: OwnerId, body: CreateSessionParams, background?: { queued: boolean }): Promise<ProvisionedSession> {
+    const requestedProject = sessionProjectId(body.project_id)
+    const project = requestedProject === null || requestedProject === undefined ? null : await this.activeProject(owner, requestedProject)
+    body = resolveProjectDefaults(body, project)
     const resolved = await this.resolveSessionAgent(body, owner)
     const toolError = validateMountableTools(resolved.tools)
     if (toolError) throw new AgentsApiRequestError(toolError, 400, 'bad_request')
     const hostToolsError = validateHostTools(resolved.host_tools)
     if (hostToolsError) throw new AgentsApiRequestError(hostToolsError, 400, 'bad_request')
+    const browserError = validateBrowserField(resolved.browser)
+    if (browserError) throw new AgentsApiRequestError(browserError, 400, 'bad_request')
 
     const sessionId = SessionId(`sess_${randomUUID().replaceAll('-', '')}`)
     let cwd: string
@@ -786,6 +1088,7 @@ export class AgentsGateway {
       environment,
       metadata: body.metadata ?? {},
       vault_ids: body.vault_ids ?? [],
+      project_id: body.project_id ?? null,
     }
     const now = new Date()
     const base: ProjectionBase = {
@@ -795,17 +1098,19 @@ export class AgentsGateway {
       environment: config.environment,
       metadata: config.metadata,
       vaultIds: config.vault_ids,
+      projectId: config.project_id ?? null,
     }
     const projector = new WireProjector(base, false)
+    if (background?.queued === true) projector.status = 'in_progress'
     // Registered before the agent exists so no event logged during creation is missed.
     this.sessionRegistry.register(projector, cwd)
 
-    try {
+    const createLive = async (): Promise<void> => {
       const handle = await this.ctx.agents.create({
         sessionId,
         meta: { cwd },
         agentOptions,
-        setup: this.buildAgentSetup(resolved, pending, cwd, owner, environment),
+        setup: this.buildAgentSetup(sessionId, resolved, pending, cwd, owner, environment),
       })
       this.handles.set(sessionId, handle)
       // Sandbox sessions start in full access: the container is the boundary (the agent has sudo there), and
@@ -814,23 +1119,9 @@ export class AgentsGateway {
         (this.ctx.agents.get(sessionId) as { session?: { append(type: string, data: unknown): void } } | undefined)?.session?.append('sandbox/mode', { mode: 'danger-full-access' })
       }
       this.pendingBySession.set(sessionId, pending)
-      await this.store.sessions.insert({
-        id: sessionId,
-        ownerId: owner,
-        agentId: typeof body.agent_id === 'string' && body.agent_id !== '' ? body.agent_id : null,
-        environmentId: null,
-        dshSessionId: sessionId,
-        status: 'idle',
-        lastError: null,
-        model: resolved.model,
-        reasoningEffort: resolved.reasoning?.effort ?? null,
-        body: config,
-        createdAt: now,
-        updatedAt: now,
-      })
-    } catch (error: unknown) {
+    }
+    const undoLive = async (): Promise<void> => {
       pending.rejectAll(new Error('session create failed'))
-      this.sessionRegistry.delete(sessionId)
       const created = this.handles.get(sessionId)
       this.handles.delete(sessionId)
       this.pendingBySession.delete(sessionId)
@@ -841,13 +1132,138 @@ export class AgentsGateway {
           // Host teardown already ran.
         }
       }
-      if (error instanceof StoreUnavailableError) throw error
-      if (error instanceof AgentsApiMcpConfigError) throw new AgentsApiRequestError(error.message, 400, 'bad_request')
-      const sandboxDown = sandboxStartErrorIn(error)
-      if (sandboxDown !== undefined) throw new AgentsApiRequestError(sandboxDown.message, 503, 'sandbox_unavailable')
-      throw new SessionCreateError(error)
     }
-    return { sessionId, projector, base, resolved }
+    const insertRow = (status: SessionStatus): Promise<unknown> => this.store.sessions.insert({
+      id: sessionId,
+      ownerId: owner,
+      agentId: typeof body.agent_id === 'string' && body.agent_id !== '' ? body.agent_id : null,
+      environmentId: null,
+      projectId: config.project_id ?? null,
+      dshSessionId: sessionId,
+      status,
+      lastError: null,
+      model: resolved.model,
+      reasoningEffort: resolved.reasoning?.effort ?? null,
+      body: config,
+      createdAt: now,
+      updatedAt: now,
+    })
+
+    if (background === undefined) {
+      try {
+        await createLive()
+        await insertRow('idle')
+      } catch (error: unknown) {
+        this.sessionRegistry.delete(sessionId)
+        await undoLive()
+        throw createFailure(error)
+      }
+      return { sessionId, projector, base, resolved }
+    }
+
+    let lease: AsyncDisposable | undefined
+    try {
+      // A sandbox that cannot start still answers 503 here, not as a failed session later.
+      lease = await this.preflightSandbox(owner, environment)
+      await insertRow(projector.status)
+    } catch (error: unknown) {
+      this.sessionRegistry.delete(sessionId)
+      await Promise.resolve(lease?.[Symbol.asyncDispose]()).catch(() => undefined)
+      throw createFailure(error)
+    }
+    const start = (first?: QueuedFirstMessage): void => {
+      this.runSetup(sessionId, projector, { createLive, undoLive, ...(lease === undefined ? {} : { lease }) }, first)
+    }
+    return { sessionId, projector, base, resolved, start }
+  }
+
+  /**
+   * Hold the session's Sandbox preset for the length of a background setup, so a
+   * sandbox that cannot start is refused before the create request is answered.
+   * @returns the lease, or `undefined` for a session that does not run in a sandbox.
+   * @throws as `SandboxPresets.acquire` (`SandboxStartError` when the sandbox cannot start).
+   */
+  private async preflightSandbox(owner: OwnerId, environment: OAIEnvironmentConfig): Promise<AsyncDisposable | undefined> {
+    if (environment.type !== 'sandbox' || environment.environment_id === undefined || this.sandboxPresets === undefined) return undefined
+    const record = await this.store.environments.get(owner, environment.environment_id)
+    const sandboxId = record?.provider_metadata['sandbox_id']
+    const workspace = record?.provider_metadata['workspace_directory']
+    if (record === undefined || record.provider === 'local' || sandboxId === undefined || workspace === undefined) return undefined
+    return this.sandboxPresets.acquire(owner, sandboxId, workspace)
+  }
+
+  /**
+   * Build a session's agent after its create request was answered. Requests that
+   * need the agent wait on the job (`ensureLive`, `stopLiveAgent`). When the agent
+   * is live, the queued first message starts (or is dropped after a cancel or
+   * delete), else `agent.session.idle` is emitted. A failure marks the session
+   * failed (`failSetup`).
+   * @param sessionId - new session.
+   * @param projector - its registered projector.
+   * @param steps - agent creation, its undo, and the preflight sandbox lease to release.
+   * @param first - the queued first message, if any.
+   */
+  private runSetup(
+    sessionId: string,
+    projector: WireProjector,
+    steps: { createLive: () => Promise<void>; undoLive: () => Promise<void>; lease?: AsyncDisposable },
+    first: QueuedFirstMessage | undefined,
+  ): void {
+    let finish!: () => void
+    const job: SetupJob = { settled: new Promise<void>((resolve) => { finish = resolve }), dropQueued: false }
+    this.setups.set(sessionId, job)
+    const run = async (): Promise<void> => {
+      try {
+        await steps.createLive()
+      } catch (error: unknown) {
+        await steps.undoLive()
+        await this.failSetup(sessionId, projector, error)
+        return
+      } finally {
+        await Promise.resolve(steps.lease?.[Symbol.asyncDispose]()).catch(() => undefined)
+      }
+      // `idle` before the message goes in, so `triggerTurn` starts a turn instead of steering.
+      projector.status = 'idle'
+      if (first !== undefined && !job.dropQueued) {
+        first.begin()
+        return
+      }
+      if (first !== undefined) {
+        first.drop()
+        this.recordStatus(sessionId, 'idle', null)
+      }
+      this.sessionRegistry.emitEphemeral(sessionId, { type: 'agent.session.idle', event_id: mintEventId(), session: projector.snapshot() })
+    }
+    void run()
+      .catch((error: unknown) => {
+        this.ctx.logger.warn(`agents-api: session setup for ${sessionId} failed: ${errorMessage(error)}`)
+      })
+      .finally(() => {
+        this.setups.delete(sessionId)
+        finish()
+      })
+  }
+
+  /**
+   * Mark a session whose background setup failed: `failed` with the shown text
+   * in the projection and the index, `error` and `agent.session.failed` on its
+   * stream, then unregister it. Later requests that need the agent answer 409
+   * `session_setup_failed`.
+   * @param sessionId - session id.
+   * @param projector - its registered projector.
+   * @param error - setup failure.
+   */
+  private async failSetup(sessionId: string, projector: WireProjector, error: unknown): Promise<void> {
+    const shown = setupFailureMessage(error)
+    this.ctx.logger.warn(`agents-api: session setup failed for ${sessionId}: ${errorMessage(error)}`)
+    this.setupFailures.set(sessionId, shown)
+    projector.status = 'failed'
+    projector.error = shown
+    this.emitError(sessionId, new Error(shown))
+    this.sessionRegistry.emitEphemeral(sessionId, { type: 'agent.session.failed', event_id: mintEventId(), session: projector.snapshot() })
+    this.recordStatus(sessionId, 'failed', shown)
+    await this.statusWrites.get(sessionId)
+    this.sessionRegistry.delete(sessionId)
   }
 
   /** Wire `error` event for a dispatch failure. It is not a Session log fact, so it carries no `id`. */
@@ -864,9 +1280,14 @@ export class AgentsGateway {
   private async listSessions(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
     const query = listQuery(url)
     const after = query.after === undefined ? undefined : await this.store.sessions.get(query.after, owner)
+    const metadata = metadataFilter(url)
+    const projectParam = url.searchParams.get('project_id')
+    const projectId = projectParam === null ? undefined : (projectParam === '' ? null : projectParam)
     const page = await this.store.sessions.list({
       owner,
       limit: query.limit,
+      ...(metadata === undefined ? {} : { metadata }),
+      ...(projectId === undefined ? {} : { projectId }),
       ...(after === undefined ? {} : { cursor: encodeSessionCursor(after.createdAt, after.id) }),
     })
     json(res, 200, {
@@ -916,30 +1337,59 @@ export class AgentsGateway {
   }
 
   /**
-   * Apply a settings update: validate, retarget the live agent when the model
-   * or reasoning effort changed, then write the index, then the live projection.
+   * Apply a settings update: validate (including a Project move), retarget the
+   * live agent when the model or reasoning effort changed, then write the index,
+   * then the live projection.
    * @param row - the session's index row.
    * @param owner - calling principal.
    * @param body - update body.
    * @returns the updated resource, or `undefined` when the row disappeared.
-   * @throws AgentsApiRequestError 400 when `agent.model` would be empty, or 409 `session_setting_not_live` when the live agent cannot take the change; nothing is stored then.
+   * @throws AgentsApiRequestError 400 when `agent.model` would be empty, 404 for a foreign or missing Project, 409 `project_archived` for an archived one, or 409 `session_setting_not_live` when the live agent cannot take the change; nothing is stored then.
    */
   private async changeSettings(row: SessionIndexRow, owner: OwnerId, body: UpdateSessionParams): Promise<OAIAgentSession | undefined> {
+    const projectId = sessionProjectId(body.project_id)
+    if (projectId !== undefined && projectId !== null) await this.activeProject(owner, projectId)
     const current = configOf(row)
-    const next = applySessionUpdate(current, body)
+    const next = applySessionUpdate(current, { ...body, ...(projectId === undefined ? {} : { project_id: projectId }) })
     if (next === undefined) {
       throw new AgentsApiRequestError('Field "agent.model" cannot be null or empty', 400, 'bad_request')
     }
+    const merge = body.metadata_merge
+    if (merge !== undefined && (merge === null || typeof merge !== 'object' || Object.values(merge).some(value => value !== null && typeof value !== 'string'))) {
+      throw new AgentsApiRequestError('Field "metadata_merge" must map keys to strings or null', 400, 'bad_request')
+    }
+    // A merge-only update skips the whole-row write below, which would overwrite a concurrent merge with this request's stale copy.
+    if (body.agent === undefined && body.metadata === undefined && merge !== undefined) {
+      if (projectId === undefined) return this.mergeSessionMetadata(row, owner, merge)
+      const moved = await this.store.sessions.update(row.id, owner, { projectId })
+      if (!moved) return undefined
+      return this.mergeSessionMetadata(row, owner, merge)
+    }
     if (next.agent.model !== current.agent.model || next.agent.reasoning?.effort !== current.agent.reasoning?.effort) {
-      await this.applyLiveModel(row, next.agent)
+      await this.applyLiveModel(row, next.agent, current.agent.model)
     }
     const updated = await this.store.sessions.update(row.id, owner, {
       model: next.agent.model,
       reasoningEffort: next.agent.reasoning?.effort ?? null,
+      ...(projectId === undefined ? {} : { projectId }),
       body: next,
     })
     if (!updated) return undefined
-    return this.sessionRegistry.applyConfig(row.id, next) ?? sessionFromRow(updated)
+    const settled = this.sessionRegistry.applyConfig(row.id, next) ?? sessionFromRow(updated)
+    return merge === undefined ? settled : this.mergeSessionMetadata(row, owner, merge)
+  }
+
+  /**
+   * Merge metadata keys into a session (`null` deletes a key) and refresh the live projection.
+   * @param row - the session's index row.
+   * @param owner - calling principal.
+   * @param merge - keys to set or delete.
+   * @returns the updated resource, or `undefined` when the row disappeared or has no stored setup.
+   */
+  private async mergeSessionMetadata(row: SessionIndexRow, owner: OwnerId, merge: Record<string, string | null>): Promise<OAIAgentSession | undefined> {
+    const updated = await this.store.sessions.mergeMetadata(row.id, owner, merge)
+    if (updated?.body == null) return undefined
+    return this.sessionRegistry.applyConfig(row.id, configOf(updated)) ?? sessionFromRow(updated)
   }
 
   /**
@@ -948,9 +1398,10 @@ export class AgentsGateway {
    * running is unchanged.
    * @param row - the session's index row, used to resume the agent when it is not live.
    * @param agent - the agent configuration after the update.
-   * @throws AgentsApiRequestError 409 `session_setting_not_live` when no live agent exists, the route or effort is unsupported, or the selection cannot be recorded.
+   * @param modelBefore - the model before the update; a model that is not offered is refused only when it differs from this.
+   * @throws AgentsApiRequestError 409 `session_setting_not_live` when no live agent exists, the model is not offered, the route or effort is unsupported, or the selection cannot be recorded.
    */
-  private async applyLiveModel(row: SessionIndexRow, agent: OAIAgent): Promise<void> {
+  private async applyLiveModel(row: SessionIndexRow, agent: OAIAgent, modelBefore: string): Promise<void> {
     const notLive = (message: string): AgentsApiRequestError => new AgentsApiRequestError(message, 409, 'session_setting_not_live')
     try {
       await this.ensureLive(row)
@@ -959,11 +1410,13 @@ export class AgentsGateway {
     }
     const live = this.ctx.agents.get(SessionId(row.id))
     if (live === undefined) throw notLive(`Session "${row.id}" has no running agent`)
-    const provider = await providerForModel(
+    const found = await lookUpModel(
       this.ctx,
       agent.model,
       live.model.current()?.provider ?? this.ctx.agentDefaultModel.currentSelection().provider,
     )
+    if (found.known === false && agent.model !== modelBefore) throw notLive(`Model "${agent.model}" is not offered by any configured provider`)
+    const provider = found.provider
     const effort = agent.reasoning?.effort
     const route = { provider, model: agent.model, ...(effort == null ? {} : { reasoningEffort: ReasoningEffortId(effort) }) }
     try {
@@ -1019,6 +1472,15 @@ export class AgentsGateway {
    * @param sessionId - session whose agent stops.
    */
   private async stopLiveAgent(sessionId: string): Promise<void> {
+    const setup = this.setups.get(sessionId)
+    if (setup !== undefined) {
+      setup.dropQueued = true
+      await setup.settled
+    }
+    this.setupFailures.delete(sessionId)
+    browserPorts.releaseSession(sessionId)
+    this.browserRecorder.forget(sessionId)
+    this.sandboxChanges.forget(sessionId)
     this.approvals.cancelAll(sessionId)
     this.pendingBySession.get(sessionId)?.rejectAll(new Error(`Session "${sessionId}" was deleted`))
     this.pendingBySession.delete(sessionId)
@@ -1156,6 +1618,8 @@ export class AgentsGateway {
       writeRequestError(res, new AgentsApiRequestError('No pending approval: the session is not running', 404, 'approval_not_found'))
       return
     }
+    const setup = this.setups.get(sessionId)
+    if (setup !== undefined && batch.some(evt => evt.type === 'agent.session.input.cancel')) setup.dropQueued = true
     try {
       await this.ensureLive(row)
     } catch (error: unknown) {
@@ -1210,12 +1674,18 @@ export class AgentsGateway {
     writeSSEHeaders(res)
     const header = req.headers['last-event-id']
     const raw = Array.isArray(header) ? header[0] : header
-    const parsed = raw === undefined || raw === '' ? undefined : Number(raw)
-    const lastId = parsed === undefined ? undefined : Number.isFinite(parsed) ? parsed : 0
+    // An unreadable id replays everything.
+    const lastId: FramePosition | undefined = raw === undefined || raw === '' ? undefined : parseFrameId(raw) ?? { id: 0, sub: 0 }
 
     let open = true
-    const write = (evt: OAISessionEvent, sseId: number | undefined): void => {
-      if (open) writeEvent(res, evt.type, evt, sseId)
+    // Frames are written in order through one chain, because an item frame with attachments waits for its file ids.
+    let chain = Promise.resolve()
+    const write = (evt: OAISessionEvent, sseId: string | undefined): void => {
+      chain = chain
+        .then(() => this.streamedEvent(owner, sessionId, evt))
+        .then((ready) => {
+          if (open) writeEvent(res, ready.type, ready, sseId)
+        }, () => undefined)
     }
     if (lastId === undefined) {
       const unsubscribe = this.sessionRegistry.subscribe(sessionId, write)
@@ -1235,7 +1705,7 @@ export class AgentsGateway {
 
     // Subscribe before folding: frames produced while the log is read are buffered, then flushed after the replayed ones.
     let replaying = true
-    const buffered: Array<{ evt: OAISessionEvent; sseId: number | undefined }> = []
+    const buffered: Array<{ evt: OAISessionEvent; sseId: string | undefined }> = []
     const unsubscribe = this.sessionRegistry.subscribe(sessionId, (evt, sseId) => {
       if (replaying) buffered.push({ evt, sseId })
       else write(evt, sseId)
@@ -1247,8 +1717,8 @@ export class AgentsGateway {
     let lastWritten = lastId
     try {
       for (const frame of await this.history.wireEvents(baseOf(row), lastId)) {
-        write(frame.event, frame.id)
-        lastWritten = frame.id
+        write(frame.event, frameSseId(frame))
+        lastWritten = framePosition(frame)
       }
     } catch (error: unknown) {
       unsubscribe()
@@ -1258,9 +1728,10 @@ export class AgentsGateway {
       return
     }
     for (const { evt, sseId } of buffered) {
-      if (sseId !== undefined && sseId <= lastWritten) continue
+      const position = sseId === undefined ? undefined : parseFrameId(sseId)
+      if (position !== undefined && compareFramePositions(position, lastWritten) <= 0) continue
       write(evt, sseId)
-      if (sseId !== undefined) lastWritten = sseId
+      if (position !== undefined) lastWritten = position
     }
     // Pending approvals are not in the log, so replay cannot show them: tell this client once.
     const live = this.sessionRegistry.getOAISession(sessionId)
@@ -1268,6 +1739,25 @@ export class AgentsGateway {
       write({ type: 'agent.session.requires_action', event_id: mintEventId(), session: live }, undefined)
     }
     replaying = false
+  }
+
+  /**
+   * A stream event as the client receives it: a user message item's
+   * attachments are named by their file ids, as in `GET .../items`.
+   * @param owner - session owner.
+   * @param sessionId - session id.
+   * @param evt - wire event.
+   * @returns the event to write.
+   */
+  private async streamedEvent(owner: OwnerId, sessionId: string, evt: OAISessionEvent): Promise<OAISessionEvent> {
+    if (!('item' in evt) || evt.item.type !== 'message' || !evt.item.content.some(part => 'attachment_id' in part)) return evt
+    try {
+      const [item] = await withFileIds(this.store, owner, sessionId, [evt.item])
+      return { ...evt, item } as OAISessionEvent
+    } catch {
+      // The store is unavailable: the message still shows, without its file links.
+      return evt
+    }
   }
 
   /**
@@ -1317,8 +1807,20 @@ export class AgentsGateway {
    */
   applySessionEvent(sessionId: string, event: SessionEvent): void {
     if ((event.type as string) === 'agent-preset/selected') this.commandsApi.invalidate()
+    if (event.type === 'turn/start') this.sandboxChanges.start(sessionId, `turn_${String(event.seq)}`)
+    else if (event.type === 'turn/end') {
+      // A recording still running stops with the turn; the end snapshot waits for its file.
+      const recording = this.browserRecorder.turnEnded(sessionId)
+      if (recording !== undefined) this.sandboxChanges.hold(sessionId, recording)
+      this.sandboxChanges.end(sessionId)
+    }
     const step = this.sessionRegistry.apply(sessionId, event)
     if (step?.status) this.recordStatus(sessionId, step.status.status, step.status.error)
+    // The turn's end cleared the shown actions; a subagent's requests outlive it.
+    if (step !== undefined && event.type === 'turn/end') {
+      const pending = this.approvals.pending(sessionId)
+      if (pending.length > 0) this.setInteractionActions(sessionId, pending)
+    }
   }
 
   /**
@@ -1369,11 +1871,13 @@ export class AgentsGateway {
 
   /**
    * @param body - agent create or update body.
-   * @returns an error message for Agentry's extension fields (`skills`, `apps`, `send_policy`), or `undefined`.
+   * @returns an error message for Agentry's extension fields (`skills`, `apps`, `send_policy`, `browser`), or `undefined`.
    */
-  validateAgentExtensions(body: { skills?: unknown; apps?: unknown; send_policy?: unknown }): string | undefined {
+  validateAgentExtensions(body: { skills?: unknown; apps?: unknown; send_policy?: unknown; browser?: unknown }): string | undefined {
     const policy = body.send_policy
     if (policy !== undefined && policy !== null && policy !== 'ask' && policy !== 'auto') return 'send_policy must be "ask", "auto", or null'
+    const browserError = validateBrowserField(body.browser)
+    if (browserError !== undefined) return browserError
     return this.validateSkills(body.skills) ?? validateAppGrants(body.apps)
   }
 
@@ -1405,14 +1909,15 @@ export class AgentsGateway {
    * Mount the session's preset: `agentry`, or for a session on an Agentry
    * Sandbox environment that sandbox's preset (every tool runs inside it),
    * held for the agent's lifetime.
+   * @returns the sandbox the session runs in, or `undefined` for a local chat.
    */
-  private async mountSessionPreset(agentCtx: Context, owner: OwnerId, environment: OAIEnvironmentConfig | undefined): Promise<void> {
+  private async mountSessionPreset(agentCtx: Context, owner: OwnerId, environment: OAIEnvironmentConfig | undefined): Promise<Omit<BrowserSandbox, 'sessionId'> | undefined> {
     const environmentId = environment?.type === 'sandbox' ? environment.environment_id : undefined
     const record = environmentId === undefined ? undefined : await this.store.environments.get(owner, environmentId)
     if (environmentId !== undefined && record === undefined) throw new Error(`environment ${environmentId} no longer exists; this session cannot run`)
     if (record === undefined || record.provider === 'local') {
       await mountDefaultPreset(agentCtx)
-      return
+      return undefined
     }
     // Never fall back to the host for a non-local environment: an unroutable session fails.
     const sandboxId = record.provider_metadata['sandbox_id']
@@ -1423,21 +1928,82 @@ export class AgentsGateway {
     const lease = await this.sandboxPresets.acquire(owner, sandboxId, workspace)
     ;(agentCtx as { effect?: (fn: () => () => void) => void }).effect?.(() => () => { void lease[Symbol.asyncDispose]() })
     await mountDefaultPreset(agentCtx, lease.presetId)
+    return { owner, sandboxId, workspace, provider: record.provider, environmentId: record.id }
+  }
+
+  /** Whether the sandbox has the browser, checked once and cached; a failed check counts as no and is not cached. */
+  private probeBrowser(sandbox: BrowserSandbox): Promise<boolean> {
+    const cached = this.browserProbes.get(sandbox.sandboxId)
+    if (cached !== undefined) return cached
+    const probe = (async () => {
+      const provider = this.sandboxes.get(sandbox.provider ?? '') as Partial<AgentrySandboxProvider> | undefined
+      if (typeof provider?.api !== 'function') throw new Error('no sandbox provider')
+      return await this.sandboxHasBrowser(provider.api(sandbox.owner).envd(sandbox.sandboxId))
+    })()
+    this.browserProbes.set(sandbox.sandboxId, probe)
+    return probe.catch((error: unknown) => {
+      this.browserProbes.delete(sandbox.sandboxId)
+      this.ctx.logger.warn(`agents-api: could not check the browser in sandbox ${sandbox.sandboxId}: ${errorMessage(error)}`)
+      return false
+    })
+  }
+
+  /**
+   * The web browser for an agent that has it on (or on auto with a sandbox that has it): in a sandbox chat, Playwright
+   * MCP inside the sandbox through the stdio bridge (in memory, never in the
+   * saved config); in a local chat, no tools and a prompt line saying why.
+   */
+  private async mountBrowser(agentCtx: Context, resolved: OAIAgent, sandbox: BrowserSandbox | undefined): Promise<void> {
+    const mode = browserMode(resolved, this.browserDefault)
+    if (mode === 'off') return
+    const credentials = sandboxCredentials()
+    if (sandbox === undefined || credentials === undefined) {
+      if (mode === 'on') mountBrowserGuidance(agentCtx, 'local')
+      return
+    }
+    if (mode === 'auto' && !await this.probeBrowser(sandbox)) {
+      mountBrowserGuidance(agentCtx, 'absent')
+      return
+    }
+    mountBrowserGuidance(agentCtx, 'sandbox')
+    try {
+      await mountMcpTools(agentCtx, [browserMcpTool(sandbox, credentials, this.browserBridgePath)], BRIDGE_HOST_CWD)
+      this.mountBrowserRecording(agentCtx, sandbox)
+    } catch (error: unknown) {
+      // `required: false` already tolerates a server that fails to start; this covers the client itself.
+      this.ctx.logger.warn(`agents-api: the web browser did not start for sandbox ${sandbox.sandboxId}: ${errorMessage(error)}`)
+    }
+  }
+
+  /** The recording tools for a sandbox chat that just got its browser tools. */
+  private mountBrowserRecording(agentCtx: Context, sandbox: BrowserSandbox): void {
+    const provider = this.sandboxes.get(sandbox.provider ?? '') as Partial<AgentrySandboxProvider> | undefined
+    if (typeof provider?.api !== 'function' || sandbox.environmentId === undefined) return
+    const api = provider.api.bind(provider)
+    const { owner, sandboxId, sessionId, workspace } = sandbox
+    mountBrowserRecordingTools(agentCtx, this.browserRecorder, {
+      owner,
+      sessionId,
+      environmentId: sandbox.environmentId,
+      workspace,
+      start: () => this.startBrowserRelay(api(owner as OwnerId).envd(sandboxId), browserPorts.portOf(sandboxId, sessionId), this.browserLive.intervalMs, recordingsDirOf(workspace)),
+    })
   }
 
   /**
    * Agent composition shared by create and resume.
+   * @param sessionId - the session being set up.
    * @param resolved - session agent.
    * @param pending - the session's parked function calls.
    * @param cwd - session working directory.
    * @returns the `agents.create` / `agents.resume` setup callback.
    */
-  private buildAgentSetup(resolved: OAIAgent, pending: PendingFunctionCalls, cwd: string, owner: OwnerId, environment?: OAIEnvironmentConfig): AgentSetup {
+  private buildAgentSetup(sessionId: string, resolved: OAIAgent, pending: PendingFunctionCalls, cwd: string, owner: OwnerId, environment?: OAIEnvironmentConfig): AgentSetup {
     const functionTools = resolved.tools.filter(
       (tool): tool is OAIFunctionTool => tool.type === 'function',
     )
     return async (agentCtx) => {
-      await this.mountSessionPreset(agentCtx, owner, environment)
+      const sandbox = await this.mountSessionPreset(agentCtx, owner, environment)
       this.mountAgentrySkills(agentCtx, resolved.id, owner)
       mountAgentInstructions(agentCtx, resolved.instructions, resolved.name)
       // Mounted before the mask so an agent's `host_tools` can hide the agent tools.
@@ -1472,6 +2038,7 @@ export class AgentsGateway {
           owner,
           store: this.store,
           provider: sandboxProvider,
+          cwd,
           provision: (raw, inline) => this.provisionEnvironment(owner, raw, inline),
           destroy: (record) => this.destroyEnvironment(record),
           describe: (record) => this.environmentJson(owner, record),
@@ -1485,9 +2052,22 @@ export class AgentsGateway {
         ...(this.skillsGithub ? { github: this.skillsGithub } : {}),
       })
       applyHostToolsRestrict(agentCtx, resolved.host_tools)
+      // Owner-scoped copies of DSH's schedule tools shadow the preset's, which see every user's tasks.
+      // Loaded only with a Host schedule service: the schedule packages are optional peers.
+      if (this.schedule() !== undefined) {
+        const { mountScheduleTools } = await import('./mount-schedule-tools.ts')
+        mountScheduleTools(agentCtx, {
+          schedule: this.schedule,
+          ownersOf: ids => this.store.sessions.ownersOf(ids),
+          owner,
+          hostTools: resolved.host_tools,
+        })
+      }
       mountScheduleGuidance(agentCtx)
       mountFunctionTools(agentCtx, functionTools, pending)
-      await mountMcpTools(agentCtx, mcpToolsFrom(resolved.tools), cwd)
+      const mcpTools = mcpToolsFrom(resolved.tools)
+      await mountMcpTools(agentCtx, this.composioRelay === undefined ? mcpTools : this.composioRelay.rewriteAll(mcpTools), cwd)
+      await this.mountBrowser(agentCtx, resolved, sandbox === undefined ? undefined : { ...sandbox, sessionId })
       mountComposio(agentCtx, {
         grants: effectiveGrants(resolved),
         approvalVerbs: new Set(this.composio.approvalVerbs),
@@ -1495,6 +2075,7 @@ export class AgentsGateway {
         sendPolicy: resolved.send_policy ?? 'ask',
         serverLabel: this.composio.serverLabel,
       })
+      mountComposioAppTools(agentCtx, { serverLabel: this.composio.serverLabel, grants: effectiveGrants(resolved) })
     }
   }
 
@@ -1517,7 +2098,7 @@ export class AgentsGateway {
       const handle = await this.ctx.agents.resume({
         resumeSessionId: SessionId(row.id),
         agentOptions: await this.agentOptionsFor(config.agent),
-        setup: this.buildAgentSetup(config.agent, pending, cwd, row.ownerId, config.environment),
+        setup: this.buildAgentSetup(row.id, config.agent, pending, cwd, row.ownerId, config.environment),
       })
       if (await this.store.sessions.get(row.id, 'any') === undefined) {
         // Deleted while the resume was in flight: undo it.
@@ -1540,6 +2121,12 @@ export class AgentsGateway {
    * @throws AgentsApiRequestError 409 `session_not_resumable` when the row has no stored setup.
    */
   private async ensureLive(row: SessionIndexRow): Promise<void> {
+    // A session created moments ago may still be building its agent.
+    await this.setups.get(row.id)?.settled
+    const failed = this.setupFailures.get(row.id)
+    if (failed !== undefined) {
+      throw new AgentsApiRequestError(failed, 409, 'session_setup_failed')
+    }
     // The resume registers its projector only after reading the log, so an in-flight attempt is checked first.
     const inFlight = this.resuming.get(row.id)
     if (inFlight !== undefined) {
@@ -1676,7 +2263,7 @@ export class AgentsGateway {
       return { cwd: directory, environment: { type: 'sandbox', environment_id: record.id } }
     }
     const templateId = spec.type === 'sandbox' ? spec.template_id : typeof spec.environment_template_id === 'string' ? spec.environment_template_id : undefined
-    const template = templateId === undefined ? undefined : await this.store.templates.get(owner, templateId)
+    const template = templateId === undefined ? undefined : await this.templateFor(owner, templateId)
     if (templateId !== undefined && template === undefined) throw bad(`template not found: ${templateId}`, 'resource_not_found', 404)
     const inline = spec.type === 'openai_hosted' ? parseTemplateInput(spec) : { config: {} }
     if ('error' in inline) throw bad(inline.error, 'bad_request')
@@ -1694,7 +2281,7 @@ export class AgentsGateway {
     const id = `env_${randomUUID().replaceAll('-', '')}`
     let created: Awaited<ReturnType<SandboxProvider['create']>>
     try {
-      created = await provider.create(owner, id, { session_id: sessionId, template: config })
+      created = await provider.create(owner, id, { session_id: sessionId, template: await this.inlineFileRefs(owner, config) })
     } catch (error: unknown) {
       throw bad(errorMessage(error), 'bad_request')
     }
@@ -1730,13 +2317,13 @@ export class AgentsGateway {
         const text = userTextFromInput(evt.input)
         const fileIds = fileIdsFromInput(evt.input)
         await this.ingest.validate(owner, fileIds)
-        if (evt.model != null || evt.reasoning?.effort != null) {
+        if (evt.model != null || evt.reasoning?.effort !== undefined) {
           const fresh = await this.store.sessions.get(sessionId, owner)
           if (fresh === undefined) throw new AgentsApiRequestError(`Session "${sessionId}" not found`, 404, 'resource_not_found')
           await this.changeSettings(fresh, owner, {
             agent: {
               ...(evt.model == null ? {} : { model: evt.model }),
-              ...(evt.reasoning?.effort == null ? {} : { reasoning: { effort: evt.reasoning.effort } }),
+              ...(evt.reasoning?.effort === undefined ? {} : { reasoning: { effort: evt.reasoning.effort } }),
             },
           })
         }
@@ -1839,22 +2426,37 @@ export class AgentsGateway {
     json(res, 201, toSdkTemplate(await this.store.templates.create(owner, template), provider))
   }
 
+  /** A template by id: a built-in one, or one of the owner's. */
+  private async templateFor(owner: OwnerId, id: string): Promise<EnvironmentTemplate | undefined> {
+    return builtinTemplate(id) ?? await this.store.templates.get(owner, id)
+  }
+
   private async listTemplates(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
-    const page = await this.store.templates.list(owner, listQuery(url))
-    json(res, 200, { ...page, data: page.data.map(template => toSdkTemplate(template, this.sandboxes.get(template.provider))) })
+    const query = listQuery(url)
+    const page = await this.store.templates.list(owner, query)
+    // The built-in templates lead the first page (and only it); they need the isolated sandbox provider.
+    const builtins = query.after === undefined && this.sandboxes.get('sandbox') !== undefined ? [...BUILTIN_TEMPLATES] : []
+    json(res, 200, { ...page, data: [...builtins, ...page.data].map(template => ({
+      ...toSdkTemplate(template, this.sandboxes.get(template.provider)),
+      ...(isBuiltinTemplateId(template.id) ? { built_in: true } : {}),
+    })) })
   }
 
   private async getTemplate(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const template = await this.store.templates.get(owner, routeParam(params, 'template_id'))
+    const template = await this.templateFor(owner, routeParam(params, 'template_id'))
     if (!template) {
       notFound(res, 'template not found')
       return
     }
-    json(res, 200, toSdkTemplate(template, this.sandboxes.get(template.provider)))
+    json(res, 200, { ...toSdkTemplate(template, this.sandboxes.get(template.provider)), ...(isBuiltinTemplateId(template.id) ? { built_in: true } : {}) })
   }
 
   private async updateTemplate(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const templateId = routeParam(params, 'template_id')
+    if (isBuiltinTemplateId(templateId)) {
+      badRequest(res, 'built-in templates cannot be changed; make your own template instead')
+      return
+    }
     const existing = await this.store.templates.get(owner, templateId)
     if (!existing) {
       notFound(res, 'template not found')
@@ -1891,6 +2493,10 @@ export class AgentsGateway {
 
   private async deleteTemplate(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const templateId = routeParam(params, 'template_id')
+    if (isBuiltinTemplateId(templateId)) {
+      badRequest(res, 'built-in templates cannot be deleted')
+      return
+    }
     if (!await this.store.templates.delete(owner, templateId)) {
       notFound(res, 'template not found')
       return
@@ -1900,7 +2506,7 @@ export class AgentsGateway {
 
   private async createEnvironment(req: IncomingMessage, res: ServerResponse, owner: OwnerId): Promise<void> {
     try {
-      json(res, 201, await this.provisionEnvironment(owner, await readBody(req)))
+      json(res, 201, await this.provisionEnvironment(owner, await readBody(req), undefined, { background: true }))
     } catch (error: unknown) {
       if (error instanceof AgentsApiRequestError) {
         writeRequestError(res, error)
@@ -1915,11 +2521,52 @@ export class AgentsGateway {
    * provider, else the template's, else the default. `inline` is template config used when no template is named.
    * @returns the environment's wire form. Throws AgentsApiRequestError (400) for a bad request.
    */
-  async provisionEnvironment(owner: OwnerId, raw: Record<string, unknown>, inline?: EnvironmentTemplateConfig): Promise<SdkEnvironment> {
+  /**
+   * Replace a template's `file_id` files by inline copies of the owner's uploaded bytes, so every provider
+   * receives only inline files. The upload stays reusable (it is read, not claimed).
+   * @param owner - environment owner.
+   * @param config - template config.
+   * @returns the config with inline files only.
+   * @throws AgentsApiRequestError 400 `file_not_found` when an id is not one of the owner's files.
+   */
+  private async inlineFileRefs<T extends EnvironmentTemplateConfig>(owner: OwnerId, config: T): Promise<T> {
+    if (!config.files?.some(file => file.type === 'file_id')) return config
+    const files: TemplateFileInput[] = []
+    for (const file of config.files) {
+      if (file.type !== 'file_id') {
+        files.push(file)
+        continue
+      }
+      let served: ServedFile | undefined
+      for (const source of this.fileSources) {
+        served = await source.open(owner, file.file_id)
+        if (served !== undefined) break
+      }
+      if (served === undefined) throw new AgentsApiRequestError(`file "${file.path}": file not found: ${file.file_id}`, 400, 'file_not_found')
+      const chunks: Buffer[] = []
+      for await (const chunk of served.body()) chunks.push(Buffer.from(chunk))
+      files.push({ type: 'inline', path: file.path, data: Buffer.concat(chunks).toString('base64') })
+    }
+    return { ...config, files }
+  }
+
+  /** Environments whose provider `create` runs in the background, by id; `deleted` is set when the owner deleted one meanwhile. */
+  private readonly provisioning = new Map<string, { deleted: boolean }>()
+
+  /** How a create that timed out waits for the service to finish a sandbox it kept making (tests shorten it). */
+  environmentAdoption = { pollMs: 5000, maxMs: 15 * 60_000 }
+
+  /**
+   * @param opts.background - answer as soon as the record is stored as `pending` and run the provider's create afterwards
+   *   (sandbox providers only; the local provider's create is instant). The caller of an in-chat provision leaves it off and gets a ready environment.
+   */
+  async provisionEnvironment(owner: OwnerId, raw: Record<string, unknown>, inline?: EnvironmentTemplateConfig, opts: { background?: boolean } = {}): Promise<SdkEnvironment> {
     const fail = (message: string, code = 'bad_request'): never => { throw new AgentsApiRequestError(message, 400, code) }
-    const body = raw as { template_id?: string; session_id?: string; image?: string; provider?: string; name?: unknown }
+    const body = raw as { template_id?: string; session_id?: string; image?: string; provider?: string; name?: unknown; place?: unknown }
     if (body.name !== undefined && (typeof body.name !== 'string' || body.name.trim().length > 80)) fail('Field "name" must be a string of at most 80 characters')
+    if (body.place !== undefined && (typeof body.place !== 'string' || body.place.trim() === '')) fail('Field "place" must be a non-empty string')
     const input: CreateEnvironmentInput = {
+      ...(typeof body.place === 'string' ? { place: body.place.trim() } : {}),
       ...(typeof body.template_id === 'string' ? { template_id: body.template_id } : {}),
       ...(typeof body.session_id === 'string' ? { session_id: body.session_id } : {}),
       ...(typeof body.image === 'string' ? { image: body.image } : {}),
@@ -1927,7 +2574,7 @@ export class AgentsGateway {
     }
     let templateProvider: string | undefined
     if (input.template_id !== undefined) {
-      const template = await this.store.templates.get(owner, input.template_id)
+      const template = await this.templateFor(owner, input.template_id)
       if (template === undefined) return fail(`template not found: ${input.template_id}`)
       input.template = template.config
       templateProvider = template.provider
@@ -1943,25 +2590,38 @@ export class AgentsGateway {
     } catch (error: unknown) {
       fail(errorMessage(error))
     }
+    if (input.place !== undefined && provider.kind !== 'sandbox') fail(`sandbox provider "${provider.kind}" has no places; "place" applies to the sandbox provider only`)
     // A template the provider cannot fully apply is stored, but nothing is provisioned from it: never ignore fields silently.
     const unsupported = input.template === undefined ? [] : unsupportedFields(input.template, provider)
     if (unsupported.length > 0) fail(`sandbox provider "${provider.kind}" cannot apply template fields: ${unsupported.join(', ')}`, 'sandbox_template_unsupported')
     const id = `env_${randomUUID().replaceAll('-', '')}`
+    const createInput = input.template === undefined ? input : { ...input, template: await this.inlineFileRefs(owner, input.template) }
+    const base = {
+      id,
+      object: 'environment' as const,
+      provider: provider.kind,
+      created_at: Math.floor(Date.now() / 1000),
+      ...(input.template_id !== undefined ? { template_id: input.template_id } : {}),
+      ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
+    }
+    const named = input.name !== undefined ? { name: input.name } : {}
+    if (opts.background === true && provider.kind === 'sandbox') {
+      const pending: EnvironmentRecord = { ...base, status: 'pending', provider_metadata: { ...named } }
+      await this.store.environments.create(owner, pending)
+      this.provisioning.set(id, { deleted: false })
+      void this.finishProvisioning(owner, pending, provider, createInput, named)
+      return this.environmentJson(owner, pending)
+    }
     let created!: Awaited<ReturnType<SandboxProvider['create']>>
     try {
-      created = await provider.create(owner, id, input)
+      created = await provider.create(owner, id, createInput)
     } catch (error: unknown) {
       fail(errorMessage(error))
     }
     const record: EnvironmentRecord = {
-      id,
-      object: 'environment',
+      ...base,
       status: created.status,
-      provider: provider.kind,
-      provider_metadata: { ...(provider.kind === 'local' ? { workspace_directory: created.workspacePath } : { ...created.handle }), ...(input.name !== undefined ? { name: input.name } : {}) },
-      created_at: Math.floor(Date.now() / 1000),
-      ...(input.template_id !== undefined ? { template_id: input.template_id } : {}),
-      ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
+      provider_metadata: { ...(provider.kind === 'local' ? { workspace_directory: created.workspacePath } : { ...created.handle }), ...named },
       ...(created.error !== undefined ? { error: created.error } : {}),
     }
     try {
@@ -1975,16 +2635,104 @@ export class AgentsGateway {
     return this.environmentJson(owner, record)
   }
 
+  /**
+   * Runs the provider's create for a `pending` record and stores the outcome. A create that times out on our side
+   * may still finish in the service: its sandbox is adopted (polled for up to `environmentAdoption.maxMs`) instead
+   * of marking the environment failed. When the owner deleted the environment meanwhile, whatever was made is destroyed.
+   */
+  private async finishProvisioning(owner: OwnerId, pending: EnvironmentRecord, provider: SandboxProvider, input: CreateEnvironmentInput, named: Record<string, string>): Promise<void> {
+    const state = this.provisioning.get(pending.id) ?? { deleted: false }
+    const startedAt = Math.floor(Date.now() / 1000)
+    try {
+      let created: EnvironmentCreateResult
+      try {
+        created = await provider.create(owner, pending.id, input)
+      } catch (error: unknown) {
+        created = { status: 'failed', workspacePath: '', error: errorMessage(error) }
+      }
+      const adoptable = provider as Partial<AgentrySandboxProvider>
+      if (created.status === 'failed' && /time.?d? ?out|aborted/i.test(created.error ?? '') && typeof adoptable.adopt === 'function') {
+        created = await this.adoptTimedOut(adoptable as AgentrySandboxProvider, owner, pending.id, input, startedAt, state) ?? created
+      }
+      const { error: _pending, ...rest } = pending
+      const next: EnvironmentRecord = {
+        ...rest,
+        status: created.status,
+        provider_metadata: { ...created.handle, ...named },
+        updated_at: Math.floor(Date.now() / 1000),
+        ...(created.error !== undefined ? { error: created.error } : {}),
+      }
+      const stored = state.deleted ? undefined : await this.store.environments.update(owner, pending.id, next)
+      if (stored === undefined) {
+        // Deleted while it was being made (or the record vanished): nothing may be left running.
+        await this.destroyEnvironment(next).catch((destroyError: unknown) => {
+          this.ctx.logger.warn(`agents-api: environment ${pending.id} was deleted during setup and could not be destroyed: ${errorMessage(destroyError)}`)
+        })
+      }
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`agents-api: environment ${pending.id} setup bookkeeping failed: ${errorMessage(error)}`)
+    } finally {
+      this.provisioning.delete(pending.id)
+    }
+  }
+
+  private async adoptTimedOut(provider: AgentrySandboxProvider, owner: OwnerId, id: string, input: CreateEnvironmentInput, startedAt: number, state: { deleted: boolean }): Promise<EnvironmentCreateResult | undefined> {
+    const deadline = Date.now() + this.environmentAdoption.maxMs
+    for (;;) {
+      const found = await provider.adopt(owner, id, input, startedAt)
+      if (found === undefined || found.status !== 'pending' || state.deleted || Date.now() >= deadline) return found
+      await new Promise<void>(resolve => setTimeout(resolve, this.environmentAdoption.pollMs))
+    }
+  }
+
+  /**
+   * A `pending` record with no sandbox that no running background setup owns (the API restarted mid-setup) can never
+   * finish: mark it failed.
+   */
+  private async settleInterrupted(owner: OwnerId, record: EnvironmentRecord): Promise<EnvironmentRecord> {
+    if (record.status !== 'pending' || record.provider !== 'sandbox' || record.provider_metadata['sandbox_id'] !== undefined || this.provisioning.has(record.id)) return record
+    const next: EnvironmentRecord = { ...record, status: 'failed', error: 'Setup was interrupted.', updated_at: Math.floor(Date.now() / 1000) }
+    return await this.store.environments.update(owner, record.id, next) ?? next
+  }
+
   private async listEnvironments(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
     const page = await this.store.environments.list(owner, listQuery(url))
-    json(res, 200, { ...page, data: await Promise.all(page.data.map(record => this.environmentJson(owner, record))) })
+    json(res, 200, { ...page, data: await Promise.all(page.data.map(async record => this.environmentJson(owner, await this.settleInterrupted(owner, record)))) })
+  }
+
+  /** Rename an environment (`name`; empty clears it). Nothing else about an environment changes after it is made. */
+  private async updateEnvironment(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!record) {
+      notFound(res, 'environment not found')
+      return
+    }
+    const body = await readBody(req) as { name?: unknown }
+    if (typeof body.name !== 'string' || body.name.trim().length > 80) {
+      badRequest(res, 'Field "name" must be a string of at most 80 characters')
+      return
+    }
+    const name = body.name.trim()
+    const { name: _old, ...metadata } = record.provider_metadata
+    const next: EnvironmentRecord = {
+      ...record,
+      provider_metadata: { ...metadata, ...(name !== '' ? { name } : {}) },
+      updated_at: Math.floor(Date.now() / 1000),
+    }
+    json(res, 200, await this.environmentJson(owner, await this.store.environments.update(owner, record.id, next) ?? next))
   }
 
   /** Read the backend status and store it when it changed. */
   private async getEnvironment(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
-    if (!record) {
+    const stored = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!stored) {
       notFound(res, 'environment not found')
+      return
+    }
+    const record = await this.settleInterrupted(owner, stored)
+    if (this.provisioning.has(record.id) || (record.provider === 'sandbox' && record.status === 'failed' && record.provider_metadata['sandbox_id'] === undefined)) {
+      // Still being set up in the background, or never got a sandbox: there is nothing to ask.
+      json(res, 200, await this.environmentJson(owner, record))
       return
     }
     let status: EnvironmentStatus
@@ -2038,7 +2786,219 @@ export class AgentsGateway {
       json(res, status, { error: { type: 'invalid_request_error', code: e instanceof SandboxApiError ? e.code : 'sandbox_error', message: errorMessage(e) } })
       return
     }
+    if (action !== 'start') {
+      this.terminals.closeEnvironment(record.id)
+      this.browserLive.closeEnvironment(record.id)
+      browserPorts.releaseSandbox(sandboxId)
+    }
+    this.browserProbes.delete(sandboxId)
+    if (action === 'reset') forgetWorkspaceAlias(sandboxId)
     await this.getEnvironment(res, params, owner)
+  }
+
+  /** The sandbox behind a terminal route's environment, or the error response already sent. */
+  private async terminalTarget(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<{ record: EnvironmentRecord; provider: AgentrySandboxProvider; sandboxId: string } | undefined> {
+    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!record) {
+      notFound(res, 'environment not found')
+      return undefined
+    }
+    const provider = this.sandboxes.get(record.provider) as Partial<AgentrySandboxProvider> | undefined
+    const sandboxId = record.provider_metadata['sandbox_id']
+    if (provider?.api === undefined || sandboxId === undefined) {
+      json(res, 409, { error: { type: 'invalid_request_error', code: 'environment_no_terminal', message: 'This environment has no terminal; only sandboxes do.' } })
+      return undefined
+    }
+    return { record, provider: provider as AgentrySandboxProvider, sandboxId }
+  }
+
+  private terminalError(res: ServerResponse, error: unknown): void {
+    if (error instanceof TerminalError) json(res, error.status, { error: { type: 'invalid_request_error', code: error.code, message: error.message } })
+    else if (error instanceof SandboxApiError) json(res, error.status >= 400 ? error.status : 502, { error: { type: 'invalid_request_error', code: error.code, message: errorMessage(error) } })
+    else json(res, 502, { error: { type: 'invalid_request_error', code: 'terminal_unavailable', message: errorMessage(error) } })
+  }
+
+  private async openTerminal(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const target = await this.terminalTarget(res, params, owner)
+    if (!target) return
+    const body = await readBody(req).catch(() => ({})) as { cols?: unknown; rows?: unknown }
+    try {
+      const api = target.provider.api(owner)
+      await api.start(target.sandboxId)
+      // The shell starts in the sandbox's workspace, like sandbox_exec and a chat on this environment; ~ holds installs.
+      const directory = target.record.provider_metadata['workspace_directory']
+      const envd = api.envd(target.sandboxId)
+      const workspace = directory ? await workspaceOf(target.sandboxId, envd, directory) : undefined
+      const id = await this.terminals.open(owner, target.record.id, envd, { ...(workspace ? { cwd: workspace } : {}), cols: body.cols, rows: body.rows })
+      json(res, 200, { id, object: 'environment.terminal', environment_id: target.record.id })
+    } catch (error) {
+      this.terminalError(res, error)
+    }
+  }
+
+  private async streamTerminal(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const environmentId = routeParam(params, 'environment_id')
+    if (!await this.store.environments.get(owner, environmentId)) {
+      notFound(res, 'environment not found')
+      return
+    }
+    let detach: (() => void) | undefined
+    try {
+      writeSSEHeaders(res)
+      const open = (): boolean => !res.writableEnded && !res.destroyed
+      detach = this.terminals.attach(owner, environmentId, routeParam(params, 'terminal_id'), (event) => {
+        if (!open()) return
+        if (event.kind === 'output') writeEvent(res, 'output', { data: Buffer.from(event.data).toString('base64') })
+        else writeEvent(res, 'exit', { code: event.code })
+      })
+    } catch (error) {
+      if (!res.headersSent) this.terminalError(res, error)
+      else res.end()
+      return
+    }
+    const ping = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n') }, 20_000)
+    req.on('close', () => {
+      clearInterval(ping)
+      detach?.()
+    })
+  }
+
+  /**
+   * `GET /agents/sessions/{id}/browser/live`: the chat's browser as SSE `frame` events (base64 JPEG, url,
+   * title), `idle` events with a `reason` while there is nothing to show, and `pointer` (`action` move, down or up, `x`, `y`) and `focus` (`x`, `y`, `width`, `height`) events for the agent's cursor (viewport CSS px, never replayed). Read-only; the relay runs in the
+   * sandbox, so no sandbox address or key reaches the client.
+   */
+  private async streamBrowserLive(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const sessionId = routeParam(params, 'session_id')
+    const row = await this.requireSession(res, owner, sessionId)
+    if (!row) return
+    const sandbox = await this.sandboxOfSession(owner, sessionId)
+    const sandboxId = sandbox?.record.provider_metadata['sandbox_id']
+    const send = (event: LiveEvent): void => {
+      if (res.writableEnded || res.destroyed) return
+      if (event.kind === 'frame') writeEvent(res, 'frame', { data: event.data, url: event.url, title: event.title, width: event.width ?? null, height: event.height ?? null, timestamp: event.ts })
+      else if (event.kind === 'idle') writeEvent(res, 'idle', { reason: event.reason })
+      else if (event.kind === 'control') writeEvent(res, 'control', event.controlled ? { controlled: true, since: event.since } : { controlled: false, reason: event.reason })
+      else if (event.kind === 'pointer') writeEvent(res, 'pointer', { action: event.action, x: event.x, y: event.y, timestamp: event.ts })
+      else if (event.kind === 'focus') writeEvent(res, 'focus', { x: event.x, y: event.y, width: event.width, height: event.height, timestamp: event.ts })
+      else res.end()
+    }
+    let detach: (() => void) | undefined
+    if (sandbox !== undefined && sandboxId !== undefined && browserMode(configOf(row).agent, this.browserDefault) !== 'off') {
+      const envd = sandbox.provider.api(owner).envd(sandboxId)
+      const port = browserPorts.portOf(sandboxId, sessionId)
+      try {
+        writeSSEHeaders(res)
+        detach = this.browserLive.attach(
+          { owner, sessionId, environmentId: sandbox.record.id },
+          () => this.startBrowserRelay(envd, port, this.browserLive.intervalMs, sandbox.record.provider_metadata['workspace_directory'] === undefined ? undefined : recordingsDirOf(sandbox.record.provider_metadata['workspace_directory'])),
+          send,
+        )
+      } catch (error) {
+        if (error instanceof BrowserLiveError) {
+          writeEvent(res, 'error', { code: error.code, message: error.message })
+          res.end()
+          return
+        }
+        throw error
+      }
+    } else {
+      writeSSEHeaders(res)
+      send({ kind: 'idle', reason: sandbox === undefined ? 'not_sandbox' : 'browser_off' })
+    }
+    const ping = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n') }, 20_000)
+    req.on('close', () => {
+      clearInterval(ping)
+      detach?.()
+    })
+  }
+
+  /**
+   * `POST /agents/sessions/{id}/browser/control` with `action` `take` (optional `force`) or `release`
+   * (optional `control_id`): the user takes control of the chat's browser from the agent, or hands it back.
+   * Taking needs an open live view of a sandbox chat whose agent has the browser.
+   */
+  private async browserControl(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const sessionId = routeParam(params, 'session_id')
+    const row = await this.requireSession(res, owner, sessionId)
+    if (!row) return
+    const body = await readBody(req)
+    const action = body['action']
+    if (action === 'release') {
+      const controlId = typeof body['control_id'] === 'string' ? body['control_id'] : undefined
+      this.browserLive.releaseControl(owner, sessionId, controlId)
+      json(res, 200, { object: 'session.browser_control', session_id: sessionId, controlled: this.browserLive.controlled(sessionId) })
+      return
+    }
+    if (action !== 'take') {
+      badRequest(res, 'action must be "take" or "release"')
+      return
+    }
+    if (await this.sandboxOfSession(owner, sessionId) === undefined || browserMode(configOf(row).agent, this.browserDefault) === 'off') {
+      json(res, 409, { error: { type: 'invalid_request_error', code: 'browser_unavailable', message: 'This chat has no browser to control.' } })
+      return
+    }
+    try {
+      const grant = this.browserLive.takeControl(owner, sessionId, body['force'] === true)
+      json(res, 200, {
+        object: 'session.browser_control', session_id: sessionId, controlled: true,
+        control_id: grant.controlId, since: grant.since, idle_timeout_seconds: Math.round(grant.idleTimeoutMs / 1000),
+      })
+    } catch (error) {
+      if (!(error instanceof BrowserLiveError)) throw error
+      json(res, error.status, { error: { type: 'invalid_request_error', code: error.code, message: error.message } })
+    }
+  }
+
+  /**
+   * `POST /agents/sessions/{id}/browser/input` with `control_id` and `events` (at most 50): the user's mouse,
+   * wheel, keys, text and page size, in the page's CSS pixels, sent to the page through the relay.
+   */
+  private async browserInput(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const sessionId = routeParam(params, 'session_id')
+    const row = await this.requireSession(res, owner, sessionId)
+    if (!row) return
+    const body = await readBody(req)
+    const events = parseInputEvents(body['events'])
+    if (typeof events === 'string') {
+      badRequest(res, events)
+      return
+    }
+    try {
+      this.browserLive.input(owner, sessionId, typeof body['control_id'] === 'string' ? body['control_id'] : '', events)
+      json(res, 200, { object: 'session.browser_input', accepted: events.length })
+    } catch (error) {
+      if (!(error instanceof BrowserLiveError)) throw error
+      json(res, error.status, { error: { type: 'invalid_request_error', code: error.code, message: error.message } })
+    }
+  }
+
+  /** The pre-execute decision for a browser tool call while the user may have control (`browser-control.ts`). */
+  browserToolGate(sessionId: string, name: string, signal?: AbortSignal): Promise<BrowserGateDecision> {
+    return browserToolGate(this.browserLive, sessionId, name, signal)
+  }
+
+  /** The note to put in front of a browser look's result right after a hand-back, if any. */
+  browserLookNote(sessionId: string, name: string, isError: boolean): string | undefined {
+    return browserLookNote(this.browserLive, sessionId, name, isError)
+  }
+
+  private async terminalCall(req: IncomingMessage | undefined, res: ServerResponse, params: Record<string, string>, owner: OwnerId, action: 'input' | 'resize' | 'close'): Promise<void> {
+    const environmentId = routeParam(params, 'environment_id')
+    if (!await this.store.environments.get(owner, environmentId)) {
+      notFound(res, 'environment not found')
+      return
+    }
+    const id = routeParam(params, 'terminal_id')
+    try {
+      const body = req ? await readBody(req).catch(() => ({})) as { data?: unknown; cols?: unknown; rows?: unknown } : {}
+      if (action === 'input') await this.terminals.input(owner, environmentId, id, body.data)
+      else if (action === 'resize') await this.terminals.resize(owner, environmentId, id, body.cols, body.rows)
+      else this.terminals.close(owner, environmentId, id)
+      json(res, 200, { id, object: 'environment.terminal', ...(action === 'close' ? { deleted: true } : {}) })
+    } catch (error) {
+      this.terminalError(res, error)
+    }
   }
 
   private async deleteEnvironment(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -2048,7 +3008,13 @@ export class AgentsGateway {
       notFound(res, 'environment not found')
       return
     }
-    await this.destroyEnvironment(record)
+    const settingUp = this.provisioning.get(environmentId)
+    if (settingUp !== undefined) {
+      // The background setup destroys what it made when it finishes.
+      settingUp.deleted = true
+    } else {
+      await this.destroyEnvironment(record)
+    }
     await this.store.environments.delete(owner, environmentId)
     json(res, 200, { id: environmentId, object: 'environment.deleted', deleted: true })
   }
@@ -2078,6 +3044,11 @@ export class AgentsGateway {
    * removed one) has no backend to clean: log it and let the caller drop the record.
    */
   private async destroyEnvironment(record: EnvironmentRecord): Promise<void> {
+    this.terminals.closeEnvironment(record.id)
+    this.browserLive.closeEnvironment(record.id)
+    browserPorts.releaseSandbox(record.provider_metadata['sandbox_id'] ?? '')
+    forgetWorkspaceAlias(record.provider_metadata['sandbox_id'] ?? '')
+    this.browserProbes.delete(record.provider_metadata['sandbox_id'] ?? '')
     const provider = this.sandboxes.get(record.provider)
     if (provider === undefined) {
       this.ctx.logger.warn(`agents-api: environment ${record.id} uses sandbox provider "${record.provider}", which is not registered; removing the record without cleaning a backend`)
@@ -2092,10 +3063,15 @@ export class AgentsGateway {
   private async environmentJson(owner: OwnerId, record: EnvironmentRecord): Promise<SdkEnvironment> {
     const provider = this.sandboxes.get(record.provider) as Partial<AgentrySandboxProvider> | undefined
     const [template, sandbox] = await Promise.all([
-      record.template_id === undefined ? undefined : this.store.templates.get(owner, record.template_id),
+      record.template_id === undefined ? undefined : this.templateFor(owner, record.template_id),
       typeof provider?.describe === 'function' ? provider.describe(record) : undefined,
     ])
     const out = toSdkEnvironment(record, template)
+    // No sandbox id: the background setup is still running (or the record is about to be settled), or the setup failed.
+    if (record.provider === 'sandbox' && record.provider_metadata['sandbox_id'] === undefined && (record.status === 'pending' || record.status === 'failed')) {
+      const name = record.provider_metadata['name']
+      return { ...out, ...(name !== undefined ? { name } : {}), sandbox: record.status === 'pending' ? { state: 'provisioning', progress: { stage: 'starting', updated_at: Math.floor(Date.now() / 1000) } } : { state: 'failed' } }
+    }
     const name = record.provider_metadata['name']
     return { ...out, ...(name !== undefined ? { name } : {}), ...(sandbox !== undefined ? { sandbox } : {}) }
   }
@@ -2260,7 +3236,73 @@ export class AgentsGateway {
     res.setHeader('Content-Type', artifactContentType(rawPath))
     res.setHeader('Content-Disposition', artifactContentDisposition(rawPath, download))
     res.setHeader('X-Content-Type-Options', 'nosniff')
+    // The web app answers byte ranges (video seeking) only when it knows the size.
+    res.setHeader('Content-Length', String(body.byteLength))
     res.end(body)
+  }
+
+  /**
+   * Resolves once the session's queued sandbox snapshots settled, so a tool never races the turn-start snapshot.
+   * @param sessionId - session id.
+   */
+  changesSettled(sessionId: string): Promise<void> {
+    return this.sandboxChanges.settled(sessionId)
+  }
+
+  /** Where a sandbox session's git commands run; `undefined` for other sessions or when the lookup fails. */
+  private async sandboxTarget(sessionId: string): Promise<SandboxTarget | undefined> {
+    try {
+      const row = await this.store.sessions.get(sessionId, 'any')
+      if (row === undefined) return undefined
+      const sandbox = await this.sandboxOfSession(row.ownerId, sessionId)
+      if (sandbox === undefined || typeof sandbox.provider.exec !== 'function') return undefined
+      return { dir: sandbox.provider.workspaceDir(sandbox.record), exec: (script, opts) => sandbox.provider.exec(sandbox.record, script, opts) }
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * One workspace file of a session, by a sanitized relative path: sandbox, artifact store or local folder,
+   * as `getArtifact` reads them. The version is `<size>:<mtime>` (content hash for the artifact store).
+   * @throws {WorkspaceUnavailableError} when the sandbox cannot be reached.
+   */
+  private async sessionFile(owner: OwnerId, sessionId: string, path: string): Promise<SessionFile | undefined> {
+    const sandbox = await this.sandboxOfSession(owner, sessionId)
+    if (sandbox !== undefined) {
+      let stat: { size: number; mtimeMs: number } | undefined
+      try {
+        stat = await sandbox.provider.fileStat(sandbox.record, path)
+      } catch (e: unknown) {
+        throw new WorkspaceUnavailableError(errorMessage(e), { cause: e })
+      }
+      if (stat === undefined) return undefined
+      return {
+        size: stat.size,
+        version: `${String(stat.size)}:${String(stat.mtimeMs)}`,
+        read: async () => {
+          try {
+            return await sandbox.provider.readFile(sandbox.record, path)
+          } catch (e: unknown) {
+            throw new WorkspaceUnavailableError(errorMessage(e), { cause: e })
+          }
+        },
+      }
+    }
+    if (this.artifacts !== undefined) {
+      const body = await getS3Artifact(this.artifacts, sessionId, path)
+      if (body === undefined) return undefined
+      return { size: body.length, version: `${String(body.length)}:${createHash('sha1').update(body).digest('hex')}`, read: () => Promise.resolve(new Uint8Array(body)) }
+    }
+    const workspace = this.sessionRegistry.get(sessionId)?.workspace ?? await this.history.workspace(sessionId)
+    if (workspace === undefined) return undefined
+    const stat = await statWorkspaceArtifact(workspace, path)
+    if (stat === undefined) return undefined
+    return {
+      size: stat.size,
+      version: `${String(stat.size)}:${String(Math.trunc(stat.mtimeMs))}`,
+      read: async () => new Uint8Array(await readFile(stat.absolute)),
+    }
   }
 
   /**
@@ -2275,31 +3317,50 @@ export class AgentsGateway {
     return workspace
   }
 
+  /**
+   * Subagents of a session: children seen live by this process come from the
+   * registry (the cache), the rest are rebuilt from their Session logs through
+   * the same projection. A child belongs to its parent's owner, so callers
+   * check the parent first.
+   * @param row - the parent's index row.
+   * @param childId - only this child, when given.
+   * @returns the children, oldest first.
+   */
+  private async subagentsOf(row: SessionIndexRow, childId?: string): Promise<LoggedSubagent[]> {
+    const live = new Map(this.sessionRegistry.listSubagents(row.id)
+      .filter(child => childId === undefined || child.id === childId)
+      .map(child => [child.id, { resource: subagentResource(child), turns: child.turns, items: child.items }]))
+    if (childId !== undefined && live.has(childId)) return [live.get(childId)!]
+    const logged = await this.history.subagents(row.id, baseOf(row).agent.id, childId)
+    const merged = logged.map(child => live.get(child.resource.id) ?? child)
+    for (const [id, child] of live) {
+      if (!merged.some(row => row.resource.id === id)) merged.push(child)
+    }
+    return merged.sort((a, b) => a.resource.created_at - b.resource.created_at)
+  }
+
   private async listSubagents(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const sessionId = routeParam(params, 'session_id')
-    if (!await this.requireSession(res, owner, sessionId)) return
-    json(res, 200, {
-      object: 'list',
-      data: this.sessionRegistry.listSubagents(sessionId).map(projectSubagent),
-    })
+    const row = await this.requireSession(res, owner, routeParam(params, 'session_id'))
+    if (!row) return
+    json(res, 200, { object: 'list', data: (await this.subagentsOf(row)).map(child => child.resource) })
   }
 
   private async getSubagent(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const located = await this.requireSubagent(res, params, owner)
-    if (!located) return
-    json(res, 200, projectSubagent(located.child))
+    const child = await this.requireSubagent(res, params, owner)
+    if (!child) return
+    json(res, 200, child.resource)
   }
 
   private async listSubagentTurns(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const located = await this.requireSubagent(res, params, owner)
-    if (!located) return
-    json(res, 200, { object: 'list', data: this.sessionRegistry.listChildTurns(located.sessionId, located.subagentId) ?? [] })
+    const child = await this.requireSubagent(res, params, owner)
+    if (!child) return
+    json(res, 200, { object: 'list', data: child.turns })
   }
 
   private async getSubagentTurn(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const located = await this.requireSubagent(res, params, owner)
-    if (!located) return
-    const turn = this.sessionRegistry.getChildTurn(located.sessionId, located.subagentId, routeParam(params, 'turn_id'))
+    const child = await this.requireSubagent(res, params, owner)
+    if (!child) return
+    const turn = child.turns.find(row => row.id === routeParam(params, 'turn_id'))
     if (!turn) {
       notFound(res, 'turn not found')
       return
@@ -2308,38 +3369,32 @@ export class AgentsGateway {
   }
 
   private async listSubagentItems(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const located = await this.requireSubagent(res, params, owner)
-    if (!located) return
-    json(res, 200, { object: 'list', data: this.sessionRegistry.listChildItems(located.sessionId, located.subagentId) ?? [] })
+    const child = await this.requireSubagent(res, params, owner)
+    if (!child) return
+    json(res, 200, { object: 'list', data: child.items })
   }
 
   private async listSubagentTurnItems(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const located = await this.requireSubagent(res, params, owner)
-    if (!located) return
+    const child = await this.requireSubagent(res, params, owner)
+    if (!child) return
     const turnId = routeParam(params, 'turn_id')
-    if (!this.sessionRegistry.getChildTurn(located.sessionId, located.subagentId, turnId)) {
+    if (!child.turns.some(row => row.id === turnId)) {
       notFound(res, 'turn not found')
       return
     }
-    const items = (this.sessionRegistry.listChildItems(located.sessionId, located.subagentId) ?? [])
-      .filter(item => item.turn_id === turnId)
-    json(res, 200, { object: 'list', data: items })
+    json(res, 200, { object: 'list', data: child.items.filter(item => item.turn_id === turnId) })
   }
 
   private async requireSubagent(
     res: ServerResponse,
     params: Record<string, string>,
     owner: OwnerId,
-  ): Promise<{ sessionId: string; subagentId: string; child: SubagentState } | undefined> {
-    const sessionId = routeParam(params, 'session_id')
-    const subagentId = routeParam(params, 'subagent_id')
-    if (!await this.requireSession(res, owner, sessionId)) return undefined
-    const child = this.sessionRegistry.getSubagent(sessionId, subagentId)
-    if (!child) {
-      notFound(res, 'subagent not found')
-      return undefined
-    }
-    return { sessionId, subagentId, child }
+  ): Promise<LoggedSubagent | undefined> {
+    const row = await this.requireSession(res, owner, routeParam(params, 'session_id'))
+    if (!row) return undefined
+    const child = (await this.subagentsOf(row, routeParam(params, 'subagent_id')))[0]
+    if (!child) notFound(res, 'subagent not found')
+    return child
   }
 
   /**
@@ -2449,6 +3504,51 @@ export class AgentsGateway {
   }
 }
 
+/** Project fields a caller may set. Omitted fields keep their stored value. */
+type ProjectInput = Partial<Pick<OAIProject, 'name' | 'agent_id' | 'environment' | 'pinned'>>
+
+/**
+ * Validate a project create or update body.
+ * @param raw - parsed JSON body.
+ * @param partial - update: omitted fields are left alone; create: `name` is required.
+ * @returns the accepted fields, or a client-facing error message.
+ */
+function parseProjectInput(raw: Record<string, unknown>, partial: boolean): { value: ProjectInput } | { error: string } {
+  const value: ProjectInput = {}
+  if (!partial || raw.name !== undefined) {
+    if (typeof raw.name !== 'string' || raw.name.trim() === '') return { error: 'Field "name" must be a non-empty string' }
+    value.name = raw.name.trim()
+  }
+  if (raw.agent_id !== undefined) {
+    if (raw.agent_id !== null && typeof raw.agent_id !== 'string') return { error: 'Field "agent_id" must be a string or null' }
+    value.agent_id = raw.agent_id
+  }
+  if (raw.environment !== undefined) {
+    if (raw.environment !== null && (typeof raw.environment !== 'object' || Array.isArray(raw.environment))) return { error: 'Field "environment" must be an environment config or null' }
+    value.environment = raw.environment as OAIEnvironmentConfig | null
+  }
+  if (raw.pinned !== undefined) {
+    if (typeof raw.pinned !== 'boolean') return { error: 'Field "pinned" must be a boolean' }
+    value.pinned = raw.pinned
+  }
+  return { value }
+}
+
+/**
+ * Read the `project_id` of a session create or update body. `null` (and an
+ * empty string, as sent by a query form) means unfiled; `undefined` leaves the
+ * current attachment alone.
+ * @param value - raw body field.
+ * @returns the project id, `null` for unfiled, or `undefined` when omitted.
+ * @throws AgentsApiRequestError 400 when the value is not a string or null.
+ */
+function sessionProjectId(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null || value === '') return null
+  if (typeof value !== 'string') throw new AgentsApiRequestError('Field "project_id" must be a string or null', 400, 'bad_request')
+  return value
+}
+
 /**
  * Provider that owns `model`. The profile default is used when it lists the
  * model, or when no catalog is available. Otherwise the first configured
@@ -2459,8 +3559,21 @@ export class AgentsGateway {
  * @param fallback - `agentDefaultModel` provider.
  */
 async function providerForModel(ctx: Context, model: string, fallback: string): Promise<string> {
+  return (await lookUpModel(ctx, model, fallback)).provider
+}
+
+/**
+ * Find the provider that lists a model, and whether the model is known at all.
+ * `known` is `false` only when every provider's list was read and none had the
+ * model; it is `undefined` when the lists cannot say (no `llm` service, or a
+ * provider failed to list).
+ * @param ctx - host context.
+ * @param model - model id.
+ * @param fallback - `agentDefaultModel` provider.
+ */
+async function lookUpModel(ctx: Context, model: string, fallback: string): Promise<{ provider: string; known: boolean | undefined }> {
   const get = (ctx as { get?: (name: string) => unknown }).get
-  if (typeof get !== 'function') return fallback
+  if (typeof get !== 'function') return { provider: fallback, known: undefined }
   let llm: {
     listProviders?: () => ReadonlyArray<{ id: string }>
     listModels?: (provider: string) => Promise<ReadonlyArray<{ id: string }>>
@@ -2468,23 +3581,25 @@ async function providerForModel(ctx: Context, model: string, fallback: string): 
   try {
     llm = get.call(ctx, 'llm') as typeof llm
   } catch {
-    return fallback
+    return { provider: fallback, known: undefined }
   }
   if (llm === undefined || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
-    return fallback
+    return { provider: fallback, known: undefined }
   }
   const ids = llm.listProviders().map(provider => provider.id)
   const ordered = ids.includes(fallback) ? [fallback, ...ids.filter(id => id !== fallback)] : ids
+  let complete = ordered.length > 0
   for (const provider of ordered) {
     let models: ReadonlyArray<{ id: string }>
     try {
       models = await llm.listModels(provider)
     } catch {
+      complete = false
       continue
     }
-    if (models.some(row => row.id === model)) return provider
+    if (models.some(row => row.id === model)) return { provider, known: true }
   }
-  return fallback
+  return { provider: fallback, known: complete ? false : undefined }
 }
 
 /**
@@ -2549,22 +3664,6 @@ function maskHostCatalog<T extends { name: string }>(
     out = out.filter(row => !deny.has(row.name))
   }
   return out
-}
-
-/**
- * Wire shape for a subagent. Turns and items stay on their own routes.
- * @param child - stored child.
- */
-function projectSubagent(child: SubagentState): Omit<SubagentState, 'turns' | 'items' | 'currentTurnId'> {
-  return {
-    id: child.id,
-    object: child.object,
-    session_id: child.session_id,
-    parent_session_id: child.parent_session_id,
-    status: child.status,
-    created_at: child.created_at,
-    ...(child.closed_at !== undefined ? { closed_at: child.closed_at } : {}),
-  }
 }
 
 /**

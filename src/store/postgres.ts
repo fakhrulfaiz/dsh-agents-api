@@ -13,7 +13,7 @@ import pg from 'pg'
 import type { OwnerId } from '../auth/authenticator.ts'
 import type { EnvironmentRecord, EnvironmentTemplate } from '../environment-types.ts'
 import type { ListQuery } from '../http.ts'
-import type { OAIAgent, OAIListResponse, SessionConfig } from '../types.ts'
+import type { OAIAgent, OAIListResponse, OAIProject, ProjectListQuery, SessionConfig } from '../types.ts'
 import {
   RESUMABLE_STATUSES,
   type FileAttachmentSnapshot,
@@ -22,6 +22,7 @@ import {
   decodeSessionCursor,
   encodeSessionCursor,
   type OwnedCollection,
+  type ProjectCollection,
   type SessionIndexPatch,
   type SessionIndexRow,
   type SessionListQuery,
@@ -30,7 +31,7 @@ import {
 
 /** Owned-collection table plus the columns copied out of `body`. */
 interface OwnedTable<T> {
-  table: 'agents' | 'environment_templates' | 'environments'
+  table: 'agents' | 'environment_templates' | 'environments' | 'projects'
   columns: readonly string[]
   values: (value: T) => unknown[]
 }
@@ -49,10 +50,17 @@ const ENVIRONMENTS: OwnedTable<EnvironmentRecord> = {
   values: env => [env.provider, env.status, env.provider_metadata.workspace_directory ?? null],
 }
 
+const PROJECTS: OwnedTable<OAIProject> = {
+  table: 'projects',
+  columns: ['name', 'status', 'pinned'],
+  values: project => [project.name, project.status, project.pinned],
+}
+
 /** `SessionIndexPatch` keys and their columns. */
 const SESSION_PATCH_COLUMNS = {
   agentId: 'agent_id',
   environmentId: 'environment_id',
+  projectId: 'project_id',
   dshSessionId: 'dsh_session_id',
   status: 'status',
   lastError: 'last_error',
@@ -61,13 +69,14 @@ const SESSION_PATCH_COLUMNS = {
   body: 'body',
 } as const satisfies Record<Exclude<keyof SessionIndexPatch, 'updatedAt'>, string>
 
-const SESSION_COLUMNS = 'id, owner_id, agent_id, environment_id, dsh_session_id, status, last_error, model, reasoning_effort, body, created_at, updated_at'
+const SESSION_COLUMNS = 'id, owner_id, agent_id, environment_id, project_id, dsh_session_id, status, last_error, model, reasoning_effort, body, created_at, updated_at'
 
 interface SessionDbRow {
   id: string
   owner_id: string
   agent_id: string | null
   environment_id: string | null
+  project_id: string | null
   dsh_session_id: string
   status: SessionIndexRow['status']
   last_error: string | null
@@ -88,6 +97,7 @@ function sessionFromDb(row: SessionDbRow): SessionIndexRow {
     ownerId: row.owner_id as OwnerId,
     agentId: row.agent_id,
     environmentId: row.environment_id,
+    projectId: row.project_id,
     dshSessionId: row.dsh_session_id,
     status: row.status,
     lastError: row.last_error,
@@ -208,6 +218,19 @@ function fileCollection(pool: pg.Pool): FileCollection {
         [owner, ids],
       )
     },
+    async list(owner, q) {
+      const result = await pool.query<FileDbRow>(
+        `with after_row as (select created_at, id from files where owner_id = $1 and id = $2)
+         select ${FILE_COLUMNS} from files
+         where owner_id = $1
+           and ($4::text is null or status = $4)
+           and (not exists (select 1 from after_row) or (created_at, id) < (select created_at, id from after_row))
+         order by created_at desc, id desc
+         limit $3`,
+        [owner, q.after ?? null, q.limit + 1, q.status ?? null],
+      )
+      return { data: result.rows.slice(0, q.limit).map(fileFromDb), hasMore: result.rows.length > q.limit }
+    },
     async listForSession(owner, sessionId) {
       const result = await pool.query<FileDbRow>(
         `select ${FILE_COLUMNS} from files where owner_id = $1 and session_id = $2 and status = 'attached' and attachment_id is not null order by attached_at, id`,
@@ -288,6 +311,58 @@ function ownedCollection<T extends { id: string }>(pool: pg.Pool, spec: OwnedTab
 }
 
 /**
+ * Build the owner-scoped project collection. The shared owned table handles
+ * create/get/update/delete; `list` filters by status before paging, and
+ * `countSessions` refuses ids that do not belong to the caller.
+ * @param pool - connection pool.
+ * @returns the project collection over the `projects` and `sessions` tables.
+ */
+function projectCollection(pool: pg.Pool): ProjectCollection {
+  const base = ownedCollection(pool, PROJECTS)
+  const listSql = (order: 'asc' | 'desc') => {
+    const compare = order === 'asc' ? '>' : '<'
+    return `with after_row as (select created_at, id from projects where owner_id = $1 and id = $2)
+      select body from projects
+      where owner_id = $1
+        and ($4::text is null or status = $4)
+        and (not exists (select 1 from after_row) or (created_at, id) ${compare} (select created_at, id from after_row))
+      order by created_at ${order}, id ${order}
+      limit $3`
+  }
+  const listAsc = listSql('asc')
+  const listDesc = listSql('desc')
+  return {
+    create: base.create,
+    get: base.get,
+    update: base.update,
+    delete: base.delete,
+    async list(q: ProjectListQuery) {
+      const limit = q.limit ?? 20
+      const status = q.status ?? 'active'
+      const sql = q.order === 'asc' ? listAsc : listDesc
+      const result = await pool.query<{ body: OAIProject }>(sql, [q.owner, q.after ?? null, limit + 1, status === 'all' ? null : status])
+      const data = result.rows.slice(0, limit).map(row => row.body)
+      return {
+        object: 'list' as const,
+        data,
+        first_id: data[0]?.id ?? null,
+        last_id: data.at(-1)?.id ?? null,
+        has_more: result.rows.length > limit,
+      }
+    },
+    async countSessions(owner, id) {
+      const result = await pool.query<{ total: string }>(
+        `select count(*)::text as total from sessions s
+         where s.owner_id = $1 and s.project_id = $2
+           and exists (select 1 from projects p where p.id = $2 and p.owner_id = $1)`,
+        [owner, id],
+      )
+      return Number(result.rows[0]!.total)
+    },
+  }
+}
+
+/**
  * Open a pooled `Store`. Run `migrate(url)` first.
  * @param url - Postgres connection URL.
  * @param onIdleClientError - receives errors of idle pooled connections; the pool discards such a connection either way.
@@ -314,13 +389,14 @@ export async function openPostgresStore(url: string, onIdleClientError?: (error:
     agents: ownedCollection(pool, plainTable<OAIAgent>('agents')),
     templates: ownedCollection(pool, plainTable<EnvironmentTemplate>('environment_templates')),
     environments: ownedCollection(pool, ENVIRONMENTS),
+    projects: projectCollection(pool),
     files: fileCollection(pool),
     skills: skillCollection(pool),
     sessions: {
       async insert(row) {
         await pool.query(
-          `insert into sessions (${SESSION_COLUMNS}) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-          [row.id, row.ownerId, row.agentId, row.environmentId, row.dshSessionId, row.status, row.lastError, row.model, row.reasoningEffort, row.body === null ? {} : row.body, row.createdAt, row.updatedAt],
+          `insert into sessions (${SESSION_COLUMNS}) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+          [row.id, row.ownerId, row.agentId, row.environmentId, row.projectId, row.dshSessionId, row.status, row.lastError, row.model, row.reasoningEffort, row.body === null ? {} : row.body, row.createdAt, row.updatedAt],
         )
       },
       async update(id, owner, patch) {
@@ -340,6 +416,19 @@ export async function openPostgresStore(url: string, onIdleClientError?: (error:
         const result = await pool.query<SessionDbRow>(
           `update sessions set ${sets.join(', ')} where id = $1 and ($2::text is null or owner_id = $2) returning ${SESSION_COLUMNS}`,
           values,
+        )
+        const row = result.rows[0]
+        return row === undefined ? undefined : sessionFromDb(row)
+      },
+      async mergeMetadata(id, owner, patch) {
+        // One statement: the merge happens on the stored value, not on a copy the caller read earlier. Metadata values are strings, so stripping nulls only removes deleted keys.
+        const result = await pool.query<SessionDbRow>(
+          `update sessions set
+             body = jsonb_set(body, '{metadata}', jsonb_strip_nulls(coalesce(body->'metadata', '{}'::jsonb) || $3::jsonb)),
+             updated_at = clock_timestamp()
+           where id = $1 and ($2::text is null or owner_id = $2) and body <> '{}'::jsonb
+           returning ${SESSION_COLUMNS}`,
+          [id, owner === 'any' ? null : owner, JSON.stringify(patch)],
         )
         const row = result.rows[0]
         return row === undefined ? undefined : sessionFromDb(row)
@@ -369,6 +458,8 @@ export async function openPostgresStore(url: string, onIdleClientError?: (error:
              and ($4::timestamptz is null or created_at >= $4)
              and ($5::timestamptz is null or created_at < $5)
              and ($6::timestamptz is null or (created_at, id) < ($6, $7::text))
+             and ($9::jsonb is null or body->'metadata' @> $9::jsonb)
+             and (not $10::boolean or ($11::text is null and project_id is null or project_id = $11))
            order by created_at desc, id desc
            limit $8`,
           [
@@ -380,6 +471,9 @@ export async function openPostgresStore(url: string, onIdleClientError?: (error:
             after?.createdAt ?? null,
             after?.id ?? null,
             q.limit + 1,
+            q.metadata === undefined || Object.keys(q.metadata).length === 0 ? null : JSON.stringify(q.metadata),
+            q.projectId !== undefined,
+            q.projectId ?? null,
           ],
         )
         const data = result.rows.slice(0, q.limit).map(sessionFromDb)

@@ -45,6 +45,7 @@ interface CatalogRow {
 function fakeSchedule(rows: CatalogRow[]): { service: ScheduleService; rows: CatalogRow[]; deleted: string[]; failCatalog: boolean } {
   const state = { rows, deleted: [] as string[], failCatalog: false }
   const service = {
+    deliveryLimits: () => ({ newSessionIntervalSeconds: 60 }),
     catalog: async () => {
       if (state.failCatalog) throw new Error('schedule store offline')
       return state.rows.map(row => ({ ...row, involvedSessionIds: row.involvedSessionIds ?? [] }))
@@ -165,7 +166,7 @@ describe('schedule/resolve-agent', () => {
     const store = new MemoryStore()
     await store.ensureOwner(OWNER)
     const at = new Date()
-    await store.sessions.insert({ id: 'sess_legacy', dshSessionId: 'sess_legacy', ownerId: OWNER, agentId: null, environmentId: null, status: 'idle', lastError: null, model: 'deepseek-chat', reasoningEffort: null, body: null, createdAt: at, updatedAt: at })
+    await store.sessions.insert({ id: 'sess_legacy', dshSessionId: 'sess_legacy', ownerId: OWNER, agentId: null, environmentId: null, projectId: null, status: 'idle', lastError: null, model: 'deepseek-chat', reasoningEffort: null, body: null, createdAt: at, updatedAt: at })
     const process = await startProcess(store, new FakeSessionQuery())
     const { resolve, fallback } = host(process.api)
     await expect(resolve('sess_legacy')).rejects.toMatchObject({ status: 409, code: 'session_not_resumable' })

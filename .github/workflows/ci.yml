@@ -45,11 +45,22 @@ jobs:
       - name: DeepSeek Harness tag
         id: pin
         run: echo "tag=$(cat dsh.pin)" >> "$GITHUB_OUTPUT"
+      - name: Resolve the agentry-sandbox commit
+        id: sandbox
+        env:
+          SANDBOX_REF: ${{ github.event_name == 'push' && 'develop' || 'main' }}
+        run: |
+          sha=$(git ls-remote https://github.com/fakhrulfaiz/agentry-sandbox.git "refs/heads/$SANDBOX_REF" | cut -f1)
+          test -n "$sha" || { echo "could not resolve agentry-sandbox $SANDBOX_REF" >&2; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: false
-          build-args: DSH_TAG=${{ steps.pin.outputs.tag }}
+          build-args: |
+            DSH_TAG=${{ steps.pin.outputs.tag }}
+            SANDBOX_REF=${{ github.event_name == 'push' && 'develop' || 'main' }}
+            SANDBOX_SHA=${{ steps.sandbox.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

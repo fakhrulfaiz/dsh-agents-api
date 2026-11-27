@@ -1,9 +1,12 @@
-import { mkdtemp } from 'node:fs/promises'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { startTestService, type TestService } from '@agentry/sandbox/testing'
 import { ownerId } from '../src/auth/authenticator.ts'
+import { BROWSER_SANDBOX_IMAGE } from '../src/environment/browser-image.ts'
 import { toSdkEnvironment } from '../src/environment/environment-compat.ts'
 import type { EnvironmentRecord, EnvironmentTemplateConfig } from '../src/environment-types.ts'
 import { inlineTemplate, mountSandboxTools, SANDBOX_TOOL_NAMES } from '../src/mount-sandbox-tools.ts'
@@ -17,11 +20,13 @@ let tools: Map<string, { execute(args: unknown): Promise<string> }>
 let approve: (exec: { name: string; arguments: unknown }, next: () => Promise<unknown>) => Promise<unknown>
 let n = 0
 
+let workspace: string
 async function setup(env: Record<string, string> = {}, current?: string) {
   svc = await startTestService(env)
   store = new MemoryStore()
   await store.ensureOwner(OWNER)
   const root = await mkdtemp(join(tmpdir(), 'agentry-sbx-tools-'))
+  workspace = await mkdtemp(join(tmpdir(), 'agentry-chat-ws-'))
   const provider = createAgentrySandboxProvider({ url: svc.url, key: svc.key, workspacesRoot: root })
   tools = new Map()
   const ctx = {
@@ -32,6 +37,7 @@ async function setup(env: Record<string, string> = {}, current?: string) {
     owner: OWNER,
     store,
     provider,
+    cwd: workspace,
     async provision(raw, inline?: EnvironmentTemplateConfig) {
       const id = `env_t${String(++n)}`
       const created = await provider.create(OWNER, id, { ...(raw['name'] ? { name: String(raw['name']) } : {}), ...(inline ? { template: inline } : {}) })
@@ -50,8 +56,51 @@ afterEach(async () => { await svc?.close() })
 describe('sandbox tools', () => {
   beforeEach(async () => { await setup() })
 
-  it('registers the seven tools', () => {
+  it('lists the built-in templates for the sandbox provider', async () => {
+    const res = await call('sandbox_templates') as { templates: { id: string; name: string; image?: string; packages: { python?: string[] } }[] }
+    expect(res.templates.map((t) => t.id)).toEqual(['tpl_builtin_data_science', 'tpl_builtin_web_scraping', 'tpl_builtin_web_browser', 'tpl_builtin_node_typescript', 'tpl_builtin_offline'])
+    expect(res.templates[0]).toMatchObject({ name: 'Data science', packages: { python: ['matplotlib', 'seaborn', 'scipy', 'scikit-learn'] } })
+    expect(res.templates.find((t) => t.id === 'tpl_builtin_web_browser')).toMatchObject({ name: 'Web and browser', image: BROWSER_SANDBOX_IMAGE })
+  })
+
+  it('registers the nine tools', () => {
     expect([...tools.keys()].sort()).toEqual([...SANDBOX_TOOL_NAMES].sort())
+  })
+
+  it('copies a file out of a sandbox into the chat workspace and back in, refusing escapes', async () => {
+    const files = new Map<string, string>([['/home/agent/demo/a.txt', 'hello']])
+    const envd = http.createServer((req, res) => {
+      const url = new URL(req.url ?? '/', 'http://x')
+      const chunks: Buffer[] = []
+      req.on('data', (c: Buffer) => chunks.push(c))
+      req.on('end', () => {
+        const path = url.searchParams.get('path') ?? ''
+        if (url.pathname === '/files' && req.method === 'GET') {
+          const v = files.get(path)
+          return void (v === undefined ? res.writeHead(404).end('{}') : res.end(v))
+        }
+        if (url.pathname === '/files' && req.method === 'POST') {
+          files.set(path, Buffer.concat(chunks).toString('latin1').split('\r\n\r\n')[1]?.split('\r\n--')[0] ?? '')
+          return void res.writeHead(200, { 'content-type': 'application/json' }).end('[]')
+        }
+        res.writeHead(404).end('{}')
+      })
+    })
+    await new Promise<void>((r) => envd.listen(0, '127.0.0.1', r))
+    svc.backend.setEndpoint(`http://127.0.0.1:${String((envd.address() as AddressInfo).port)}`)
+    try {
+      const id = String((await call('sandbox_create', { name: 'Copy test' }))['id'])
+      expect(await call('sandbox_pull', { id, from: '~/demo/a.txt', to: 'out/a.txt' })).toMatchObject({ copied: 'out/a.txt', bytes: 5 })
+      expect(await readFile(join(workspace, 'out/a.txt'), 'utf8')).toBe('hello')
+      expect(await call('sandbox_pull', { id, from: '~/demo/a.txt', to: '../escape.txt' })).toHaveProperty('error')
+      await writeFile(join(workspace, 'b.txt'), 'back')
+      expect(await call('sandbox_push', { id, from: 'b.txt', to: '~/b.txt' })).toMatchObject({ bytes: 4 })
+      expect(files.get('/home/agent/b.txt')).toBe('back')
+      expect(await call('sandbox_push', { id, from: '../x' })).toHaveProperty('error')
+    } finally {
+      envd.closeAllConnections()
+      await new Promise<void>((r) => envd.close(() => r()))
+    }
   })
 
   it('creates, lists, stops, starts and deletes a sandbox for the owner', async () => {

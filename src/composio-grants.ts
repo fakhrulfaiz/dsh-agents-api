@@ -10,7 +10,7 @@ export type { AgentAppGrants }
 
 const TOOLKIT = /^[a-z0-9][a-z0-9_-]{0,63}$/u
 const TOOL_SLUG = /^[A-Z0-9][A-Z0-9_]*$/u
-/** Meta tools that only discover tools; their results are not filtered in v1, every real call still is. */
+/** Meta tools that only discover tools; their calls always run, and `filterSearchResult` trims what they list. */
 const DISCOVERY = new Set(['COMPOSIO_SEARCH_TOOLS', 'COMPOSIO_GET_TOOL_SCHEMAS', 'COMPOSIO_GET_TOOLKITS'])
 const MULTI = 'COMPOSIO_MULTI_EXECUTE_TOOL'
 const CONNECTIONS = 'COMPOSIO_MANAGE_CONNECTIONS'
@@ -150,4 +150,56 @@ export function validateAppGrants(value: unknown): string | undefined {
     for (const slug of grant) if (typeof slug !== 'string' || !TOOL_SLUG.test(slug)) return `apps.${toolkit}: "${String(slug)}" is not a tool slug`
   }
   return undefined
+}
+
+const SLUG_LIST_KEY = /tool_slugs$/u
+const MAP_KEY = /^(tool_schemas|toolkit_schemas)$/u
+
+/**
+ * Drops the tools and apps the agent may not use from a `COMPOSIO_SEARCH_TOOLS` answer, so the model is not shown
+ * (and does not plan around) tools every call of which would be refused. Works on the JSON body generically: slug
+ * lists (`*_tool_slugs`, `toolkits`), `tool_schemas` / `toolkit_schemas` maps, and objects carrying `tool_slug` or `toolkit`.
+ * @param text - the tool result's text.
+ * @param grants - the agent's grants; `null` keeps everything.
+ * @returns the trimmed text, or `undefined` when nothing changed or the text is not a JSON object.
+ */
+export function filterSearchResult(text: string, grants: AgentAppGrants | null): string | undefined {
+  if (grants === null) return undefined
+  let body: unknown
+  try {
+    body = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (typeof body !== 'object' || body === null) return undefined
+  const toolOk = (slug: string): boolean => checkSlug(slug, grants) === undefined
+  const appOk = (name: string): boolean => name.toLowerCase() in grants
+  let changed = false
+  const walk = (node: unknown, key: string): unknown => {
+    if (Array.isArray(node)) {
+      const out: unknown[] = []
+      for (const item of node) {
+        if (typeof item === 'string' && SLUG_LIST_KEY.test(key) && !toolOk(item)) { changed = true; continue }
+        if (typeof item === 'string' && key === 'toolkits' && !appOk(item)) { changed = true; continue }
+        if (typeof item === 'object' && item !== null && !Array.isArray(item)) {
+          const o = item as Record<string, unknown>
+          if (typeof o['tool_slug'] === 'string' && !toolOk(o['tool_slug'])) { changed = true; continue }
+          if (typeof o['toolkit'] === 'string' && !appOk(o['toolkit'])) { changed = true; continue }
+        }
+        out.push(walk(item, key))
+      }
+      return out
+    }
+    if (typeof node === 'object' && node !== null) {
+      const out: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(node)) {
+        if (MAP_KEY.test(key) && ((key === 'tool_schemas' && !toolOk(k)) || (key === 'toolkit_schemas' && !appOk(k)))) { changed = true; continue }
+        out[k] = walk(v, k)
+      }
+      return out
+    }
+    return node
+  }
+  const filtered = walk(body, '')
+  return changed ? JSON.stringify(filtered) : undefined
 }

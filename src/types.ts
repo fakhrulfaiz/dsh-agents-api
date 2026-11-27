@@ -12,6 +12,7 @@ import type {
   OAISandboxEnvironment,
   OAISandboxSessionEnvironment,
 } from './environment-types.ts'
+import type { OwnerId } from './auth/authenticator.ts'
 
 import type { ConnectRequest } from './connect-request.ts'
 
@@ -51,6 +52,33 @@ export interface OAIListResponse<T> {
   first_id: string | null
   last_id: string | null
   has_more: boolean
+}
+
+/** An owner-scoped grouping of sessions. `null` environment means the default workspace. */
+export interface OAIProject {
+  id: string
+  object: 'project'
+  name: string
+  status: 'active' | 'archived'
+  pinned: boolean
+  agent_id: string | null
+  environment: OAIEnvironmentConfig | null
+  archived_at: number | null
+  created_at: number
+  updated_at: number
+}
+
+/**
+ * Page query for `projects.list`. `status` defaults to `active`, `limit` to 20,
+ * and `order` to `desc`. `after` is the last id of the previous page, as in
+ * `OwnedCollection`; a foreign id starts the list from the beginning.
+ */
+export interface ProjectListQuery {
+  owner: OwnerId
+  status?: 'active' | 'archived' | 'all'
+  limit?: number
+  after?: string
+  order?: 'desc' | 'asc'
 }
 
 /** Custom function tool the application implements. */
@@ -212,6 +240,8 @@ export interface OAIAgent {
   send_policy?: 'ask' | 'auto' | null
   /** Agentry extension: skill selection; see `AgentSkillSelection`. */
   skills?: AgentSkillSelection | null
+  /** Agentry extension: the web browser (Playwright MCP, sandbox chats only); absent or `null` is auto: the browser when the chat's sandbox has it (server default `browser.default`). */
+  browser?: boolean | null
   host_tools?: OAIHostToolsConfig | null
   multi_agent?: OAIMultiAgentConfig | null
   reasoning?: OAIReasoningConfig | null
@@ -232,6 +262,8 @@ export interface CreateAgentParams {
   send_policy?: 'ask' | 'auto' | null
   /** Agentry extension: skill selection; see `AgentSkillSelection`. */
   skills?: AgentSkillSelection | null
+  /** Agentry extension: the web browser (Playwright MCP, sandbox chats only); absent or `null` is auto: the browser when the chat's sandbox has it (server default `browser.default`). */
+  browser?: boolean | null
   host_tools?: OAIHostToolsConfig | null
   multi_agent?: OAIMultiAgentConfig | null
   reasoning?: OAIReasoningConfig | null
@@ -252,6 +284,8 @@ export interface UpdateAgentParams {
   send_policy?: 'ask' | 'auto' | null
   /** Agentry extension: skill selection; see `AgentSkillSelection`. */
   skills?: AgentSkillSelection | null
+  /** Agentry extension: the web browser (Playwright MCP, sandbox chats only); absent or `null` is auto: the browser when the chat's sandbox has it (server default `browser.default`). */
+  browser?: boolean | null
   host_tools?: OAIHostToolsConfig | null
   multi_agent?: OAIMultiAgentConfig | null
   reasoning?: OAIReasoningConfig | null
@@ -323,6 +357,8 @@ export type OAIRequiredAction =
     call_id?: string
     /** Full question items for a multi-question request (`user_question` only). */
     questions?: AskUserQuestionItem[]
+    /** Set when a subagent of this session asked (its Host session id, as in `/subagents`). */
+    subagent_id?: string
   }
 
 /** Durable session resource. */
@@ -335,6 +371,8 @@ export interface OAIAgentSession {
   error: string | null
   metadata: Record<string, string>
   vault_ids: string[]
+  /** Project this chat belongs to; `null` means unfiled. */
+  project_id: string | null
   agent: OAIAgent
   environment: OAIEnvironmentConfig
   required_actions: OAIRequiredAction[]
@@ -350,6 +388,8 @@ export interface SessionConfig {
   environment: OAIEnvironmentConfig
   metadata: Record<string, string>
   vault_ids: string[]
+  /** Mirrors `SessionIndexRow.projectId` so the live projection can show moves; absent on older rows. */
+  project_id?: string | null
 }
 
 /**
@@ -365,6 +405,8 @@ export interface CreateSessionParams {
   /** Saved agent id from `POST /v1/agents`. */
   agent_id?: string
   environment?: OAIEnvironmentConfig
+  /** Project to attach the new chat to; absent or `null` leaves it unfiled. */
+  project_id?: string | null
   metadata?: Record<string, string> | null
   vault_ids?: string[]
   input?: string | OAIInputMessage[]
@@ -374,8 +416,9 @@ export interface CreateSessionParams {
 /**
  * Body for `POST /v1/agents/sessions/{session_id}`.
  *
- * Only `model`, `reasoning.effort`, `service_tier`, and `metadata` may change.
- * `agent` and `reasoning` merge supplied fields; `metadata` replaces the map.
+ * Only `model`, `reasoning.effort`, `service_tier`, `metadata`, and `project_id` may change.
+ * `agent` and `reasoning` merge supplied fields; `metadata` replaces the map;
+ * `metadata_merge` (Agentry) merges keys into it.
  */
 export interface UpdateSessionParams {
   agent?: {
@@ -384,6 +427,13 @@ export interface UpdateSessionParams {
     service_tier?: ServiceTier | null
   }
   metadata?: Record<string, string> | null
+  /** Move the chat into a Project, or `null` to make it unfiled. Archived and foreign ids are refused. */
+  project_id?: string | null
+  /**
+   * Agentry extension: change single metadata keys without replacing the map.
+   * A `null` value deletes the key. Applied after `metadata` when both are sent.
+   */
+  metadata_merge?: Record<string, string | null>
 }
 
 /** One cycle of work inside a session. */
@@ -487,8 +537,24 @@ export interface OAIFunctionCallOutputItem {
   turn_id: string
   /** Agentry extension: a sign-in link for a connected app found in the output; clients show a Connect button. */
   connect_request?: ConnectRequest
+  /** Agentry extension: images the tool returned (screenshots, `read_image`), in order; absent when there are none. */
+  images?: OAIOutputImagePart[]
   /** Agentry extension: see `OAIItemTiming`. */
   timing?: OAIItemTiming
+}
+
+/** Agentry extension: one image a tool returned, served by `GET /agents/files/{file_id}/content`. */
+export interface OAIOutputImagePart {
+  type: 'output_image'
+  /** Id for `GET /agents/files/{file_id}/content`; the same in live and replayed items. */
+  file_id?: string
+  /** Display name, when the tool gave one. */
+  filename?: string
+  media_type: string
+  bytes: number
+  /** Pixel size of the stored image. */
+  width?: number
+  height?: number
 }
 
 /** Saved MCP tool call. */
@@ -679,6 +745,57 @@ export type OAISessionEvent =
   | { type: 'agent.session.turn.output_text.delta'; event_id: string; item_id: string; output_index: number; content_index: number; session_id: string; turn_id: string; delta: string }
   | { type: 'agent.session.turn.output_text.done'; event_id: string; item_id: string; output_index: number; content_index: number; session_id: string; turn_id: string; text: string }
   | { type: 'error'; event_id: string; session_id?: string; error: { message: string; type?: string; code?: string } }
+  | { type: 'agent.session.subagent.created'; event_id: string; session_id: string; subagent: OAISubagent }
+  | { type: 'agent.session.subagent.updated'; event_id: string; session_id: string; subagent: OAISubagent; turn: OAITurn }
+  | { type: 'agent.session.subagent.closed'; event_id: string; session_id: string; subagent: OAISubagent }
+  | { type: 'agent.session.subagent.item.added'; event_id: string; session_id: string; subagent_id: string; turn_id: string; item: OAISessionItem & { subagent_id: string } }
+  | { type: 'agent.session.subagent.item.done'; event_id: string; session_id: string; subagent_id: string; turn_id: string; item: OAISessionItem & { subagent_id: string } }
+  | { type: 'agent.session.job.updated'; event_id: string; session_id: string; job: OAIJob }
+  | { type: 'agent.session.job.removed'; event_id: string; session_id: string; job_id: string }
+
+/** Output retained for one background job (`output` on `agent.session.job`). */
+export interface OAIJobOutput {
+  /** The newest retained output, stdout, stderr and log chunks in arrival order. */
+  text: string
+  /** Whole-stream bytes written so far. */
+  total_bytes: number
+  /** Whether earlier output is not included (cut to the route's bound or dropped by retention). */
+  truncated: boolean
+}
+
+/** A DSH background job owned by a session (`ctx.jobs`), for example a `run_in_background` shell command. */
+export interface OAIJob {
+  id: string
+  object: 'agent.session.job'
+  session_id: string
+  /** Producer kind: `bash`, `workflow`, ... */
+  kind: string
+  /** The producer's label: the command for shell jobs. */
+  command: string
+  status: 'running' | 'stopping' | 'completed' | 'killed' | 'failed'
+  /** Live progress line while running, terminal reason once settled (`exit code: 0`). */
+  detail: string | null
+  /** Exit code parsed from a completed shell job's detail; null otherwise. */
+  exit_code: number | null
+  /** Epoch seconds, like every other `*_at` on this API. */
+  started_at: number
+  finished_at: number | null
+  /** Absent on stream events. */
+  output?: OAIJobOutput
+}
+
+/** A Host child session observed under an Agents API session (`/subagents`). Turns and items stay on their own routes. */
+export interface OAISubagent {
+  id: string
+  object: 'agent.session.subagent'
+  session_id: string
+  parent_session_id: string
+  status: 'active' | 'closed'
+  created_at: number
+  closed_at?: number
+  /** Model of the subagent's latest model request, from its Session log; `null` before its first request. */
+  model: string | null
+}
 
 /** Local calendar time of an `at` timing. */
 export interface ScheduleLocalAt {

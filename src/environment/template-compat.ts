@@ -34,6 +34,10 @@ export interface SdkTemplate {
   image?: string
   /** Extension: CPU and memory limits for container providers. */
   resources?: { cpus?: number; memory_mb?: number }
+  /** Extension: the Agentry Sandbox place sandboxes from this template run on. */
+  place?: string
+  /** Extension: GPUs for sandboxes from this template. */
+  gpus?: number | 'all'
   /** Extension: template fields set to something the provider cannot apply; provisioning fails while any remain. */
   unsupported_fields: TemplateField[]
 }
@@ -83,6 +87,7 @@ export function requestedFields(config: EnvironmentTemplateConfig): TemplateFiel
   if ((c.setup_commands?.length ?? 0) > 0) fields.push('setup_commands')
   if (c.image !== undefined && c.image !== '') fields.push('image')
   if (c.resources !== undefined && (c.resources.cpus !== undefined || c.resources.memory_mb !== undefined)) fields.push('resources')
+  if (c.gpus !== undefined && c.gpus !== 0) fields.push('gpus')
   return fields
 }
 
@@ -139,6 +144,8 @@ export function toSdkTemplate(stored: EnvironmentTemplate, provider: SandboxProv
     provider: stored.provider,
     ...(config.image !== undefined && config.image !== '' ? { image: config.image } : {}),
     ...(config.resources !== undefined ? { resources: config.resources } : {}),
+    ...(config.place !== undefined && config.place !== '' ? { place: config.place } : {}),
+    ...(config.gpus !== undefined ? { gpus: config.gpus } : {}),
     unsupported_fields: unsupportedFields(config, provider),
   }
 }
@@ -236,6 +243,15 @@ export function parseTemplateInput(raw: unknown): { name?: string | null; provid
       resources.memory_mb = r['memory_mb']
     }
     if (Object.keys(resources).length > 0) config.resources = resources
+  }
+  if (body['place'] !== undefined && body['place'] !== null) {
+    if (typeof body['place'] !== 'string') return { error: 'Field "place" must be a string' }
+    if (body['place'] !== '') config.place = body['place']
+  }
+  if (body['gpus'] !== undefined && body['gpus'] !== null) {
+    const g = body['gpus']
+    if (g !== 'all' && !(typeof g === 'number' && Number.isInteger(g) && g >= 0 && g <= 64)) return { error: 'Field "gpus" must be a whole number from 0 to 64, or "all"' }
+    config.gpus = g
   }
   return out
 }

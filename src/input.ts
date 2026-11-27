@@ -84,6 +84,8 @@ export function textFromContent(content: unknown): string {
   for (const block of content) {
     if (block === null || typeof block !== 'object') continue
     const rec = block as Record<string, unknown>
+    // Reasoning is its own item; an assistant message's content repeats it in front of the text.
+    if (rec.type === 'reasoning') continue
     if (typeof rec.text === 'string') {
       parts.push(rec.text)
       continue
@@ -115,6 +117,7 @@ export function overlayAgent(base: OAIAgent, overlay: SessionAgentParams): OAIAg
     ...(overlay.reasoning !== undefined ? { reasoning: overlay.reasoning } : {}),
     ...(overlay.service_tier !== undefined ? { service_tier: overlay.service_tier } : {}),
     ...(overlay.text !== undefined ? { text: overlay.text } : {}),
+    ...(overlay.browser !== undefined ? { browser: overlay.browser } : {}),
   }
 }
 

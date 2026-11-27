@@ -38,7 +38,7 @@ interface Fixture {
   dropAgent: (id: string) => void
 }
 
-async function fixture(): Promise<Fixture> {
+async function fixture(options: { models?: string[] } = {}): Promise<Fixture> {
   const agents: Fixture['agents'] = new Map()
   const created: Fixture['created'] = []
   const llm = fakeLlm()
@@ -55,6 +55,9 @@ async function fixture(): Promise<Fixture> {
     sessions: { get: (id: string) => agents.has(id) ? { id } : undefined },
     tools: { schemas: () => [] },
     llm,
+    ...(options.models === undefined ? {} : {
+      get: (name: string) => name === 'llm' ? { listProviders: () => [{ id: 'deepseek-official' }], listModels: () => Promise.resolve(options.models!.map(id => ({ id }))) } : undefined,
+    }),
     agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }) },
     logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn() },
   } as unknown as Context
@@ -100,7 +103,7 @@ describe('approvals over the API', () => {
   it('shows requires_action with the approval, writes the status, and fans an ephemeral frame out', async () => {
     const f = await fixture()
     const id = await session(f)
-    const frames: Array<[OAISessionEvent, number | undefined]> = []
+    const frames: Array<[OAISessionEvent, string | undefined]> = []
     f.registry.subscribe(id, (event, sseId) => { frames.push([event, sseId]) })
     void parkApproval(f, id)
     const view = await read(f, id)
@@ -110,6 +113,22 @@ describe('approvals over the API', () => {
     expect((await f.store.sessions.get(id, 'any'))?.status).toBe('requires_action')
     const frame = frames.find(([event]) => event.type === 'agent.session.requires_action')
     expect(frame?.[1]).toBeUndefined()
+  })
+
+  it('shows a subagent approval on the parent through the parent turn end, and the parent answers it', async () => {
+    const f = await fixture()
+    const id = await session(f)
+    f.api.applySessionEvent(id, logEvent('turn/start', { turn: 1 }, 1))
+    f.h.log('child_1', 'approval/asked', { id: 'appr-c', toolName: 'bash', callId: 'call_9' })
+    const outcome = f.h.approve({ agent: f.h.child('child_1', id), toolName: 'bash', callId: 'call_9' as never, reason: 'run it' })
+    expect((await read(f, id)).required_actions).toEqual([expect.objectContaining({ id: 'appr-c', subagent_id: 'child_1' })])
+    // The parent's turn ends while the child keeps waiting.
+    f.h.log(id, 'turn/end', {})
+    f.api.applySessionEvent(id, logEvent('turn/end', { reason: { kind: 'completed' } }, 2))
+    expect(await read(f, id)).toMatchObject({ status: 'requires_action', required_actions: [{ id: 'appr-c', subagent_id: 'child_1' }] })
+    expect((await events(f, id, { type: 'agent.session.input.approval_response', id: 'appr-c', decision: 'approve' })).status).toBe(200)
+    await expect(outcome).resolves.toBe('allowed-once')
+    expect(await read(f, id)).toMatchObject({ status: 'idle', required_actions: [] })
   })
 
   it('approve resolves the request and the session goes back to in_progress', async () => {
@@ -331,6 +350,104 @@ describe('live model and effort', () => {
     const response = await events(f, id, { type: 'agent.session.input.message', input: 'hi', model: 'nope' })
     expect(response.status).toBe(409)
     expect(f.agents.get(id)?.followup).not.toHaveBeenCalled()
+  })
+})
+
+describe('models that are not offered', () => {
+  it('answers 409 session_setting_not_live for an unknown follow-up model and sends nothing', async () => {
+    const f = await fixture({ models: ['deepseek-chat', 'deepseek-reasoner'] })
+    const id = await session(f)
+    const response = await events(f, id, { type: 'agent.session.input.message', input: 'hi', model: 'nope' })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ error: { code: 'session_setting_not_live', message: expect.stringContaining('nope') } })
+    expect(f.agents.get(id)?.followup).not.toHaveBeenCalled()
+    expect(f.agents.get(id)?.model.select).not.toHaveBeenCalled()
+    expect((await read(f, id)).agent.model).toBe('deepseek-chat')
+  })
+
+  it('answers 409 for an unknown model on a session update and stores nothing', async () => {
+    const f = await fixture({ models: ['deepseek-chat'] })
+    const id = await session(f)
+    const update = vi.spyOn(f.store.sessions, 'update')
+    const response = await post(`${f.root}/agents/sessions/${id}`, { agent: { model: 'nope' } })
+    expect(response.status).toBe(409)
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it('accepts a listed model, and an effort-only update whose stored model is no longer listed', async () => {
+    const f = await fixture({ models: ['deepseek-reasoner'] })
+    const id = await session(f)
+    expect((await post(`${f.root}/agents/sessions/${id}`, { agent: { model: 'deepseek-reasoner' } })).status).toBe(200)
+    const g = await fixture({ models: ['other'] })
+    const gid = await session(g)
+    expect((await post(`${g.root}/agents/sessions/${gid}`, { agent: { reasoning: { effort: 'low' } } })).status).toBe(200)
+  })
+})
+
+describe('clearing the reasoning effort', () => {
+  it('clears a stored effort on a session update and re-selects without one', async () => {
+    const f = await fixture()
+    const id = await session(f, { model: 'deepseek-chat', reasoning: { effort: 'high' } })
+    const response = await post(`${f.root}/agents/sessions/${id}`, { agent: { reasoning: { effort: null } } })
+    expect(response.status).toBe(200)
+    expect(f.agents.get(id)?.model.select).toHaveBeenCalledExactlyOnceWith({ provider: 'deepseek-official', model: 'deepseek-chat' })
+    expect((await read(f, id)).agent.reasoning?.effort).toBeUndefined()
+    expect((await f.store.sessions.get(id, 'any'))?.reasoningEffort).toBeNull()
+  })
+
+  it('clears the effort from a follow-up message', async () => {
+    const f = await fixture()
+    const id = await session(f, { model: 'deepseek-chat', reasoning: { effort: 'high' } })
+    const response = await events(f, id, { type: 'agent.session.input.message', input: 'hi', reasoning: { effort: null } })
+    expect(response.status).toBe(200)
+    expect(f.agents.get(id)?.model.select).toHaveBeenCalledExactlyOnceWith({ provider: 'deepseek-official', model: 'deepseek-chat' })
+    expect((await f.store.sessions.get(id, 'any'))?.reasoningEffort).toBeNull()
+  })
+})
+
+describe('session metadata merge and filter', () => {
+  const meta = async (f: Fixture, id: string) => ((await (await fetch(`${f.root}/agents/sessions/${id}`)).json()) as { metadata: Record<string, string> }).metadata
+
+  it('metadata_merge sets and deletes single keys and keeps the others', async () => {
+    const f = await fixture()
+    const id = await session(f, { model: 'deepseek-chat' })
+    await post(`${f.root}/agents/sessions/${id}`, { metadata: { title: 'A', starred: 'true' } })
+    const response = await post(`${f.root}/agents/sessions/${id}`, { metadata_merge: { starred: null, color: 'red' } })
+    expect(response.status).toBe(200)
+    expect(((await response.json()) as { metadata: unknown }).metadata).toEqual({ title: 'A', color: 'red' })
+    expect(await meta(f, id)).toEqual({ title: 'A', color: 'red' })
+    expect((await f.store.sessions.get(id, 'any'))?.body?.metadata).toEqual({ title: 'A', color: 'red' })
+  })
+
+  it('concurrent merges of different keys both survive, and plain metadata still replaces', async () => {
+    const f = await fixture()
+    const id = await session(f)
+    await Promise.all([
+      post(`${f.root}/agents/sessions/${id}`, { metadata_merge: { a: '1' } }),
+      post(`${f.root}/agents/sessions/${id}`, { metadata_merge: { b: '2' } }),
+    ])
+    expect(await meta(f, id)).toEqual({ a: '1', b: '2' })
+    await post(`${f.root}/agents/sessions/${id}`, { metadata: { c: '3' } })
+    expect(await meta(f, id)).toEqual({ c: '3' })
+  })
+
+  it('rejects a metadata_merge value that is not a string or null', async () => {
+    const f = await fixture()
+    const id = await session(f)
+    expect((await post(`${f.root}/agents/sessions/${id}`, { metadata_merge: { a: 1 } })).status).toBe(400)
+  })
+
+  it('lists sessions filtered by metadata[key]=value across pages', async () => {
+    const f = await fixture()
+    const ids: string[] = []
+    for (let i = 0; i < 4; i++) ids.push(await session(f))
+    await post(`${f.root}/agents/sessions/${ids[0]}`, { metadata_merge: { starred: 'true' } })
+    await post(`${f.root}/agents/sessions/${ids[3]}`, { metadata_merge: { starred: 'true', x: 'y' } })
+    const list = async (query: string) => ((await (await fetch(`${f.root}/agents/sessions?${query}`)).json()) as { data: Array<{ id: string }>; has_more: boolean })
+    expect((await list('metadata[starred]=true')).data.map(row => row.id).sort()).toEqual([ids[0]!, ids[3]!].sort())
+    expect((await list('metadata[starred]=true&metadata[x]=y')).data.map(row => row.id)).toEqual([ids[3]])
+    expect((await list('metadata[starred]=true&limit=1')).has_more).toBe(true)
+    expect((await list('metadata[starred]=false')).data).toEqual([])
   })
 })
 

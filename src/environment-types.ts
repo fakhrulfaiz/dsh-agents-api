@@ -30,6 +30,10 @@ export interface EnvironmentTemplateConfig {
   image?: string
   /** Extension: CPU and memory limits for container providers. */
   resources?: { cpus?: number; memory_mb?: number }
+  /** Extension: the Agentry Sandbox place the environment runs on (`sandbox` provider; the default place when absent). */
+  place?: string
+  /** Extension: GPUs to give the sandbox (`sandbox` provider): a count, or `all`. */
+  gpus?: number | 'all'
   /** Legacy. */
   setup?: string
   /** Legacy. */

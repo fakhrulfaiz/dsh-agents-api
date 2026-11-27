@@ -19,8 +19,10 @@ tags:
   - name: Environments
   - name: Sessions
   - name: Subagents
+  - name: Jobs
   - name: Schedules
   - name: Files
+  - name: Projects
   - name: Health
 paths:
   /v1/agents:
@@ -122,6 +124,198 @@ paths:
                 required:
                   - object
                   - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/projects:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    post:
+      summary: Create a project
+      description: Creates an owner-scoped grouping of chats. `agent_id` and `environment` become the defaults for new chats started from this project; null keeps the caller's current defaults.
+      tags:
+        - Projects
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    get:
+      summary: List projects
+      description: Only the caller's projects, newest first. `status` defaults to `active`; `after` is the last id of the previous page.
+      tags:
+        - Projects
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum:
+              - active
+              - archived
+              - all
+            default: active
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Order"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/projects/{project_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/ProjectId"
+    get:
+      summary: Retrieve a project
+      tags:
+        - Projects
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    post:
+      summary: Update a project
+      description: Replaces only the fields present in the body; omitted fields keep their values.
+      tags:
+        - Projects
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProjectRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    delete:
+      summary: Delete a project
+      description: Refuses with 409 `project_has_sessions` while any of the caller's chats still belongs to the project; archive it instead or move its chats first. The project's environment is not deleted.
+      tags:
+        - Projects
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  object:
+                    const: project.deleted
+                  deleted:
+                    const: true
+                required:
+                  - id
+                  - object
+                  - deleted
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/ProjectConflict"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/projects/{project_id}/archive:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/ProjectId"
+    post:
+      summary: Archive a project
+      description: Hides the project from the default `active` list and blocks new chats on it; existing chats and history stay untouched.
+      tags:
+        - Projects
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/projects/{project_id}/unarchive:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/ProjectId"
+    post:
+      summary: Unarchive a project
+      description: Restores the project to `active` and clears `archived_at`.
+      tags:
+        - Projects
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
@@ -768,6 +962,61 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+    get:
+      summary: List uploaded files, newest first
+      description: The caller's own staged and attached files. `after` is the last id of the previous page; `order` is ignored (newest first).
+      tags:
+        - Files
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/After"
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - staged
+              - attached
+          description: Keep only files in this status.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FileObject"
+                  first_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  last_id:
+                    oneOf:
+                      - type: string
+                      - type: "null"
+                  has_more:
+                    type: boolean
+                required:
+                  - object
+                  - data
+                  - first_id
+                  - last_id
+                  - has_more
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
   /v1/agents/files/{file_id}/content:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -775,7 +1024,7 @@ paths:
     get:
       summary: Download a file
       description: >-
-        Bytes of a staged or attached file of the caller. Another owner's id answers `404`. Rasters are served `inline`; everything else as an `attachment`, with SVG, HTML, and unknown types as `application/octet-stream`.
+        Bytes of a staged or attached file of the caller, or of an image a tool returned (the `file_id` of an `output_image` part on a `function_call_output` item, `timg_` prefix). Another owner's id answers `404`. Rasters are served `inline`; everything else as an `attachment`, with SVG, HTML, and unknown types as `application/octet-stream`.
         Responses carry `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'`, and `Cache-Control: private, max-age=3600` (ids are immutable).
       tags:
         - Files
@@ -1257,6 +1506,43 @@ paths:
                           type: string
                         default:
                           type: boolean
+                        available:
+                          type: boolean
+                          description: Sandbox provider only. True when any place is available.
+                        reason:
+                          type: string
+                          description: Sandbox provider only. Why it is unavailable.
+                        default_image:
+                          type: object
+                          description: Sandbox provider only. The default place's image.
+                          additionalProperties: true
+                        places:
+                          type: array
+                          description: Sandbox provider only. Every enabled Agentry Sandbox place, default first.
+                          items:
+                            type: object
+                            properties:
+                              id: { type: string }
+                              name: { type: string }
+                              kind: { type: string }
+                              default: { type: boolean }
+                              available: { type: boolean }
+                              reason: { type: string }
+                              gpus:
+                                type: object
+                                properties:
+                                  count: { type: integer }
+                                  models: { type: array, items: { type: string } }
+                                required: [count, models]
+                              capabilities:
+                                type: object
+                                properties:
+                                  reset: { type: boolean }
+                                  keepFilesOnReset: { type: boolean }
+                                  isolated: { type: boolean }
+                                  gpu: { type: boolean }
+                                required: [reset, keepFilesOnReset, isolated, gpu]
+                            required: [id, name, kind, default, available, capabilities]
                         capabilities:
                           type: object
                           properties:
@@ -1446,7 +1732,7 @@ paths:
               $ref: "#/components/schemas/CreateEnvironmentRequest"
       responses:
         "201":
-          description: Created
+          description: Created. On the sandbox provider the setup runs in the background, so the answer may have `status` `pending` and `sandbox.state` `provisioning`; poll `GET /v1/agents/environments/{environment_id}` until it is `connected` or `failed` (with `error`).
           content:
             application/json:
               schema:
@@ -1524,6 +1810,40 @@ paths:
         "503":
           $ref: "#/components/responses/StoreUnavailable"
       description: Reports status `failed` when the workspace directory is gone.
+    post:
+      summary: Rename an environment
+      description: Extension. Sets the environment's `name`; an empty string clears it. Nothing else changes.
+      tags:
+        - Environments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  maxLength: 80
+              required:
+                - name
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Environment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
     delete:
       summary: Delete an environment and its workspace
       tags:
@@ -1574,6 +1894,124 @@ paths:
         "409": { description: "The environment's provider has no lifecycle (`local`): `environment_not_startable`." }
         "429": { description: "An Agentry Sandbox limit was reached (`quota_exceeded`); the message says which." }
         "503": { description: The sandbox backend is not reachable. }
+  /v1/agents/environments/{environment_id}/terminals:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: openEnvironmentTerminal
+      summary: "Open an interactive shell (PTY) inside an Agentry Sandbox environment"
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { cols: { type: integer }, rows: { type: integer } } }
+      responses:
+        "200":
+          description: The terminal (`id`).
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { description: Environment not found. }
+        "409": { description: "The environment is not an Agentry Sandbox: `environment_no_terminal`." }
+        "429": { description: "Too many terminals open (`too_many_terminals`) or a sandbox limit." }
+        "502": { description: "The terminal could not start (`terminal_unavailable`)." }
+  /v1/agents/environments/{environment_id}/terminals/{terminal_id}/stream:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: terminal_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: streamEnvironmentTerminal
+      summary: "Terminal output as server-sent events: `output` (`data`: base64 bytes, the retained screen first) and `exit` (`code`)"
+      responses:
+        "200":
+          description: An SSE stream.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "404": { description: Environment or terminal not found. }
+  /v1/agents/environments/{environment_id}/terminals/{terminal_id}/input:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: terminal_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: sendEnvironmentTerminalInput
+      summary: "Type into a terminal (`data`: UTF-8 text, at most 64 KB)"
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, required: [data], properties: { data: { type: string } } }
+      responses:
+        "200":
+          description: Accepted.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { description: Environment or terminal not found. }
+        "409": { description: "The terminal has ended: `terminal_closed`." }
+        "413": { description: "Input too large." }
+  /v1/agents/environments/{environment_id}/terminals/{terminal_id}/resize:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: terminal_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: resizeEnvironmentTerminal
+      summary: "Resize a terminal"
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { cols: { type: integer }, rows: { type: integer } } }
+      responses:
+        "200":
+          description: Resized.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { description: Environment or terminal not found. }
+  /v1/agents/environments/{environment_id}/terminals/{terminal_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: terminal_id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      operationId: closeEnvironmentTerminal
+      summary: "Close a terminal"
+      responses:
+        "200":
+          description: Closed.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404": { description: Environment or terminal not found. }
   /v1/agents/environments/{environment_id}/stop:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -1772,7 +2210,7 @@ paths:
         "500":
           $ref: "#/components/responses/ServerError"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/SessionConflict"
         "413":
           description: "`message_too_large`: the files of the message total more than `uploads.maxMessageBytes`."
           content:
@@ -1787,7 +2225,7 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
-      description: "Send `agent` and/or `agent_id`. With `stream: true` the response is a `text/event-stream` of `SessionEvent` frames (see the events operation) instead of JSON."
+      description: "Send `agent` and/or `agent_id`. With `project_id`, the chat attaches to that Project and inherits its agent and environment unless the request supplies its own. A foreign or archived Project is refused. With `stream: true` the response is a `text/event-stream` of `SessionEvent` frames (see the events operation) instead of JSON. The response does not wait for the agent's setup (MCP connections): a create with input answers `in_progress` and the message starts once the agent is ready. A setup failure later marks the session `failed` (ephemeral `error` and `agent.session.failed` on the stream) instead of answering 500."
     get:
       summary: List sessions, newest first
       tags:
@@ -1796,6 +2234,22 @@ paths:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/After"
         - $ref: "#/components/parameters/Order"
+        - name: metadata
+          in: query
+          required: false
+          style: deepObject
+          explode: true
+          schema:
+            type: object
+            additionalProperties:
+              type: string
+          description: "Agentry extension. `metadata[key]=value` keeps only sessions whose metadata has that key with that exact value; several keys must all match. Applies before paging, so every page is complete."
+        - name: project_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Agentry extension. Keep only sessions attached to this Project; an empty value keeps only unfiled sessions. Applies before paging, so every page is complete."
       responses:
         "200":
           description: OK
@@ -1878,10 +2332,10 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/SessionConflict"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
-      description: Changes `agent.model` and `agent.reasoning.effort` on the live agent from the next model step; `service_tier` and `metadata` are stored only.
+      description: Changes `agent.model` and `agent.reasoning.effort` on the live agent from the next model step; `service_tier` and `metadata` are stored only. A `project_id` moves the chat into a Project, or `null` makes it unfiled.
     delete:
       summary: Delete a session
       tags:
@@ -1959,7 +2413,7 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
-      description: Posting to a session that is not live resumes it from its Session log first (409 `session_not_resumable` for sessions created before migration 0002, 500 `session_resume_failed`). Approval answers do not resume.
+      description: Posting to a session that is not live resumes it from its Session log first (409 `session_not_resumable` for sessions created before migration 0002, 500 `session_resume_failed`). Approval answers do not resume. Posting while a new session's agent is still being set up waits for it; 409 `session_setup_failed` when that setup failed.
     get:
       summary: Stream session events
       tags:
@@ -2003,11 +2457,11 @@ paths:
 
         The `event:` name equals the payload `type` (see the `SessionEvent` schema).
 
-        Ids. Every event derived from the Session log carries `id: <n>`, its 1-based position in the session's event sequence; `agent.session.created` is always 1. The sequence is a pure function of the Session log, so ids and the payload `event_id` (`evt_<session_id>_<n>`) survive server restarts.
+        Ids. Every event derived from the Session log carries an `id:`. Session status, turn, assistant message and slash-command events are numbered `1, 2, 3, ...` (`agent.session.created` is always 1). Item frames for the rest of the item log (user messages, reasoning, tool calls and outputs; `agent.session.turn.item.added` for a call, `agent.session.turn.item.done` otherwise) are numbered after the frame before them: `<n>.1`, `<n>.2`, ... (a reasoning item comes before the assistant message it belongs to). So the item frames never moved an existing id, and an integer `Last-Event-ID` saved before they existed still resumes at the same place. Compare ids as (`n`, `sub`) pairs, not as decimals (`12.10` follows `12.9`). The sequence is a pure function of the Session log, so ids and the payload `event_id` (`evt_<session_id>_<id>`) survive server restarts. A user message item's attachments carry their file ids, as in `GET .../items`.
 
-        Ephemeral frames have no `id:` line, are never replayed, and do not shift later ids: the status snapshot written when a stream connects, the `idle` event that closes a streamed create without input, `error` events for a failed input dispatch, and the `requires_action`/`in_progress` events raised by approvals.
+        Ephemeral frames have no `id:` line, are never replayed, and do not shift later ids: the status snapshot written when a stream connects, the `idle` event that closes a streamed create without input, `error` events for a failed input dispatch, and the `requires_action`/`in_progress` events raised by approvals, and the `agent.session.subagent.*` events (subagent created, turn opened or ended, item saved, closed; they are not in this session's log, so re-read `/subagents`, which is rebuilt from the child logs, on open and on reconnect), and the `agent.session.job.*` events (a background job started, changed, settled or left the list; re-read `/jobs` on open and on reconnect).
 
-        Resume. Send `Last-Event-ID: n` to receive every event with a greater id, derived from the Session log, then live events without gaps or duplicates. A non-numeric value replays the whole history. A `Last-Event-ID` connection to a session with pending approvals additionally receives one ephemeral `agent.session.requires_action` snapshot. Without the header the stream starts with one status snapshot (`idle`, `in_progress`, `requires_action`, or `failed`).
+        Resume. Send `Last-Event-ID: <n>` or `<n>.<sub>` to receive every event after it, derived from the Session log, then live events without gaps or duplicates. A value that is not an id replays the whole history. A `Last-Event-ID` connection to a session with pending approvals additionally receives one ephemeral `agent.session.requires_action` snapshot. Without the header the stream starts with one status snapshot (`idle`, `in_progress`, `requires_action`, or `failed`).
   /v1/agents/sessions/{session_id}/items:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -2102,6 +2556,186 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/changes:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      summary: List turns that changed workspace files
+      description: "Turns with a recorded summary, newest first. Local chats use the Host's workspace-changes recorder (git snapshots when the workspace is a repository, otherwise file-tool edits); sandbox chats use a shadow git repository inside the sandbox. Summaries are kept in memory only."
+      tags:
+        - Sessions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, data]
+                properties:
+                  object:
+                    type: string
+                    enum: [list]
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [turn_id, total, added, deleted, outside]
+                      properties:
+                        turn_id:
+                          type: string
+                        total:
+                          type: integer
+                        added:
+                          type: integer
+                        deleted:
+                          type: integer
+                        outside:
+                          type: integer
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/turns/{turn_id}/changes:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/TurnId"
+    get:
+      summary: List the files a turn changed
+      tags:
+        - Sessions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, turn_id, available, total, added, deleted, outside, files]
+                properties:
+                  object:
+                    type: string
+                    enum: [agent.session.turn.changes]
+                  turn_id:
+                    type: string
+                  available:
+                    type: boolean
+                    description: "False when nothing was recorded for the turn or the summary is gone (summaries are kept in memory only, so an API restart loses them)."
+                  total:
+                    type: integer
+                    description: "Changed files inside the workspace, including any beyond the 500 listed."
+                  added:
+                    type: integer
+                  deleted:
+                    type: integer
+                  outside:
+                    type: integer
+                    description: "Changed files outside the workspace: counted, never listed or served."
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      required: [index, path, display, added, deleted]
+                      properties:
+                        index:
+                          type: integer
+                          description: "The file's index for the diff route."
+                        path:
+                          type: string
+                        display:
+                          type: string
+                        added:
+                          type: integer
+                        deleted:
+                          type: integer
+                        binary:
+                          type: boolean
+                        oversized:
+                          type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/turns/{turn_id}/changes/{index}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/TurnId"
+      - name: index
+        in: path
+        required: true
+        schema:
+          type: integer
+          minimum: 0
+    get:
+      summary: Compare one changed file before and after a turn
+      description: "404 when the index is not a listed file (files outside the workspace are never served) or the summary or snapshots are gone."
+      tags:
+        - Sessions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, kind, path, display]
+                properties:
+                  object:
+                    type: string
+                    enum: [agent.session.turn.change]
+                  kind:
+                    type: string
+                    enum: [text, binary, oversized]
+                  path:
+                    type: string
+                  display:
+                    type: string
+                  before:
+                    type: boolean
+                    description: "Whether the file existed at turn start (text only)."
+                  after:
+                    type: boolean
+                  coarse:
+                    type: boolean
+                    description: "Every line shown as replaced (the line comparison took too long)."
+                  hunks:
+                    type: array
+                    items:
+                      type: object
+                      required: [old_start, old_lines, new_start, new_lines, lines]
+                      properties:
+                        old_start:
+                          type: integer
+                        old_lines:
+                          type: integer
+                        new_start:
+                          type: integer
+                        new_lines:
+                          type: integer
+                        lines:
+                          type: array
+                          description: "Each line keeps its `+`, `-` or space prefix."
+                          items:
+                            type: string
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
   /v1/agents/sessions/{session_id}/turns/{turn_id}:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -2159,6 +2793,138 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/browser/live:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: session_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: streamSessionBrowserLive
+      summary: "Live, read-only view of the chat's browser as server-sent events"
+      description: |
+        Sandbox chats whose agent has the web browser on get a relay inside the sandbox that screencasts
+        the page the agent last opened or navigated (Chrome DevTools on the sandbox's loopback). It starts
+        with the first reader, is shared by every reader of the session, and stops about 10 s after the
+        last one leaves, or when the environment is stopped, reset or deleted (the stream then ends).
+        Frames are capped at `browser.liveFps` a second (default 10, at most 15); a frame identical to the
+        last one is not sent. Events:
+        - `frame`: `{ data: base64 JPEG, url, title, width, height, timestamp }` (a new reader first gets the last frame).
+          `width` and `height` are the page's size in CSS pixels; input coordinates use the same units.
+        - `control`: `{ controlled: true, since }` when the user takes control (also sent to a new reader while
+          they have it), `{ controlled: false, reason }` when it ends: `released`, `idle` (5 minutes without input),
+          `left` (no reader for a few seconds), `taken` (another tab took it), `closed` (the view ended).
+        - `pointer`: `{ action: move|down|up, x, y, timestamp }`, where the page's trusted mouse events happened (the
+          agent's clicks too), in the frame's CSS pixels; at most about 30 a second; never replayed to a new reader.
+        - `focus`: `{ x, y, width, height, timestamp }`, the field (input, textarea, select, contenteditable) that just took focus.
+        - `idle`: `{ reason }`, nothing to show: `not_started` (no browser open yet, or the sandbox is not running),
+          `no_browser` (the sandbox image has no browser; use the built-in Web and browser template), `browser_off`
+          (the agent's `browser` is off), `not_sandbox` (the chat does not run in a sandbox).
+        - `error`: `{ code: too_many_live_views, message }` when the owner already has 4 live views open; the stream ends.
+      responses:
+        "200":
+          description: An SSE stream.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "404": { description: Session not found. }
+  /v1/agents/sessions/{session_id}/browser/control:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: session_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: controlSessionBrowser
+      summary: "Take control of the chat's browser from the agent, or hand it back"
+      description: |
+        `take` needs a live view of the session open (`GET .../browser/live`) on a sandbox chat whose agent has
+        the browser. While the user has control the agent's browser tool calls wait; a call that waited and
+        any browser action after the hand-back (other than a snapshot, screenshot, console or network read)
+        answer "The user used the browser and handed it back; look at the page again before continuing." until
+        the agent looks again. Only one grant at a time: another `take` answers 409 `browser_control_held`
+        unless `force` is true. Control ends after 5 minutes without input, a few seconds after the last live
+        view closes, or with the view. `release` with a `control_id` ends only that grant; releasing with no
+        control is fine.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [take, release] }
+                force: { type: boolean, description: "take: take over a grant held by another tab." }
+                control_id: { type: string, description: "release: the grant to end." }
+      responses:
+        "200":
+          description: The control state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, session_id, controlled]
+                properties:
+                  object: { const: session.browser_control }
+                  session_id: { type: string }
+                  controlled: { type: boolean }
+                  control_id: { type: string, description: "take: pass it to `input` and `release`." }
+                  since: { type: integer, description: "take: when control started (ms since the epoch)." }
+                  idle_timeout_seconds: { type: integer }
+        "400": { description: "`action` is not take or release." }
+        "404": { description: Session not found. }
+        "409": { description: "`browser_unavailable` (no browser in this chat), `browser_not_live` (no live view open), `browser_control_held`." }
+  /v1/agents/sessions/{session_id}/browser/input:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: session_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: sendSessionBrowserInput
+      summary: "Send the user's mouse, keyboard and page-size input to the browser while they have control"
+      description: |
+        At most 50 events a request and 120 a second per session. Coordinates are the page's CSS pixels (the
+        live frame's `width` and `height`). Events become Chrome DevTools input commands, sent through the relay
+        inside the sandbox; the DevTools port is never exposed. Modifier bits: Alt 1, Ctrl 2, Meta 4, Shift 8.
+        - `{ type: mouse, action: move|down|up, x, y, button?: left|middle|right, buttons?, click_count?, modifiers? }`
+        - `{ type: wheel, x, y, delta_x, delta_y, modifiers? }`
+        - `{ type: key, action: down|up, key, code?, key_code?, text?, modifiers? }` (`text` makes the key type it, for example `"\r"` for Enter)
+        - `{ type: text, text }` (inserted as typed text, up to 2000 characters)
+        - `{ type: resize, width, height }` (the page's size, 320-1920 by 240-1440; restored on hand-back)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [control_id, events]
+              properties:
+                control_id: { type: string }
+                events:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items: { type: object }
+      responses:
+        "200":
+          description: Sent.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, accepted]
+                properties:
+                  object: { const: session.browser_input }
+                  accepted: { type: integer }
+        "400": { description: Malformed events. }
+        "404": { description: Session not found. }
+        "409": { description: "`not_in_control`: take control first (or another tab took it)." }
+        "429": { description: "`input_rate_limited`." }
   /v1/agents/sessions/{session_id}/artifacts:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -2236,12 +3002,211 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/renders/pdf/{path}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/FilePath"
+    get:
+      summary: Render an Office file as PDF
+      description: "Converts a `doc`, `docx`, `xls`, `xlsx`, `ppt` or `pptx` file in the session's workspace (local folder, sandbox or artifact store) to PDF with the Host's Office-to-PDF service. Conversions run in the API process (2 at a time, 60 s each); the service caches PDFs by content. Send the `ETag` back in `If-None-Match` to get a 304 while the file is unchanged."
+      tags:
+        - Sessions
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "The PDF."
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: '`"<size>:<mtime>"` of the source file.'
+            X-Agentry-Missing-Fonts:
+              schema:
+                type: string
+              description: "Comma-separated, URL-encoded font families the conversion did not have; absent when none."
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "304":
+          description: "The source is unchanged since the given `ETag`."
+        "400":
+          description: "Bad path, or `unsupported_format` for a file that is not an Office document."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "`source_changed`: the file changed during the conversion."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: "`file_too_large`: the file is over 50 MB, or the PDF over 100 MB."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: "`invalid_document`: the file could not be read as a document."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: "`render_failed`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: "`render_unavailable` (no converter in this profile), `render_busy` (with `Retry-After: 5`), `sandbox_unavailable`, or `store_unavailable`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "504":
+          description: "`render_timeout`: the conversion took longer than 60 s."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/agents/sessions/{session_id}/jobs:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      summary: List background jobs
+      description: |
+        The session's own DSH background jobs (`ctx.jobs`): `run_in_background` shell commands, foreground
+        commands while they run, commands moved to the background by their timeout, and workflows. Oldest
+        first; each carries the newest 16 KiB of its output. Reading output never moves the agent's own
+        `job_output` cursor. Jobs live in memory: the list is empty after an API restart or once the
+        session's agent is disposed. A finished foreground command leaves the list. Subagents' jobs belong
+        to the subagent and are not listed.
+      tags:
+        - Jobs
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Job"
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/jobs/{job_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/JobId"
+    get:
+      summary: Retrieve a background job
+      description: One job with the newest 64 KiB of its output.
+      tags:
+        - Jobs
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/jobs/{job_id}/kill:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/JobId"
+    post:
+      summary: Stop a background job
+      description: |
+        Requests cancellation; the job shows `stopping` until it settles `killed`. The reason (default
+        "stopped by the user") joins the job's terminal detail, and the agent is told the job ended, as for
+        any job it did not stop itself (an idle agent is woken by that notice). A finished job answers
+        `already_finished`.
+      tags:
+        - Jobs
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: Short reason, at most 200 characters kept.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  outcome:
+                    type: string
+                    enum:
+                      - cancellation_requested
+                      - already_finished
+                  job:
+                    $ref: "#/components/schemas/Job"
+                required:
+                  - outcome
+                  - job
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
   /v1/agents/sessions/{session_id}/subagents:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
       - $ref: "#/components/parameters/SessionId"
     get:
       summary: List subagents
+      description: Children whose Host session header says `origin` is `subagent`, oldest first. Children seen live by this process come from memory; the rest are rebuilt from their Session logs, so the list, turns, and items survive a restart. A child belongs to its parent's owner.
       tags:
         - Subagents
       responses:
@@ -2423,11 +3388,31 @@ paths:
           $ref: "#/components/responses/StoreUnavailable"
   /health:
     get:
-      summary: Liveness probe
+      summary: Readiness probe
+      description: 200 once the Postgres store is open and `/v1` can serve; 503 while it opens or after it failed to start.
       tags:
         - Health
       security: []
       responses:
+        "503":
+          description: The store is still opening (`store` is `starting`) or failed to start (`failed`, with `error`).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    const: false
+                  service:
+                    const: agents-api
+                  store:
+                    enum: [starting, failed]
+                  error:
+                    type: string
+                required:
+                  - ok
+                  - service
+                  - store
         "200":
           description: OK
           content:
@@ -2468,6 +3453,12 @@ components:
       required: true
       schema:
         type: string
+    ProjectId:
+      name: project_id
+      in: path
+      required: true
+      schema:
+        type: string
     SessionId:
       name: session_id
       in: path
@@ -2476,6 +3467,12 @@ components:
         type: string
     TurnId:
       name: turn_id
+      in: path
+      required: true
+      schema:
+        type: string
+    JobId:
+      name: job_id
       in: path
       required: true
       schema:
@@ -2565,13 +3562,25 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     Conflict:
-      description: "`session_setting_not_live` (model or effort change not applicable), `session_not_resumable`, `file_attached` (delete of an attached file), `file_already_attached`, or `uploads_unsafe` (the workspace `uploads` entry is a symlink or not a directory)."
+      description: "`session_setting_not_live` (model or effort change not applicable), `session_not_resumable`, `session_setup_failed` (the agent setup of a new session failed), `file_attached` (delete of an attached file), `file_already_attached`, or `uploads_unsafe` (the workspace `uploads` entry is a symlink or not a directory)."
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     ScheduleConflict:
       description: "`schedule_conflict` (stale `revision`), `schedule_execution_pending`, `schedule_target_archived`, or `session_not_resumable`."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ProjectConflict:
+      description: "`project_has_sessions`: the project still has chats and cannot be deleted."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    SessionConflict:
+      description: "`project_archived` (a chat cannot be created on or moved into an archived Project), `session_setting_not_live`, `session_not_resumable`, or `session_setup_failed`."
       content:
         application/json:
           schema:
@@ -3025,6 +4034,110 @@ components:
             - low
             - medium
             - high
+    Project:
+      description: An owner-scoped grouping of chats with optional default agent and workspace. `null` environment means the caller's default workspace.
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          const: project
+        name:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - archived
+        pinned:
+          type: boolean
+        agent_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        environment:
+          oneOf:
+            - $ref: "#/components/schemas/EnvironmentConfig"
+            - type: "null"
+        archived_at:
+          oneOf:
+            - type: integer
+            - type: "null"
+        created_at:
+          type: integer
+        updated_at:
+          type: integer
+      required:
+        - id
+        - object
+        - name
+        - status
+        - pinned
+        - agent_id
+        - environment
+        - archived_at
+        - created_at
+        - updated_at
+    CreateProjectRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Must not be empty after trimming.
+        agent_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        environment:
+          oneOf:
+            - $ref: "#/components/schemas/EnvironmentConfig"
+            - type: "null"
+        pinned:
+          type: boolean
+          default: false
+      required:
+        - name
+    UpdateProjectRequest:
+      description: Fields to replace on a project; omitted fields keep their values.
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Must not be empty after trimming.
+        agent_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        environment:
+          oneOf:
+            - $ref: "#/components/schemas/EnvironmentConfig"
+            - type: "null"
+        pinned:
+          type: boolean
+    ProjectListResponse:
+      type: object
+      properties:
+        object:
+          const: list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Project"
+        first_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        last_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        has_more:
+          type: boolean
+      required:
+        - object
+        - data
     Agent:
       type: object
       properties:
@@ -3074,6 +4187,11 @@ components:
           oneOf:
             - type: string
               enum: [ask, auto]
+            - type: "null"
+        browser:
+          description: "Agentry extension: the web browser (Playwright MCP tools `mcp__browser__*`). It runs only in sandbox chats, inside the sandbox; a chat on the server gets no browser tools. `true` always tries to start it; `false` never does (no tools, no notice). Absent or `null` is auto (the server default `browser.default`): the browser mounts when the chat's sandbox has it, otherwise there are no tools and the prompt says the sandbox has no browser."
+          oneOf:
+            - type: boolean
             - type: "null"
         skills:
           description: "Agentry extension: skill selection. Absent or null uses every built-in skill; an explicit selection uses exactly the listed built-ins and library skills. The agent's private skills always apply."
@@ -3149,6 +4267,11 @@ components:
           oneOf:
             - type: string
               enum: [ask, auto]
+            - type: "null"
+        browser:
+          description: "Agentry extension: the web browser (Playwright MCP tools `mcp__browser__*`). It runs only in sandbox chats, inside the sandbox; a chat on the server gets no browser tools. `true` always tries to start it; `false` never does (no tools, no notice). Absent or `null` is auto (the server default `browser.default`): the browser mounts when the chat's sandbox has it, otherwise there are no tools and the prompt says the sandbox has no browser."
+          oneOf:
+            - type: boolean
             - type: "null"
         skills:
           description: "Agentry extension: skill selection. Absent or null uses every built-in skill; an explicit selection uses exactly the listed built-ins and library skills. The agent's private skills always apply."
@@ -3234,11 +4357,13 @@ components:
             - path
             - file_id
     EnvironmentTemplate:
-      description: An `agent.environment.template` as the OpenAI Agents API defines it. Confidential parts (inline file data, `env`, setup commands, archives) are never returned; `provider`, `image` and `unsupported_fields` are extensions.
+      description: An `agent.environment.template` as the OpenAI Agents API defines it. Confidential parts (inline file data, `env`, setup commands, archives) are never returned; `provider`, `image`, `unsupported_fields` and `built_in` are extensions. Built-in templates (`tpl_builtin_*`) lead the first page of the list when the isolated sandbox is configured; they cannot be changed or deleted (400).
       type: object
       properties:
         id:
           type: string
+        built_in:
+          type: boolean
         object:
           const: agent.environment.template
         name:
@@ -3348,6 +4473,15 @@ components:
         image:
           type: string
           description: Extension. Container image for container providers.
+        place:
+          type: string
+          description: Extension (`sandbox` provider). Id of the Agentry Sandbox place to run on; the default place when absent.
+        gpus:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - const: all
+          description: Extension (`sandbox` provider). GPUs to give the sandbox, a count or `all`.
         unsupported_fields:
           type: array
           description: Extension. Template fields set to something the provider cannot apply; provisioning fails while any remain.
@@ -3442,6 +4576,15 @@ components:
         image:
           type: string
           description: Extension. Container image for container providers.
+        place:
+          type: string
+          description: Extension (`sandbox` provider). Id of the Agentry Sandbox place to run on; the default place when absent.
+        gpus:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - const: all
+          description: Extension (`sandbox` provider). GPUs to give the sandbox, a count or `all`.
     UpdateTemplateRequest:
       description: Fields to replace on a template; omitted fields keep their values.
       type: object
@@ -3517,6 +4660,15 @@ components:
         image:
           type: string
           description: Extension. Container image for container providers.
+        place:
+          type: string
+          description: Extension (`sandbox` provider). Id of the Agentry Sandbox place to run on; the default place when absent.
+        gpus:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - const: all
+          description: Extension (`sandbox` provider). GPUs to give the sandbox, a count or `all`.
     EnvironmentStatus:
       type: string
       description: The OpenAI Agents API environment statuses. Internally we also track `cleanup` (reported as `disconnected`) and `deleted` (reported as `expired`).
@@ -3614,8 +4766,23 @@ components:
           properties:
             state: { type: string, enum: [provisioning, running, stopped, failed, deleting, gone, unknown] }
             image: { type: string }
+            place: { type: string, description: Id of the place the sandbox runs on. }
+            gpus:
+              oneOf:
+                - { type: integer, minimum: 0 }
+                - { const: all }
             started_at: { type: [integer, "null"] }
             last_used_at: { type: [integer, "null"] }
+            progress:
+              type: object
+              description: "Present only while `state` is `provisioning`: where the setup is. A record whose sandbox does not exist yet reports `starting`."
+              required: [stage, updated_at]
+              properties:
+                stage: { type: string, enum: [pulling_image, starting, preparing, installing_packages, copying_runtime, writing_files, running_setup, finishing] }
+                step: { type: integer, minimum: 1, description: "`running_setup` only: the command being run." }
+                steps: { type: integer, minimum: 1, description: "`running_setup` only: how many setup commands there are." }
+                detail: { type: string, maxLength: 120, description: "`running_setup` only: the command, cut to 120 characters." }
+                updated_at: { type: integer, description: Unix seconds. }
         provider_metadata:
           type: object
           description: Extension. Provider-owned handle; `workspace_directory` for `local`.
@@ -3654,6 +4821,15 @@ components:
           type: string
         image:
           type: string
+        provider:
+          type: string
+          description: Sandbox provider name; the template's, else the default.
+        name:
+          type: string
+          description: Display name, at most 80 characters.
+        place:
+          type: string
+          description: Extension. Id of the Agentry Sandbox place to create on (see `places` in `GET /agents/environments/providers`). Sandbox provider only; 400 for any other. Overrides the template's `place`.
       description: "`template_id` and `session_id` must belong to the caller."
     WriteEnvironmentFileRequest:
       description: The OpenAI Agents API file create params (`inline` with base64 `data`, or `file_id`), or the earlier `{path, content | content_base64}`. A `file_id` is accepted but answers 400 until Files API copying exists.
@@ -3913,6 +5089,9 @@ components:
           items:
             $ref: "#/components/schemas/Question"
           description: "`user_question` with several questions."
+        subagent_id:
+          type: string
+          description: Set when a subagent of this session asked (its id in `/subagents`). Answer it on this session like any approval; it can be pending while the session has no open turn (status `requires_action`).
       required:
         - type
         - id
@@ -3949,6 +5128,11 @@ components:
           type: array
           items:
             type: string
+        project_id:
+          oneOf:
+            - type: string
+            - type: "null"
+          description: "Agentry extension. Project this chat belongs to; `null` means unfiled."
         agent:
           $ref: "#/components/schemas/Agent"
         environment:
@@ -3970,6 +5154,7 @@ components:
         - error
         - metadata
         - vault_ids
+        - project_id
         - agent
         - environment
         - required_actions
@@ -4043,6 +5228,11 @@ components:
           type: string
         environment:
           $ref: "#/components/schemas/EnvironmentConfig"
+        project_id:
+          description: "Agentry extension. Project to attach the new chat to; a missing or `null` value leaves it unfiled. A foreign or archived id is refused."
+          oneOf:
+            - type: string
+            - type: "null"
         metadata:
           oneOf:
             - type: object
@@ -4072,11 +5262,12 @@ components:
             model:
               type: string
               minLength: 1
-              description: Retargets the live agent from the next model step. `null` and the empty string are rejected.
+              description: Retargets the live agent from the next model step. `null` and the empty string are rejected. A model that no configured provider offers answers 409 `session_setting_not_live` and nothing is stored.
             reasoning:
               type: object
               properties:
                 effort:
+                  description: "`null` clears the stored effort back to the agent's default."
                   oneOf:
                     - $ref: "#/components/schemas/ReasoningEffort"
                     - type: "null"
@@ -4089,6 +5280,19 @@ components:
             - type: object
               additionalProperties:
                 type: string
+            - type: "null"
+          description: Replaces the whole metadata map (OpenAI-compatible). Concurrent writers can drop each other's keys; use `metadata_merge` to change single keys.
+        metadata_merge:
+          type: object
+          additionalProperties:
+            oneOf:
+              - type: string
+              - type: "null"
+          description: "Agentry extension. Sets the given keys and leaves the others; a `null` value deletes the key. The merge is atomic in the store, so concurrent merges of different keys both survive. Applied after `metadata` when both are sent."
+        project_id:
+          description: "Agentry extension. Move the chat into a Project, or `null` to make it unfiled. A foreign or archived id is refused."
+          oneOf:
+            - type: string
             - type: "null"
     Turn:
       type: object
@@ -4154,6 +5358,31 @@ components:
         - in_progress
         - completed
         - incomplete
+    OutputImagePart:
+      type: object
+      description: >-
+        Agentry extension: one image a tool returned. `file_id` is derived from the session and the stored image, so live and replayed items carry the same id; it serves the bytes through `GET /v1/agents/files/{file_id}/content` for the session's owner only.
+      properties:
+        type:
+          const: output_image
+        file_id:
+          type: string
+          description: Id for `GET /v1/agents/files/{file_id}/content`.
+        filename:
+          type: string
+        bytes:
+          type: integer
+        media_type:
+          type: string
+        width:
+          type: integer
+        height:
+          type: integer
+      required:
+        - type
+        - bytes
+        - media_type
+      additionalProperties: false
     InputFilePart:
       type: object
       description: >-
@@ -4308,6 +5537,11 @@ components:
           $ref: "#/components/schemas/ItemTiming"
         subagent_id:
           type: string
+        images:
+          description: "Agentry extension: images the tool returned (screenshots, `read_image`), in order; absent when there are none."
+          type: array
+          items:
+            $ref: "#/components/schemas/OutputImagePart"
         connect_request:
           description: "Agentry extension: a connected-app sign-in link found in the output; clients show a Connect button."
           type: object
@@ -4498,6 +5732,11 @@ components:
           type: integer
         closed_at:
           type: integer
+        model:
+          type:
+            - string
+            - "null"
+          description: Model of the subagent's latest model request, from its Session log; null before its first request.
       required:
         - id
         - object
@@ -4505,6 +5744,7 @@ components:
         - parent_session_id
         - status
         - created_at
+        - model
     SendMessageInputEvent:
       type: object
       properties:
@@ -4516,11 +5756,12 @@ components:
             $ref: "#/components/schemas/InputMessage"
         model:
           type: string
-          description: Switch the session model from the next model step, before this message is queued.
+          description: Switch the session model from the next model step, before this message is queued. A model that no configured provider offers answers 409 `session_setting_not_live` and the message is not sent.
         reasoning:
           type: object
           properties:
             effort:
+              description: "`null` clears the stored effort back to the agent's default."
               oneOf:
                 - $ref: "#/components/schemas/ReasoningEffort"
                 - type: "null"
@@ -4925,6 +6166,209 @@ components:
         - type
         - event_id
         - error
+    Job:
+      type: object
+      description: A DSH background job owned by the session.
+      properties:
+        id:
+          type: string
+        object:
+          const: agent.session.job
+        session_id:
+          type: string
+        kind:
+          type: string
+          description: Producer kind, e.g. `bash` or `workflow`.
+        command:
+          type: string
+          description: The producer's label; the command line for shell jobs.
+        status:
+          type: string
+          enum:
+            - running
+            - stopping
+            - completed
+            - killed
+            - failed
+        detail:
+          type:
+            - string
+            - "null"
+          description: "Live progress line while running; terminal reason once settled (`exit code: 0`, `signal: SIGTERM; stopped by the user`)."
+        exit_code:
+          type:
+            - integer
+            - "null"
+          description: "Parsed from a completed job's `exit code: N` detail; null otherwise."
+        started_at:
+          type: integer
+        finished_at:
+          type:
+            - integer
+            - "null"
+        output:
+          $ref: "#/components/schemas/JobOutput"
+      required:
+        - id
+        - object
+        - session_id
+        - kind
+        - command
+        - status
+        - detail
+        - exit_code
+        - started_at
+        - finished_at
+    JobOutput:
+      type: object
+      description: The newest retained output (stdout, stderr and producer log chunks in arrival order), bounded per route. Absent on stream events.
+      properties:
+        text:
+          type: string
+        total_bytes:
+          type: integer
+          description: Bytes the job has written in all.
+        truncated:
+          type: boolean
+          description: Earlier output is not included (cut to the bound, or dropped by the registry's retention).
+      required:
+        - text
+        - total_bytes
+        - truncated
+    JobUpdatedEvent:
+      description: Ephemeral (no `id:`, never replayed). A job of this session started, changed progress, is stopping, or settled.
+      type: object
+      properties:
+        type:
+          const: agent.session.job.updated
+        event_id:
+          type: string
+        session_id:
+          type: string
+        job:
+          $ref: "#/components/schemas/Job"
+      required:
+        - type
+        - event_id
+        - session_id
+        - job
+    JobRemovedEvent:
+      description: Ephemeral (no `id:`, never replayed). A job left the list (a foreground command that finished in time).
+      type: object
+      properties:
+        type:
+          const: agent.session.job.removed
+        event_id:
+          type: string
+        session_id:
+          type: string
+        job_id:
+          type: string
+      required:
+        - type
+        - event_id
+        - session_id
+        - job_id
+    SubagentCreatedEvent:
+      description: Ephemeral (no `id:`, never replayed). A subagent of this session started.
+      type: object
+      properties:
+        type:
+          const: agent.session.subagent.created
+        event_id:
+          type: string
+        session_id:
+          type: string
+        subagent:
+          $ref: "#/components/schemas/Subagent"
+      required:
+        - type
+        - event_id
+        - session_id
+        - subagent
+    SubagentUpdatedEvent:
+      description: Ephemeral (no `id:`, never replayed). A subagent turn opened or ended; `turn` is its current state.
+      type: object
+      properties:
+        type:
+          const: agent.session.subagent.updated
+        event_id:
+          type: string
+        session_id:
+          type: string
+        subagent:
+          $ref: "#/components/schemas/Subagent"
+        turn:
+          $ref: "#/components/schemas/Turn"
+      required:
+        - type
+        - event_id
+        - session_id
+        - subagent
+        - turn
+    SubagentClosedEvent:
+      description: Ephemeral (no `id:`, never replayed). A subagent of this session closed.
+      type: object
+      properties:
+        type:
+          const: agent.session.subagent.closed
+        event_id:
+          type: string
+        session_id:
+          type: string
+        subagent:
+          $ref: "#/components/schemas/Subagent"
+      required:
+        - type
+        - event_id
+        - session_id
+        - subagent
+    SubagentItemAddedEvent:
+      description: Ephemeral (no `id:`, never replayed). A subagent saved a tool call, which waits for its output. The item carries `subagent_id`.
+      type: object
+      properties:
+        type:
+          const: agent.session.subagent.item.added
+        event_id:
+          type: string
+        session_id:
+          type: string
+        subagent_id:
+          type: string
+        turn_id:
+          type: string
+        item:
+          $ref: "#/components/schemas/SessionItem"
+      required:
+        - type
+        - event_id
+        - session_id
+        - subagent_id
+        - turn_id
+        - item
+    SubagentItemDoneEvent:
+      description: Ephemeral (no `id:`, never replayed). A subagent saved a final item (message, reasoning, tool output). The item carries `subagent_id`.
+      type: object
+      properties:
+        type:
+          const: agent.session.subagent.item.done
+        event_id:
+          type: string
+        session_id:
+          type: string
+        subagent_id:
+          type: string
+        turn_id:
+          type: string
+        item:
+          $ref: "#/components/schemas/SessionItem"
+      required:
+        - type
+        - event_id
+        - session_id
+        - subagent_id
+        - turn_id
+        - item
     SessionEvent:
       description: JSON payload of one SSE frame. The frame `event:` name equals `type`.
       oneOf:
@@ -4944,6 +6388,13 @@ components:
         - $ref: "#/components/schemas/OutputTextDeltaEvent"
         - $ref: "#/components/schemas/OutputTextDoneEvent"
         - $ref: "#/components/schemas/ErrorEvent"
+        - $ref: "#/components/schemas/SubagentCreatedEvent"
+        - $ref: "#/components/schemas/SubagentUpdatedEvent"
+        - $ref: "#/components/schemas/SubagentClosedEvent"
+        - $ref: "#/components/schemas/SubagentItemAddedEvent"
+        - $ref: "#/components/schemas/SubagentItemDoneEvent"
+        - $ref: "#/components/schemas/JobUpdatedEvent"
+        - $ref: "#/components/schemas/JobRemovedEvent"
       discriminator:
         propertyName: type
     ScheduleStatus:

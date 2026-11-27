@@ -27,8 +27,20 @@ export function logEvent(type: string, data: unknown, seq: number, time = seq * 
   return { type, seq, time, data } as unknown as SessionEvent
 }
 
-/** Fake `readSession` over per-session event lists. */
-export class FakeSessionQuery implements Pick<SessionQueryEngine, 'readSession'> {
+/** Header fields a test can set per session: lineage, creation time, and a fork's inherited prefix. */
+export interface FakeHeader {
+  parentSession?: string
+  origin?: 'subagent'
+  /** Epoch milliseconds; 0 when omitted. */
+  createdAt?: number
+  /** Number of leading events inherited from the parent; 0 when omitted. */
+  inheritedEventCount?: number
+}
+
+/** Fake `readSession` and `traceSession` over per-session event lists. */
+export class FakeSessionQuery implements Pick<SessionQueryEngine, 'readSession' | 'traceSession'> {
+  /** Per-session header fields; sessions without an entry have no parent. */
+  readonly headers = new Map<string, FakeHeader>()
   readonly live = new Map<string, SessionEvent[]>()
   readonly cold = new Map<string, SessionEvent[]>()
   /** Working directory returned in every session header. */
@@ -76,10 +88,36 @@ export class FakeSessionQuery implements Pick<SessionQueryEngine, 'readSession'>
     const events = structuredClone(live ?? [...cold!, ...interruptedTurnClosers(cold!)])
     await this.gateAfterSnapshot
     return {
-      session: { version: 4, id: SessionId(id), createdAt: 0, cwd: this.cwd, isSeeded: false } as unknown as SessionHeader,
-      inheritedEventCount: 0,
+      session: this.#header(id),
+      inheritedEventCount: this.headers.get(id)?.inheritedEventCount ?? 0,
       events,
     } as Awaited<ReturnType<SessionQueryEngine['readSession']>>
+  }
+
+  #header(id: string): SessionHeader {
+    const extra = this.headers.get(id) ?? {}
+    return {
+      version: 4,
+      id: SessionId(id),
+      createdAt: extra.createdAt ?? 0,
+      cwd: this.cwd,
+      isSeeded: false,
+      ...(extra.parentSession === undefined ? {} : { parentSession: SessionId(extra.parentSession) }),
+      ...(extra.origin === undefined ? {} : { origin: extra.origin }),
+    } as unknown as SessionHeader
+  }
+
+  /** Lineage over every known session (one with a log, a header, or a child); a session with a live log is `live`. Only direct children are listed under the target. */
+  traceSession: SessionQueryEngine['traceSession'] = async (sessionId) => {
+    const id = String(sessionId)
+    const parents = [...this.headers.values()].flatMap(header => header.parentSession === undefined ? [] : [header.parentSession])
+    const ids = new Set([...this.live.keys(), ...this.cold.keys(), ...this.headers.keys(), ...parents])
+    if (!ids.has(id)) throw new SessionQueryError(`session "${id}" not found`, 'SESSION_QUERY_SESSION_NOT_FOUND')
+    const record = (key: string) => ({ header: this.#header(key), live: this.live.has(key), persisted: true })
+    const descendants = [...ids]
+      .filter(key => this.headers.get(key)?.parentSession === id)
+      .map(key => ({ session: record(key), descendants: [] }))
+    return Promise.resolve({ target: record(id), ancestors: [], descendants, complete: true, root: record(id) } as Awaited<ReturnType<SessionQueryEngine['traceSession']>>)
   }
 }
 

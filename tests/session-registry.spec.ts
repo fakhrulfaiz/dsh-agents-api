@@ -49,7 +49,7 @@ describe('SessionRegistry', () => {
 
   it('fans projected frames out with their ids and ephemeral events without one', () => {
     const registry = registryWith('sess_1')
-    const seen: Array<[string, number | undefined]> = []
+    const seen: Array<[string, string | undefined]> = []
     const off = registry.subscribe('sess_1', (evt, id) => {
       seen.push([evt.type, id])
     })
@@ -70,12 +70,12 @@ describe('SessionRegistry', () => {
     registry.apply('sess_1', logEvent('turn/end', {}, 6))
 
     expect(seen).toEqual([
-      ['agent.session.in_progress', 2],
-      ['agent.session.turn.created', 3],
-      ['agent.session.turn.in_progress', 4],
+      ['agent.session.in_progress', '2'],
+      ['agent.session.turn.created', '3'],
+      ['agent.session.turn.in_progress', '4'],
       ['error', undefined],
-      ['agent.session.turn.completed', 5],
-      ['agent.session.idle', 6],
+      ['agent.session.turn.completed', '5'],
+      ['agent.session.idle', '6'],
     ])
     off()
     boom()
@@ -94,6 +94,37 @@ describe('SessionRegistry', () => {
     expect(registry.listSubagents('sess_1')).toEqual([])
   })
 
+  it('streams subagent activity to the parent as ephemeral subagent.* events', () => {
+    const registry = registryWith('sess_1')
+    const seen: Array<{ type: string; id: string | undefined; evt: Record<string, unknown> }> = []
+    registry.subscribe('sess_1', (evt, id) => { seen.push({ type: evt.type, id, evt: evt as unknown as Record<string, unknown> }) })
+    registry.ensureSubagent('sess_1', 'c')
+    registry.ensureSubagent('sess_1', 'c')
+    registry.applyChildEvent('sess_1', 'c', logEvent('turn/start', { turn: 1 }, 0))
+    const turn = { id: 'turn_0' }
+    registry.applyChildEvent('sess_1', 'c', logEvent('tool/call', { turn: 1, step: 1, callId: 'k', name: 'glob', arguments: '{}' }, 1))
+    registry.applyChildEvent('sess_1', 'c', logEvent('assistant/message', { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'done' }] } }, 2))
+    registry.applyChildEvent('sess_1', 'c', logEvent('turn/end', { reason: { kind: 'completed' } }, 3))
+    registry.closeSubagent('sess_1', 'c')
+    expect(seen.map(e => e.type)).toEqual([
+      'agent.session.subagent.created',
+      'agent.session.subagent.updated',
+      'agent.session.subagent.item.added',
+      'agent.session.subagent.item.done',
+      'agent.session.subagent.updated',
+      'agent.session.subagent.closed',
+    ])
+    // Never replayed: no SSE id.
+    expect(seen.every(e => e.id === undefined)).toBe(true)
+    expect(seen[0]!.evt).toMatchObject({ session_id: 'sess_1', subagent: { id: 'c', status: 'active' } })
+    expect(seen[1]!.evt).toMatchObject({ turn: { id: turn.id, status: 'in_progress' } })
+    expect(seen[2]!.evt).toMatchObject({ subagent_id: 'c', turn_id: turn.id, item: { id: 'item_fn_1', subagent_id: 'c' } })
+    expect(seen[4]!.evt).toMatchObject({ turn: { id: turn.id, status: 'completed' } })
+    expect(seen[5]!.evt).toMatchObject({ subagent: { id: 'c', status: 'closed' } })
+    // Child items stay off the parent's item list.
+    expect(registry.getSubagent('sess_1', 'c')?.items).toHaveLength(2)
+  })
+
   describe('pending approvals', () => {
     const approval: OAIRequiredAction = { type: 'approval', id: 'appr-1', kind: 'tool_approval', prompt: 'Approve bash', options: ['approve', 'deny'] }
     const withFunctionTool = (): SessionRegistry => {
@@ -105,7 +136,7 @@ describe('SessionRegistry', () => {
 
     it('shows them in required_actions, moves the status, and sends ephemeral frames', () => {
       const registry = registryWith('sess_1')
-      const seen: Array<[string, number | undefined]> = []
+      const seen: Array<[string, string | undefined]> = []
       registry.subscribe('sess_1', (evt, id) => { seen.push([evt.type, id]) })
       expect(registry.setInteractionActions('missing', [approval])).toBeUndefined()
       registry.apply('sess_1', logEvent('turn/start', { turn: 1 }, 1))
@@ -128,6 +159,17 @@ describe('SessionRegistry', () => {
       expect(registry.setInteractionActions('sess_1', [approval])).toBeUndefined()
       expect(registry.getOAISession('sess_1')?.status).toBe('idle')
       expect(registry.setInteractionActions('sess_1', [])).toBeUndefined()
+    })
+
+    it('shows a subagent request while no turn is open as requires_action, and idle when it clears', () => {
+      const registry = registryWith('sess_1')
+      const seen: string[] = []
+      registry.subscribe('sess_1', (evt) => { seen.push(evt.type) })
+      const fromChild: OAIRequiredAction = { ...approval, subagent_id: 'child_1' }
+      expect(registry.setInteractionActions('sess_1', [fromChild])).toEqual({ status: 'requires_action', error: null })
+      expect(registry.getOAISession('sess_1')).toMatchObject({ status: 'requires_action', required_actions: [fromChild] })
+      expect(registry.setInteractionActions('sess_1', [])).toEqual({ status: 'idle', error: null })
+      expect(seen).toEqual(['agent.session.requires_action', 'agent.session.idle'])
     })
 
     it('keeps requires_action while a function call and an approval overlap', () => {

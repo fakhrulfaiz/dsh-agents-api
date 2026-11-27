@@ -6,12 +6,28 @@ Package-local reference and change notes for `@agentry/api`.
 
 | Page | Summary |
 | --- | --- |
+| [2026-11-26-turn-changes.md](changes/2026-11-26-turn-changes.md) | Changed files per turn with diffs (`/changes`, `/turns/{id}/changes[/{index}]`): DSH recorder for local chats, a shadow git repository inside the sandbox for sandbox chats; memory only |
+| [2026-11-26-office-render.md](changes/2026-11-26-office-render.md) | `GET /agents/sessions/{id}/renders/pdf/{path}`: Office files converted to PDF by DSH's `officeToPdf` in the API process |
 | [http-api.md](http-api.md) | Agents API routes, create/stream input, function-tool and approval wire contracts, live model and effort changes, scheduled tasks, slash commands |
 
 ## Changes
 
 | Note | Summary |
 | --- | --- |
+| [2026-11-27-environment-create-background.md](changes/2026-11-27-environment-create-background.md) | `POST /agents/environments` on the sandbox provider answers `pending` at once and sets up in the background; timed-out creates adopt the sandbox; delete during setup; interrupted setups fail |
+| [2026-11-27-session-jobs.md](changes/2026-11-27-session-jobs.md) | Session background jobs: `/sessions/{id}/jobs`, `/jobs/{job_id}`, `/jobs/{job_id}/kill`, ephemeral `agent.session.job.*` stream events |
+| [2026-11-27-projects.md](changes/2026-11-27-projects.md) | Owner-scoped Project CRUD, archive/unarchive, and the 409 `project_has_sessions` delete guard |
+| [2026-11-27-browser-recording.md](changes/2026-11-27-browser-recording.md) | Browser recording tools: `browser_recording_start`/`stop`, VP8 WebM from the relay's frames through the image's ffmpeg, cursor sidecar, auto-stop at turn end and limits |
+| [2026-11-27-browser-takeover.md](changes/2026-11-27-browser-takeover.md) | Browser take-over: `/sessions/{id}/browser/control` and `/browser/input`, input through the relay, agent's browser tools wait during control, 10 fps default |
+| [2026-11-27-browser-live.md](changes/2026-11-27-browser-live.md) | Live browser view: `/sessions/{id}/browser/live` SSE frames from a CDP screencast relay inside the sandbox, idle reasons |
+| [2026-11-26-browser.md](changes/2026-11-26-browser.md) | Web browser for agents: `browser` agent field, Playwright MCP inside the sandbox through the envd stdio bridge, no host browser |
+| [2026-11-26-durable-subagents.md](changes/2026-11-26-durable-subagents.md) | Subagent list, turns, items and images rebuilt from the child Session logs after a restart; `model` on the subagent resource; subagent approvals on the parent session with `subagent_id` |
+| [2026-11-26-owner-scoped-schedule-tools.md](changes/2026-11-26-owner-scoped-schedule-tools.md) | In-chat `schedule_*` tools shadowed per session with owner-scoped copies; other owners' and ownerless tasks look like unknown ids |
+| [2026-11-26-tool-images.md](changes/2026-11-26-tool-images.md) | Images from tool results: `images` on `function_call_output` items, `timg_` file ids served by the files content route |
+| [2026-11-26-session-metadata-merge.md](changes/2026-11-26-session-metadata-merge.md) | `metadata_merge` on session update (atomic, `null` deletes a key) and `metadata[key]=value` list filter |
+| [2026-11-26-stream-items.md](changes/2026-11-26-stream-items.md) | The session stream carries the full item log (`<n>.<sub>` item frame ids), live-only `subagent.*` events, attachment file ids on streamed user messages, and assistant text without the reasoning prefix |
+| [2026-11-27-composio-relay.md](changes/2026-11-27-composio-relay.md) | Local MCP relay in front of Composio: instant `initialize`, cached `tools/list`, one shared upstream session; `AGENTRY_COMPOSIO_RELAY=off` |
+| [2026-11-27-fast-session-create.md](changes/2026-11-27-fast-session-create.md) | Session create answers before the agent (and its MCP connections) is set up; queued first message, waiting requests, `failed` + 409 `session_setup_failed` on a setup failure |
 | [2026-11-23-agentry-general-agent.md](changes/2026-11-23-agentry-general-agent.md) | Agentry identity preset, per-agent skills and installs, command allow-list, Composio grants and connect requests |
 | [2026-11-10-redact-mcp-secrets.md](changes/2026-11-10-redact-mcp-secrets.md) | MCP `headers` and `env` values returned masked as `***` by every session and saved-agent response and SSE event; storage and recovery keep real values |
 | [2026-11-10-attachments.md](changes/2026-11-10-attachments.md) | Chat file attachments: `/agents/files` upload, content, and delete; `input_image` / `input_file` parts; workspace `uploads/` copy; item parts; TTL sweeper; `FileStore` seam |

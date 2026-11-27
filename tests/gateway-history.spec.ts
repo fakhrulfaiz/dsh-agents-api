@@ -3,6 +3,7 @@
  * lazy resume, status writes, and index-only listing.
  */
 
+import { APP_TOOLS } from '../src/mount-composio-app-tools.ts'
 import { fakeLlm, fakeModel } from './support/fake-model.ts'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -161,6 +162,8 @@ const frameTypes = (text: string) => [...text.matchAll(/^event: (.+)$/gmu)].map(
 
 const user = (seq: number) => logEvent('user/message', { content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }, seq)
 
+const APP_TOOL_NAMES = new Set(APP_TOOLS.map(tool => tool.name))
+
 describe('SSE replay', () => {
   it('replays across restart: Last-Event-ID yields exactly the missed events, then live, with no duplicates', async () => {
     const store = new MemoryStore()
@@ -188,6 +191,26 @@ describe('SSE replay', () => {
     expect(frameIds(text)).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
     expect(frameTypes(text).slice(-3)).toEqual(['agent.session.in_progress', 'agent.session.turn.created', 'agent.session.turn.in_progress'])
     expect(new Set(frameIds(text)).size).toBe(frameIds(text).length)
+  })
+
+  it('streams item frames with sub-numbered ids and resumes from one', async () => {
+    const store = new MemoryStore()
+    const query = new FakeSessionQuery()
+    const process = await startProcess(store, query)
+    const id = await createSession(process.origin)
+    process.feed(id, logEvent('turn/start', { turn: 1 }, 1))
+    process.feed(id, user(2))
+    process.feed(id, logEvent('assistant/message', { message: { content: [{ type: 'text', text: 'ok' }] } }, 3))
+    const allIds = (text: string) => [...text.matchAll(/^id: ([\d.]+)$/gmu)].map(match => match[1])
+    const whole = await readStream(await fetch(`${process.origin}/v1/agents/sessions/${id}/events`, { headers: { 'last-event-id': '0' } }), text => allIds(text).length >= 9)
+    // The user message is an item frame after frame 4 (turn.in_progress).
+    expect(allIds(whole)).toEqual(['1', '2', '3', '4', '4.1', '5', '6', '7', '8'])
+    expect(whole).toContain('"role":"user"')
+    // An old integer id still resumes at the same place; a sub id resumes after that item frame.
+    const fromFour = await readStream(await fetch(`${process.origin}/v1/agents/sessions/${id}/events`, { headers: { 'last-event-id': '4' } }), text => allIds(text).length >= 5)
+    expect(allIds(fromFour)).toEqual(['4.1', '5', '6', '7', '8'])
+    const fromItem = await readStream(await fetch(`${process.origin}/v1/agents/sessions/${id}/events`, { headers: { 'last-event-id': '4.1' } }), text => allIds(text).length >= 4)
+    expect(allIds(fromItem)).toEqual(['5', '6', '7', '8'])
   })
 
   it('live frames carry the ids a later replay assigns', async () => {
@@ -351,6 +374,43 @@ describe('history routes after restart', () => {
     expect(turn.status).toBe('completed')
     expect(session).toMatchObject({ status: 'idle', metadata: { k: 'v' }, agent: { instructions: 'brief' } })
     expect((await fetch(`${second.origin}/v1/agents/sessions/${id}/turns/turn_9`)).status).toBe(404)
+  })
+
+  it('serves subagents, their turns and items from the child logs after restart, as live', async () => {
+    const store = new MemoryStore()
+    const query = new FakeSessionQuery()
+    const first = await startProcess(store, query)
+    const id = await createSession(first.origin)
+    const other = await createSession(first.origin)
+    query.headers.set('child_1', { parentSession: id, origin: 'subagent', createdAt: 4_000 })
+    query.headers.set('child_x', { parentSession: other, origin: 'subagent', createdAt: 4_000 })
+    const child = [
+      logEvent('request/header', { header: { config: { model: 'deepseek-flash' } }, reason: 'initial' }, 0, 4_000),
+      logEvent('turn/start', { turn: 1 }, 1, 4_000),
+      logEvent('user/message', { content: [{ type: 'text', text: 'look' }], source: { kind: 'user' } }, 2, 4_100),
+      logEvent('assistant/message', { message: { content: [{ type: 'text', text: 'seen' }] } }, 3, 4_200),
+      logEvent('turn/end', { reason: { kind: 'completed' } }, 4, 5_000),
+    ]
+    for (const event of child) {
+      query.append('child_1', event)
+      first.registry.applyChildEvent(id, 'child_1', event, 4_000)
+    }
+    query.append('child_x', child[1]!)
+    first.registry.closeSubagent(id, 'child_1')
+    const read = async (origin: string, path: string) => (await fetch(`${origin}/v1/agents/sessions/${id}/subagents${path}`)).json() as Promise<unknown>
+    const paths = ['', '/child_1', '/child_1/turns', '/child_1/turns/turn_1', '/child_1/items', '/child_1/turns/turn_1/items']
+    const live = await Promise.all(paths.map(path => read(first.origin, path)))
+    query.crash()
+
+    const second = await startProcess(store, query)
+    expect(second.registry.listSubagents(id)).toEqual([])
+    const rebuilt = await Promise.all(paths.map(path => read(second.origin, path)))
+    expect(rebuilt).toEqual(live)
+    expect(rebuilt[0]).toMatchObject({ data: [{ id: 'child_1', status: 'closed', created_at: 4, closed_at: 5, model: 'deepseek-flash' }] })
+    expect((rebuilt[4] as { data: unknown[] }).data).toHaveLength(2)
+    // A child is reachable only through its own parent, whose owner was checked.
+    expect((await fetch(`${second.origin}/v1/agents/sessions/${id}/subagents/child_x`)).status).toBe(404)
+    expect((await fetch(`${second.origin}/v1/agents/sessions/${id}/subagents/child_1/turns/turn_9`)).status).toBe(404)
   })
 
   it('replays a slash command result as a turn-less item across restart', async () => {
@@ -541,7 +601,7 @@ describe('resume', () => {
     ])
     expect(posted.map(response => response.status)).toEqual([200, 200])
     expect(second.resume).toHaveBeenCalledOnce()
-    expect(second.tools.map(tool => tool.name).filter(name => !name.startsWith('skill_'))).toEqual(['get_weather'])
+    expect(second.tools.map(tool => tool.name).filter(name => !name.startsWith('skill_') && !APP_TOOL_NAMES.has(name))).toEqual(['get_weather'])
     expect(second.agents.get(id)!.followup).toHaveBeenCalledOnce()
 
     // The call parked before the restart was closed by the Session layer; a late result for it is refused.
@@ -557,7 +617,7 @@ describe('resume', () => {
     const store = new MemoryStore()
     await store.ensureOwner(OWNER)
     const at = new Date()
-    const legacy = { ownerId: OWNER, agentId: null, environmentId: null, status: 'idle' as const, lastError: null, model: 'deepseek-chat', reasoningEffort: null, createdAt: at, updatedAt: at }
+    const legacy = { ownerId: OWNER, agentId: null, environmentId: null, projectId: null, status: 'idle' as const, lastError: null, model: 'deepseek-chat', reasoningEffort: null, createdAt: at, updatedAt: at }
     await store.sessions.insert({ ...legacy, id: 'sess_legacy', dshSessionId: 'sess_legacy', body: null })
     const query = new FakeSessionQuery()
     query.append('sess_legacy', logEvent('turn/start', { turn: 1 }, 1))

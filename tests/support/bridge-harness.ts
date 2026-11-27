@@ -9,7 +9,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ApprovalOutcome, ApprovalRequestEvent } from '@deepseek-ai/dsh-user-approval/types'
 import type { AskUserQuestionAnswer, AskUserQuestionItem, AskUserQuestionRequestEvent } from '@deepseek-ai/dsh-user-questions/types'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { installApprovalBridge, type ApprovalBridge } from '../../src/approvals/approval-bridge.ts'
+import { claimAgent, installApprovalBridge, type ApprovalBridge } from '../../src/approvals/approval-bridge.ts'
 import type { OAIRequiredAction } from '../../src/types.ts'
 import { logEvent } from './fake-session-query.ts'
 
@@ -24,6 +24,8 @@ export interface BridgeHarness {
   /** Number of registered effects whose disposer has run. */
   disposed: () => number
   agent: (sessionId: string) => Agent
+  /** A subagent of `parentId`: header `origin: subagent`. */
+  child: (childId: string, parentId: string) => Agent
   /** Invoke the `approval/request` listener; `next` answers `'unavailable'` like the real fallback. */
   approve: (request: Omit<ApprovalRequestEvent, 'agent'> & { agent: Agent }) => Promise<ApprovalOutcome>
   /** Invoke the `user-questions/request` listener; `next` rejects like an unanswered question. */
@@ -58,7 +60,7 @@ export function bridgeHarness(claimed: string[] = ['sess_1']): BridgeHarness {
   const claims = new Set(claimed)
   const onChange = vi.fn<(sessionId: string, actions: OAIRequiredAction[]) => void>()
   const bridge = installApprovalBridge(ctx, {
-    claims: agent => claims.has(agent.session.id) ? agent.session.id : undefined,
+    claims: agent => claimAgent(agent, id => claims.has(id)),
     onChange,
   })
   const call = <R>(name: string, ...args: unknown[]): R => (listeners.get(name) as unknown as (...a: unknown[]) => R)(...args)
@@ -68,6 +70,7 @@ export function bridgeHarness(claimed: string[] = ['sess_1']): BridgeHarness {
     onChange,
     disposed: () => disposed,
     agent: sessionId => ({ session: { id: sessionId } }) as unknown as Agent,
+    child: (childId, parentId) => ({ session: { id: childId, header: { origin: 'subagent', parentSession: parentId } } }) as unknown as Agent,
     approve: request => call('approval/request', request, () => Promise.resolve('unavailable')),
     ask: request => call('user-questions/request', request, () => Promise.reject(new Error('delegated'))),
     log: (sessionId, type, data, seq = 1) => {

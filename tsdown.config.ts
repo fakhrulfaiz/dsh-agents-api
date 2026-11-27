@@ -5,7 +5,7 @@ import { defineConfig } from 'tsdown'
 // a runtime dependency installed beside the package. Migration files are read
 // at runtime from `lib/migrations`, next to the bundle (see src/store/migrate.ts).
 export default defineConfig({
-  entry: { index: 'src/index.ts', 'sandbox-runtime': 'src/sandbox/remote/plugin.ts' },
+  entry: { index: 'src/index.ts', 'sandbox-runtime': 'src/sandbox/remote/plugin.ts', 'working-directory': 'src/working-directory.ts', 'sandbox-stdio-bridge': 'src/sandbox/remote/stdio-bridge-main.ts' },
   format: 'esm',
   platform: 'node',
   outDir: 'lib',

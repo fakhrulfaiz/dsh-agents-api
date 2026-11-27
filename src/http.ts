@@ -165,6 +165,20 @@ export function listQuery(url: URL): ListQuery {
 }
 
 /**
+ * Read `metadata[key]=value` query parameters (the OpenAI-style deep-object form).
+ * @param url - request URL.
+ * @returns the key/value filters, or `undefined` when there are none.
+ */
+export function metadataFilter(url: URL): Record<string, string> | undefined {
+  const filter: Record<string, string> = {}
+  for (const [name, value] of url.searchParams) {
+    const match = /^metadata\[(.+)\]$/u.exec(name)
+    if (match?.[1] !== undefined) filter[match[1]] = value
+  }
+  return Object.keys(filter).length === 0 ? undefined : filter
+}
+
+/**
  * Page an id-bearing list with `after`, `limit`, and `order`.
  * @param items - complete list in natural (oldest-first) order.
  * @param opts - cursor options.

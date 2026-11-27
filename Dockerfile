@@ -10,6 +10,8 @@ ARG SANDBOX_REF=main
 FROM node:24.19.0-bookworm AS build
 ARG DSH_TAG
 ARG SANDBOX_REF
+# The exact commit (CI passes it) so the cached clone layer below is rebuilt when the sandbox moves.
+ARG SANDBOX_SHA
 RUN npm install -g pnpm@11.28.5
 WORKDIR /opt
 
@@ -23,7 +25,7 @@ RUN cd dsh && pnpm run prepare:primary-runtime --target linux-x64 --output /opt/
 
 # The Agentry Sandbox client, a sibling the plugin links (`link:../agentry-sandbox`) and bundles.
 RUN git clone https://github.com/fakhrulfaiz/agentry-sandbox.git agentry-sandbox \
- && cd agentry-sandbox && git checkout "$SANDBOX_REF" && pnpm install --frozen-lockfile
+ && cd agentry-sandbox && git checkout "${SANDBOX_SHA:-$SANDBOX_REF}" && pnpm install --frozen-lockfile
 
 # This plugin.
 COPY . /opt/dsh-agents-api

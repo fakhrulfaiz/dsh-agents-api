@@ -4,3 +4,6 @@ lib/
 .env.*
 tsconfig.dsh.json
 tsconfig.dsh.types.json
+
+# Local API log when started detached (scripts/dev.sh via nohup)
+.api-dev.log

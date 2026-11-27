@@ -2,45 +2,72 @@
  * The `sandbox` environment provider: environments that live in the Agentry
  * Sandbox service (Docker now, other backends later).
  *
- * DSH checks a session's working directory on this host, so every sandbox
- * gets an empty placeholder directory `<workspacesRoot>/<owner>/sandbox-<envId>`
- * and the service mounts the sandbox's workspace at that same absolute path
- * inside the container: paths are identical on both sides and nothing is
- * translated. Files are read and written through envd (as `agent`).
+ * A sandbox's workspace disk mounts at `/workspace` inside it. The folder need
+ * not exist on this host: a sandbox session's working directory is checked
+ * inside the sandbox (src/working-directory.ts). A sandbox on a shared machine
+ * (an ssh-machine place) mounts at its unique path
+ * `<workspacesRoot>/<owner>/sandbox-<envId>` instead (an empty placeholder of
+ * that name is kept on this host). Files are read and written through envd
+ * (as `agent`).
  */
 import { mkdir, rmdir } from 'node:fs/promises'
 import { join, posix } from 'node:path'
 import { createSandboxApi, SandboxApiError, type SandboxApi, type WireBackend, type WireSandbox, type WireTemplate } from '@agentry/sandbox/client'
 import type { OwnerId } from '../auth/authenticator.ts'
 import { directorySegment } from '../environment/local.ts'
-import type { CreateEnvironmentInput } from '../environment/provider.ts'
+import type { CreateEnvironmentInput, EnvironmentCreateResult } from '../environment/provider.ts'
 import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplateConfig } from '../environment-types.ts'
-import type { SandboxSummary } from '../environment/environment-compat.ts'
+import type { SandboxProgress, SandboxSummary } from '../environment/environment-compat.ts'
 import type { SandboxProvider } from './contract.ts'
 
 export interface AgentrySandboxOptions {
   url: string
   key: string
   workspacesRoot: string
+  /** The in-sandbox workspace path (default `/workspace`). Sandboxes on a shared machine (an ssh-machine place) use their unique host placeholder path instead. */
+  sharedWorkspace?: string
 }
 
 export interface AgentrySandboxProvider extends SandboxProvider {
   /** Whether the service answers and accepts the key, with the reason when not. */
-  availability(): Promise<{ available: true; version: string; default_image?: WireBackend['default_image'] } | { available: false; reason: string }>
+  availability(): Promise<{ available: true; version: string; default_image?: WireBackend['default_image']; places: SandboxPlaceRow[] } | { available: false; reason: string; places: SandboxPlaceRow[] }>
   /** The service client for one owner (start, stop, reset, envd). */
   api(owner: string): SandboxApi
   /** Workspace files with size and modification time, skipping `.git` and `node_modules` (at most 5000). */
   listEntries(record: EnvironmentRecord): Promise<WorkspaceEntry[]>
   /** Whether a workspace-relative path exists in the sandbox. */
+  /**
+   * After a create that timed out client-side: find the sandbox the service made for it (same name, created since
+   * `sinceSeconds`, newest first). `undefined` when the service has none.
+   */
+  adopt(owner: OwnerId, environmentId: string, input: CreateEnvironmentInput, sinceSeconds: number): Promise<EnvironmentCreateResult | undefined>
   /** Live state, image and last use for the environment wire object. Never throws. */
   describe(record: EnvironmentRecord): Promise<SandboxSummary>
   /** Size of a workspace file, or `undefined` when there is no such file. */
   fileSize(record: EnvironmentRecord, path: string): Promise<number | undefined>
+  /** Size and modification time (ms) of a workspace file, or `undefined` when there is no such file. */
+  fileStat(record: EnvironmentRecord, path: string): Promise<{ size: number; mtimeMs: number } | undefined>
   exists(record: EnvironmentRecord, path: string): Promise<boolean>
   /** Remove a workspace-relative file in the sandbox (missing is not an error). */
   remove(record: EnvironmentRecord, path: string): Promise<void>
   /** The absolute path of a workspace-relative path in the sandbox. */
   absolute(record: EnvironmentRecord, path: string): string
+  /** Run a `/bin/sh -c` script as `agent` (default 30 s; stdout and stderr capped at 8 MB each, `truncated` when cut). */
+  exec(record: EnvironmentRecord, script: string, opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<{ code: number; stdout: string; stderr: string; truncated?: boolean }>
+  /** The workspace directory inside the sandbox. */
+  workspaceDir(record: EnvironmentRecord): string
+}
+
+/** One Agentry Sandbox place as listed on the `sandbox` provider row. */
+export interface SandboxPlaceRow {
+  id: string
+  name: string
+  kind: string
+  default: boolean
+  available: boolean
+  reason?: string
+  gpus?: { count: number; models: string[] }
+  capabilities: { reset: boolean; keepFilesOnReset: boolean; isolated: boolean; gpu: boolean }
 }
 
 export interface WorkspaceEntry {
@@ -79,6 +106,8 @@ export async function copyIntoSandboxUploads(
 }
 
 const AGENT = 'agent'
+const EXEC_TIMEOUT_MS = 30_000
+const EXEC_OUTPUT_CAP = 8 * 1024 * 1024
 const QUICK_TIMEOUT_MS = 10_000
 /** Largest artifact served from a sandbox in one response. */
 export const MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
@@ -114,6 +143,8 @@ export function toServiceTemplate(t: EnvironmentTemplateConfig | undefined): Wir
   if (setup.length > 0) out.setup_commands = setup
   if (t.network) out.network = t.network.access !== 'disabled'
   if (t.resources !== undefined) out.resources = { ...t.resources }
+  if (t.place) out.place = t.place
+  if (t.gpus !== undefined) out.gpus = t.gpus
   // Template files are base64 (`inline`); `file_id` files need the Files API and are not applied here.
   // `/workspace/...` (the SDK's workspace) lands in the sandbox's real workspace.
   const inWorkspace = (path: string) => (path === '/workspace' || path.startsWith('/workspace/') ? path.slice('/workspace/'.length) : path)
@@ -139,40 +170,85 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
   }
   const ownerOf = (record: EnvironmentRecord) => record.provider_metadata['owner'] ?? ''
 
+  /** True when `place` (or the default place) is a shared machine, whose sandboxes need distinct workspace paths. */
+  async function sharesMachine(place: string | undefined): Promise<boolean> {
+    try {
+      const backends = await quickApi('agentry').backends()
+      const chosen = place ? backends.find((b) => b.id === place) : (backends.find((b) => b.default) ?? backends[0])
+      return chosen?.kind === 'ssh-machine'
+    } catch {
+      // Cannot tell: the unique long path works everywhere.
+      return true
+    }
+  }
+
   return {
     kind: 'sandbox',
-    capabilities: { templateFields: ['image', 'packages', 'setup_commands', 'env', 'network', 'files', 'resources'], files: true, exec: true },
+    capabilities: { templateFields: ['image', 'packages', 'setup_commands', 'env', 'network', 'files', 'resources', 'gpus'], files: true, exec: true },
 
     api,
 
     async availability() {
       try {
-        const [backend] = await quickApi('agentry').backends()
-        if (!backend) return { available: false, reason: 'Agentry Sandbox has no backend' }
-        return backend.available ? { available: true, version: backend.version ?? 'unknown', ...(backend.default_image ? { default_image: backend.default_image } : {}) } : { available: false, reason: backend.reason ?? 'the sandbox backend is unavailable' }
+        const backends = await quickApi('agentry').backends()
+        const places: SandboxPlaceRow[] = backends.map((b) => ({
+          id: b.id,
+          name: b.name,
+          kind: b.kind,
+          default: b.default,
+          available: b.available,
+          ...(b.available ? {} : { reason: b.reason ?? 'the place is unavailable' }),
+          ...(b.gpus ? { gpus: b.gpus } : {}),
+          capabilities: { reset: b.capabilities.reset, keepFilesOnReset: b.capabilities.keepFilesOnReset, isolated: b.capabilities.isolated, gpu: b.capabilities.gpu },
+        }))
+        const main = backends.find((b) => b.default) ?? backends[0]
+        if (!main) return { available: false, reason: 'Agentry Sandbox has no place', places }
+        const up = backends.find((b) => b.available)
+        if (!up) return { available: false, reason: main.reason ?? 'the sandbox place is unavailable', places }
+        return { available: true, version: (main.available ? main : up).version ?? 'unknown', ...(main.default_image ? { default_image: main.default_image } : {}), places }
       } catch (e) {
-        if (e instanceof SandboxApiError && e.status === 401) return { available: false, reason: 'Agentry Sandbox refused the configured key' }
-        return { available: false, reason: (e as Error).message }
+        if (e instanceof SandboxApiError && e.status === 401) return { available: false, reason: 'Agentry Sandbox refused the configured key', places: [] }
+        return { available: false, reason: (e as Error).message, places: [] }
       }
     },
 
     async create(owner: OwnerId, environmentId: string, input: CreateEnvironmentInput) {
+      // The host placeholder is kept (cleaned up on delete); the disk itself mounts at /workspace so the model, the
+      // terminal and the tools all see one short path. A shared machine (ssh-machine) needs a unique mount path per sandbox.
       const dir = join(opts.workspacesRoot, directorySegment(owner, 'owner'), `sandbox-${environmentId}`)
       await mkdir(dir, { recursive: true })
       const template = toServiceTemplate(input.template)
       if (input.image) template.image = input.image
       try {
-        const s = await api(owner).create({ name: input.name ?? environmentId, template, workspace_path: dir })
-        return { status: statusOf(s.state), workspacePath: dir, handle: { sandbox_id: s.id, workspace_directory: dir, image: s.image, owner } }
+        const place = input.place ?? input.template?.place
+        const mount = (await sharesMachine(place)) ? dir : (opts.sharedWorkspace ?? '/workspace')
+        const s = await api(owner).create({ name: input.name ?? environmentId, template, workspace_path: mount, ...(place ? { place } : {}) })
+        return { status: statusOf(s.state), workspacePath: mount, handle: { sandbox_id: s.id, workspace_directory: mount, host_placeholder: dir, image: s.image, owner } }
       } catch (e) {
         return { status: 'failed' as const, workspacePath: dir, error: (e as Error).message }
       }
     },
 
+    async adopt(owner: OwnerId, environmentId: string, input: CreateEnvironmentInput, sinceSeconds: number) {
+      const name = input.name ?? environmentId
+      let found: WireSandbox | undefined
+      try {
+        found = (await quickApi(owner).list())
+          .filter((s) => s.name === name && s.created_at >= sinceSeconds - 5)
+          .sort((a, b) => b.created_at - a.created_at)[0]
+      } catch {
+        return undefined
+      }
+      if (found === undefined) return undefined
+      const dir = join(opts.workspacesRoot, directorySegment(owner, 'owner'), `sandbox-${environmentId}`)
+      return { status: statusOf(found.state), workspacePath: found.workspace_path, handle: { sandbox_id: found.id, workspace_directory: found.workspace_path, host_placeholder: dir, image: found.image, owner }, ...(found.error ? { error: found.error } : {}) }
+    },
+
     async describe(record) {
       try {
         const s = await quickApi(ownerOf(record)).get(meta(record).id)
-        return { state: s.state, image: s.image, started_at: s.started_at, last_used_at: s.last_used_at }
+        const progress = s.state === 'provisioning' ? (s as { progress?: SandboxProgress | null }).progress : undefined
+        return { state: s.state, image: s.image, place: s.place, ...(s.gpus ? { gpus: s.gpus } : {}), started_at: s.started_at, last_used_at: s.last_used_at, ...(progress ? { progress } : {}) }
       } catch (e) {
         return { state: e instanceof SandboxApiError && e.status === 404 ? 'gone' : 'unknown', ...(record.provider_metadata['image'] ? { image: record.provider_metadata['image'] } : {}) }
       }
@@ -192,7 +268,7 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
     async destroy(record) {
       // An environment whose sandbox was never created (its create failed) has only the host placeholder to remove.
       if (!record.provider_metadata['sandbox_id']) {
-        const dir = record.provider_metadata['workspace_directory']
+        const dir = record.provider_metadata['host_placeholder'] ?? record.provider_metadata['workspace_directory']
         if (dir) await rmdir(dir).catch(() => {})
         return
       }
@@ -202,7 +278,7 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
       } catch (e) {
         if (!(e instanceof SandboxApiError && e.status === 404)) throw e
       }
-      await rmdir(dir).catch(() => {})
+      await rmdir(record.provider_metadata['host_placeholder'] ?? dir).catch(() => {})
     },
 
     async listFiles(record) {
@@ -253,6 +329,22 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
       }
     },
 
+    async fileStat(record, path) {
+      const { id, dir } = meta(record)
+      const envd = api(ownerOf(record)).envd(id)
+      try {
+        const res = await envd.filesystem.stat({ path: inside(dir, path) }, { headers: envd.userHeaders(AGENT) })
+        const type = String(res.entry?.type)
+        if (type !== '1' && type !== 'FILE_TYPE_FILE') return undefined
+        const modified = res.entry?.modifiedTime
+        const mtimeMs = modified === undefined ? 0 : Number(modified.seconds) * 1000 + Math.trunc(modified.nanos / 1_000_000)
+        return { size: Number(res.entry?.size ?? 0), mtimeMs }
+      } catch (e) {
+        if ((e as { code?: unknown }).code === 5 || /not[_ ]found|no such file/i.test((e as Error).message)) return undefined
+        throw e
+      }
+    },
+
     async exists(record, path) {
       const { id, dir } = meta(record)
       const envd = api(ownerOf(record)).envd(id)
@@ -273,6 +365,47 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
 
     absolute(record, path) {
       return inside(meta(record).dir, path)
+    },
+
+    workspaceDir(record) {
+      return meta(record).dir
+    },
+
+    async exec(record, script, opts = {}) {
+      const { id } = meta(record)
+      const envd = api(ownerOf(record)).envd(id)
+      const timeout = AbortSignal.timeout(opts.timeoutMs ?? EXEC_TIMEOUT_MS)
+      const stop = new AbortController()
+      const signal = AbortSignal.any([timeout, stop.signal, ...(opts.signal ? [opts.signal] : [])])
+      const decoder = { out: new TextDecoder(), err: new TextDecoder() }
+      let stdout = ''
+      let stderr = ''
+      let code = -1
+      let truncated = false
+      const stream = envd.process.start(
+        { process: { cmd: '/bin/sh', args: ['-c', script], envs: {} }, stdin: false },
+        { headers: envd.userHeaders(AGENT), signal },
+      )
+      try {
+        for await (const res of stream) {
+          const ev = res.event?.event
+          if (ev?.case === 'data') {
+            const out = ev.value.output
+            if (out.case === 'stdout') stdout += decoder.out.decode(out.value, { stream: true })
+            else if (out.case === 'stderr') stderr += decoder.err.decode(out.value, { stream: true })
+            if (stdout.length > EXEC_OUTPUT_CAP || stderr.length > EXEC_OUTPUT_CAP) {
+              truncated = true
+              stop.abort()
+              break
+            }
+          } else if (ev?.case === 'end') {
+            code = ev.value.exitCode
+          }
+        }
+      } catch (e) {
+        if (!truncated) throw e
+      }
+      return { code, stdout: stdout.slice(0, EXEC_OUTPUT_CAP), stderr: stderr.slice(0, EXEC_OUTPUT_CAP), ...(truncated ? { truncated } : {}) }
     },
 
     async readFile(record, path) {

@@ -17,6 +17,7 @@ function row(id: string, status: SessionIndexRow['status'], withBody = true): Se
     ownerId: OWNER,
     agentId: null,
     environmentId: null,
+    projectId: null,
     dshSessionId: id,
     status,
     lastError: null,

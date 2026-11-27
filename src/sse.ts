@@ -25,7 +25,7 @@ export function writeEvent(
   res: ServerResponse,
   event: string,
   data: object | string,
-  id?: number,
+  id?: string | number,
 ): void {
   const payload = typeof data === 'string' ? data : JSON.stringify(data)
   const idLine = id === undefined ? '' : `id: ${String(id)}\n`

@@ -193,3 +193,46 @@ describe('POST /agents/files', () => {
     expect(await stagedKeys(h)).toHaveLength(2)
   })
 })
+
+describe('GET /agents/files', () => {
+  it('lists only the caller\'s files, newest first, in disjoint pages, filtered by status', async () => {
+    const h = await start()
+    const ids: string[] = []
+    for (const name of ['a.png', 'b.png', 'c.png']) {
+      ids.push((await h.upload('alice', name, PNG, 'image/png')).body['id'])
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    await h.upload('bob', 'other.png', PNG, 'image/png')
+    const first = await h.request('alice', 'GET', '/agents/files?limit=2')
+    expect(first.status).toBe(200)
+    expect(first.body).toMatchObject({ object: 'list', has_more: true, first_id: ids[2], last_id: ids[1] })
+    expect(first.body!.data.map((file: { id: string }) => file.id)).toEqual([ids[2], ids[1]])
+    expect(first.body!.data[0]).toMatchObject({ object: 'file', filename: 'c.png', status: 'staged' })
+    const second = await h.request('alice', 'GET', `/agents/files?limit=2&after=${ids[1]}`)
+    expect(second.body!.data.map((file: { id: string }) => file.id)).toEqual([ids[0]])
+    expect(second.body!.has_more).toBe(false)
+    expect((await h.request('alice', 'GET', '/agents/files?status=attached')).body!.data).toEqual([])
+    expect((await h.request('alice', 'GET', '/agents/files?status=nope')).status).toBe(400)
+    expect((await h.request('carol', 'GET', '/agents/files')).body).toMatchObject({ data: [], first_id: null, has_more: false })
+  })
+})
+
+describe('template files by file_id', () => {
+  it('copies an uploaded file into the new environment workspace and reports an unknown id as 400', async () => {
+    const h = await start()
+    const upload = await h.upload('alice', 'notes.txt', 'hello template', 'text/plain')
+    const template = await h.request('alice', 'POST', '/agents/environments/templates', { name: 'with file', files: [{ type: 'file_id', path: '/workspace/docs/notes.txt', file_id: upload.body['id'] }] })
+    expect(template.status).toBe(201)
+    const env = await h.request('alice', 'POST', '/agents/environments', { template_id: template.body!['id'] })
+    expect(env.status).toBe(201)
+    const created = await readdir(h.workspaces, { recursive: true })
+    const file = created.find(entry => entry.endsWith('notes.txt'))
+    expect(file).toBeDefined()
+    expect(await readFile(join(h.workspaces, file!), 'utf8')).toBe('hello template')
+    const again = await h.request('alice', 'POST', '/agents/environments', { template_id: template.body!['id'] })
+    expect(again.status).toBe(201)
+    const other = await h.request('bob', 'POST', '/agents/environments/templates', { name: 'stolen', files: [{ type: 'file_id', path: '/workspace/x', file_id: upload.body['id'] }] })
+    const denied = await h.request('bob', 'POST', '/agents/environments', { template_id: other.body!['id'] })
+    expect(denied.status).toBe(400)
+  })
+})

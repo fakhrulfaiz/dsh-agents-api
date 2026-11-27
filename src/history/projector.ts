@@ -27,11 +27,64 @@ import type {
   SessionStatus,
 } from '../types.ts'
 
-/** One SSE frame: the wire event and its per-session sequence number. */
+/**
+ * One SSE frame: the wire event and its position in the session's sequence.
+ *
+ * Frames of the original event types (session status, turns, assistant
+ * messages, slash commands) are numbered 1, 2, 3, ... Item frames added later
+ * (user messages, reasoning, tool calls and outputs) are numbered after the
+ * frame before them (`12.1`, `12.2`, ...), so adding them never moved the id of
+ * an existing frame and a `Last-Event-ID` saved before they existed still
+ * resumes at the same place.
+ */
 export interface ReplayFrame {
-  /** 1-based position in the session's wire event sequence; the SSE `id:`. */
+  /** 1-based position among the original frames; the SSE `id:` when `sub` is absent. */
   id: number
+  /** Position among the item frames that follow frame `id`; the SSE `id:` is then `<id>.<sub>`. */
+  sub?: number
   event: OAISessionEvent
+}
+
+/** Where a frame sits in a session's sequence; `sub` is 0 for an original frame. */
+export interface FramePosition {
+  id: number
+  sub: number
+}
+
+/**
+ * @param frame - a frame.
+ * @returns its SSE `id:` text, `<id>` or `<id>.<sub>`.
+ */
+export function frameSseId(frame: Pick<ReplayFrame, 'id' | 'sub'>): string {
+  return frame.sub === undefined ? String(frame.id) : `${String(frame.id)}.${String(frame.sub)}`
+}
+
+/**
+ * Read a `Last-Event-ID`.
+ * @param raw - header value, `<id>` or `<id>.<sub>`.
+ * @returns the position, or `undefined` when it is not one.
+ */
+export function parseFrameId(raw: string): FramePosition | undefined {
+  const match = /^(\d+)(?:\.(\d+))?$/.exec(raw.trim())
+  if (match === null) return undefined
+  return { id: Number(match[1]), sub: match[2] === undefined ? 0 : Number(match[2]) }
+}
+
+/**
+ * @param a - first position.
+ * @param b - second position.
+ * @returns negative, zero, or positive as `a` is before, at, or after `b`.
+ */
+export function compareFramePositions(a: FramePosition, b: FramePosition): number {
+  return a.id - b.id || a.sub - b.sub
+}
+
+/**
+ * @param frame - a frame.
+ * @returns its position.
+ */
+export function framePosition(frame: Pick<ReplayFrame, 'id' | 'sub'>): FramePosition {
+  return { id: frame.id, sub: frame.sub ?? 0 }
 }
 
 /** One saved item, with the child id when it belongs to a subagent. */
@@ -46,6 +99,8 @@ export interface ProjectionBase {
   environment: OAIEnvironmentConfig
   metadata: Record<string, string>
   vaultIds: string[]
+  /** Project this chat belongs to; absent on older projections means unfiled. */
+  projectId?: string | null
 }
 
 /** Session status after an event, and the error text that goes with it. */
@@ -96,6 +151,8 @@ export class WireProjector {
   #interaction: OAIRequiredAction[] = []
   readonly #frames: ReplayFrame[] | undefined
   #nextId = 1
+  /** Item frames already numbered after frame `#nextId - 1`. */
+  #nextSub = 1
   /** `command/run` records whose `command/done` has not arrived, by command id. */
   readonly #commandRuns = new Map<string, CommandRun>()
 
@@ -132,6 +189,7 @@ export class WireProjector {
       error: this.error,
       metadata: this.base.metadata,
       vault_ids: this.base.vaultIds,
+      project_id: this.base.projectId ?? null,
       agent: redactAgentSecrets(this.base.agent),
       environment: this.base.environment,
       required_actions: [...this.#required, ...this.#interaction],
@@ -149,10 +207,12 @@ export class WireProjector {
   setInteractionActions(actions: readonly OAIRequiredAction[]): StatusChange | undefined {
     this.#interaction = [...actions]
     const before = this.status
+    // A subagent can ask while this session has no open turn (children outlive the parent's turn).
+    const fromChild = this.#interaction.some(action => action.type === 'approval' && action.subagent_id !== undefined)
     if (this.#required.length + this.#interaction.length > 0) {
-      if (this.currentTurnId !== undefined) this.status = 'requires_action'
-    } else if (this.status === 'requires_action' && this.currentTurnId !== undefined) {
-      this.status = 'in_progress'
+      if (this.currentTurnId !== undefined || (fromChild && this.status === 'idle')) this.status = 'requires_action'
+    } else if (this.status === 'requires_action') {
+      this.status = this.currentTurnId !== undefined ? 'in_progress' : 'idle'
     }
     return this.status === before ? undefined : { status: this.status, error: this.error }
   }
@@ -196,12 +256,13 @@ export class WireProjector {
     if (this.#timer.note(event)) return { frames }
 
     const turnId = this.currentTurnId ?? NO_TURN_ID
-    const projected = itemsFromEvent(event, turnId, this.#timer.context(event))
+    const projected = itemsFromEvent(event, turnId, { ...this.#timer.context(event), sessionId: this.base.sessionId })
     this.#timer.settle(event, projected)
     const known = projected.length > 0 || event.type === 'turn/end' || event.type === 'assistant/message'
     if (!known) return { frames }
     this.items.push(...projected)
     this.lastActiveAt = at
+    this.#itemFrames(event, projected, turnId, frames)
 
     if (event.type === 'assistant/message') {
       this.#assistantFrames(event, turnId, frames)
@@ -239,13 +300,39 @@ export class WireProjector {
     return { frames }
   }
 
-  /** Number `wire`, record it, and append it to `frames`. */
-  #emit(frames: ReplayFrame[], wire: WireEventBody): ReplayFrame {
-    const frame: ReplayFrame = {
-      id: this.#nextId,
-      event: { ...wire, event_id: eventId(this.base.sessionId, this.#nextId) } as OAISessionEvent,
+  /**
+   * Item frames for the items an event saved, other than the assistant
+   * message (its own frames follow): a user message, reasoning, or a tool
+   * output is `turn.item.done`; a tool call, which waits for its output, is
+   * `turn.item.added`. Each frame carries a copy, so later timing updates to
+   * the saved item never change a frame already produced.
+   */
+  #itemFrames(event: SessionEvent, projected: readonly OAISessionItem[], turnId: string, frames: ReplayFrame[]): void {
+    for (const item of projected) {
+      if (event.type === 'assistant/message' && item.type === 'message') continue
+      const type = item.type === 'function_call' || item.type === 'command_execution'
+        ? 'agent.session.turn.item.added'
+        : 'agent.session.turn.item.done'
+      this.#emit(frames, { type, session_id: this.base.sessionId, turn_id: item.turn_id ?? turnId, item: { ...item } }, true)
     }
-    this.#nextId += 1
+  }
+
+  /**
+   * Number `wire`, record it, and append it to `frames`.
+   * @param item - an item frame, numbered after the frame before it (`<id>.<sub>`).
+   */
+  #emit(frames: ReplayFrame[], wire: WireEventBody, item = false): ReplayFrame {
+    let frame: ReplayFrame
+    if (item) {
+      const id = this.#nextId - 1
+      const sub = this.#nextSub
+      frame = { id, sub, event: { ...wire, event_id: eventId(this.base.sessionId, `${String(id)}.${String(sub)}`) } as OAISessionEvent }
+      this.#nextSub += 1
+    } else {
+      frame = { id: this.#nextId, event: { ...wire, event_id: eventId(this.base.sessionId, String(this.#nextId)) } as OAISessionEvent }
+      this.#nextId += 1
+      this.#nextSub = 1
+    }
     this.#frames?.push(frame)
     frames.push(frame)
     return frame
@@ -405,11 +492,11 @@ export class WireProjector {
 /**
  * Deterministic wire event id.
  * @param sessionId - session id.
- * @param frameId - the frame's sequence number.
- * @returns `evt_<session>_<n>`.
+ * @param frameId - the frame's SSE id, `<n>` or `<n>.<sub>`.
+ * @returns `evt_<session>_<frameId>`.
  */
-function eventId(sessionId: string, frameId: number): string {
-  return `evt_${sessionId}_${String(frameId)}`
+function eventId(sessionId: string, frameId: string): string {
+  return `evt_${sessionId}_${frameId}`
 }
 
 /**

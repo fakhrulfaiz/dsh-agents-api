@@ -123,6 +123,7 @@ describe('OpenAPI responses', () => {
     const env = await call('POST', '/v1/agents/environments', {}, {}, 201)
     await call('GET', '/v1/agents/environments', {}, undefined, 200)
     await call('GET', '/v1/agents/environments/{environment_id}', { environment_id: env.id }, undefined, 200)
+    await call('POST', '/v1/agents/environments/{environment_id}', { environment_id: env.id }, { name: 'Renamed' }, 200)
     // The earlier write body and the SDK's inline body both work and answer `agent.environment.file`.
     await call('POST', '/v1/agents/environments/{environment_id}/files', { environment_id: env.id }, { path: 'a/b.txt', content: 'hi' }, 201)
     await call('POST', '/v1/agents/environments/{environment_id}/files', { environment_id: env.id }, { type: 'inline', path: '/workspace/c.txt', data: Buffer.from('hey').toString('base64') }, 201)
@@ -330,7 +331,7 @@ describe('OpenAPI schema fixtures', () => {
   const agent = { id: 'agent_1', object: 'agent', created_at: 1, updated_at: 1, name: null, instructions: null, model: 'm', metadata: {}, tools: [] }
   const session = (required_actions: unknown[]) => ({
     id: 'sess_1', object: 'agent.session', created_at: 1, last_active_at: 1, status: 'requires_action', error: null,
-    metadata: {}, vault_ids: [], agent, environment: { type: 'none' }, required_actions, usage: null,
+    metadata: {}, vault_ids: [], project_id: null, agent, environment: { type: 'none' }, required_actions, usage: null,
   })
 
   it('accepts every required action variant', () => {

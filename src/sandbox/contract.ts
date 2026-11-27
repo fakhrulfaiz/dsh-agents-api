@@ -18,6 +18,7 @@ export type TemplateField =
   | 'setup_commands'
   | 'image'
   | 'resources'
+  | 'gpus'
 
 /** What a provider supports; clients read this from `GET /agents/environments/providers`. */
 export interface SandboxCapabilities {
