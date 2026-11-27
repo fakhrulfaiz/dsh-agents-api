@@ -2,7 +2,7 @@
 import { PassThrough } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BrowserLiveHub, parseRelayLine, type LiveEvent, type RelayProcess } from '../src/sandbox/browser-live.ts'
-import { POINTER_LISTENER_SOURCE, RELAY_POINTER_SOURCE } from '../src/sandbox/browser-live-relay.ts'
+import { BROWSER_LIVE_RELAY_SCRIPT, POINTER_LISTENER_SOURCE, RELAY_POINTER_SOURCE } from '../src/sandbox/browser-live-relay.ts'
 
 type Handler = (e: Record<string, unknown>) => void
 
@@ -122,5 +122,25 @@ describe('parseRelayLine and hub fan-out', () => {
     hub.attach(key, () => relay, e => b.push(e))
     expect(b).toEqual([])
     hub.stop()
+  })
+})
+
+describe('relay attach', () => {
+  // Checked against real Chromium 2026-11-27: without both domains enabled, a navigation drops the
+  // binding (Runtime) or the new-document script (Page), and the cursor stops after the first page.
+  it('enables Page and Runtime before installing the binding and the new-document listener', () => {
+    const at = (needle: string) => {
+      const i = BROWSER_LIVE_RELAY_SCRIPT.indexOf(needle)
+      expect(i, needle).toBeGreaterThan(-1)
+      return i
+    }
+    const attach = at("send('Target.attachToTarget'")
+    const page = at("send('Page.enable'")
+    const runtime = at("send('Runtime.enable'")
+    const binding = at("send('Runtime.addBinding'")
+    const script = at("send('Page.addScriptToEvaluateOnNewDocument'")
+    expect(attach).toBeLessThan(page)
+    expect(attach).toBeLessThan(runtime)
+    expect(Math.max(page, runtime)).toBeLessThan(Math.min(binding, script))
   })
 })

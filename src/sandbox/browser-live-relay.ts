@@ -205,6 +205,10 @@ async function watch() {
       const { sessionId } = await send('Target.attachToTarget', { targetId: want.targetId, flatten: true })
       active = { targetId: want.targetId, sessionId }
       lastData = ''
+      // Without Page and Runtime enabled on this session, Chromium drops the binding and the new-document
+      // script on the next navigation, so the cursor would only work on the page shown at attach.
+      await send('Page.enable', {}, sessionId).catch(() => {})
+      await send('Runtime.enable', {}, sessionId).catch(() => {})
       await send('Runtime.addBinding', { name: '__agentryPointer' }, sessionId).catch(() => {})
       await send('Page.addScriptToEvaluateOnNewDocument', { source: pointerSource }, sessionId).catch(() => {})
       await send('Runtime.evaluate', { expression: pointerSource }, sessionId).catch(() => {})
