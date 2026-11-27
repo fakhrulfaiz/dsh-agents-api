@@ -13,7 +13,7 @@ export const BROWSER_RECORDING_STOP = 'browser_recording_stop'
 
 /** Guidance added to the browser section while the recording tools are present. */
 export const BROWSER_RECORDING_GUIDANCE = [
-  '- Recording (`browser_recording_start`, `browser_recording_stop`): record only when the user asks for a video or a recording. Open the page first, start before the steps, stop when done, and mention the file path (recordings/<name>.webm) in your answer. A recording stops by itself at the end of your turn, after 15 minutes or at 200 MB.',
+  '- Recording (`browser_recording_start`, `browser_recording_stop`): record only when the user asks for a video or a recording. Open the page first, start before the steps, stop when done, and mention the file path (recordings/<name>.webm) in your answer. A recording stops by itself at the end of your turn, after 15 minutes or at 100 MB.',
 ].join('\n')
 
 function tool(name: string, description: string, parameters: Record<string, unknown>, run: (args: Record<string, unknown>) => Promise<unknown>): ToolDefinition {

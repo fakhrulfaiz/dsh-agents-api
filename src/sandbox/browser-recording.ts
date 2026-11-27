@@ -40,7 +40,7 @@ export interface RecordingTarget extends LiveKey {
 export interface BrowserRecorderOptions {
   /** Longest recording (default 15 minutes). */
   maxMs?: number
-  /** Largest recording file (default 200 MB). */
+  /** Largest recording file (default 100 MB, the largest file the API serves). */
   maxBytes?: number
   /** How long to wait for the browser's first frame (default 8 s). */
   firstFrameMs?: number
@@ -98,7 +98,7 @@ export class BrowserRecorder {
 
   constructor(private readonly hub: BrowserLiveHub, options: BrowserRecorderOptions = {}) {
     this.maxMs = options.maxMs ?? 15 * 60_000
-    this.maxBytes = options.maxBytes ?? 200 * 1024 * 1024
+    this.maxBytes = options.maxBytes ?? 100 * 1024 * 1024
     this.firstFrameMs = options.firstFrameMs ?? 8_000
     this.startReplyMs = options.startReplyMs ?? 10_000
     this.stopReplyMs = options.stopReplyMs ?? 30_000

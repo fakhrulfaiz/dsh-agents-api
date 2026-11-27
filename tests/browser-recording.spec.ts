@@ -33,7 +33,7 @@ describe('recordCommand (relay)', () => {
   })
 
   it('falls back to the default limits and ignores other lines', () => {
-    expect(cmd({ on: true, path: `${dir}/a.webm`, cursorPath: `${dir}/a.cursor.jsonl`, maxMs: -1, maxBytes: 'x' })).toMatchObject({ maxMs: 900000, maxBytes: 209715200 })
+    expect(cmd({ on: true, path: `${dir}/a.webm`, cursorPath: `${dir}/a.cursor.jsonl`, maxMs: -1, maxBytes: 'x' })).toMatchObject({ maxMs: 900000, maxBytes: 104857600 })
     expect(relayRecord.recordCommand('{"type":"input","commands":[]}', dir)).toBeUndefined()
     expect(relayRecord.recordCommand('nope', dir)).toBeUndefined()
   })
@@ -82,7 +82,7 @@ function fakeRelayDeps() {
   }
 }
 
-const START = (stem = 'demo', extra: Record<string, unknown> = {}) => ({ on: true, dir: '/w/recordings', stem, maxMs: 900000, maxBytes: 209715200, ...extra })
+const START = (stem = 'demo', extra: Record<string, unknown> = {}) => ({ on: true, dir: '/w/recordings', stem, maxMs: 900000, maxBytes: 104857600, ...extra })
 const JPEG = Buffer.from('frame').toString('base64')
 
 describe('createRecorder (relay)', () => {
@@ -251,7 +251,7 @@ describe('BrowserRecorder', () => {
     const { recorder, relays, target, hub } = recorderSetup()
     const started = await recorder.start(target)
     expect(started).toEqual({ path: 'recordings/recording-20261127-090807.webm', cursor_path: 'recordings/recording-20261127-090807.cursor.jsonl' })
-    expect(relays[0]!.commands[0]).toEqual({ type: 'record', on: true, path: '/workspace/recordings/recording-20261127-090807.webm', cursorPath: '/workspace/recordings/recording-20261127-090807.cursor.jsonl', maxMs: 900000, maxBytes: 209715200 })
+    expect(relays[0]!.commands[0]).toEqual({ type: 'record', on: true, path: '/workspace/recordings/recording-20261127-090807.webm', cursorPath: '/workspace/recordings/recording-20261127-090807.cursor.jsonl', maxMs: 900000, maxBytes: 104857600 })
     expect(recorder.recording('s')).toBe(true)
     const result = await recorder.stop('s')
     expect(result).toEqual({ path: 'recordings/recording-20261127-090807.webm', cursor_path: 'recordings/recording-20261127-090807.cursor.jsonl', duration_seconds: 4.2, size_bytes: 1234, reason: 'stopped' })
@@ -324,7 +324,7 @@ describe('recording tools', () => {
   it('answer with paths and limits, and refusals as error codes', async () => {
     const t = tools()
     expect(JSON.parse(await t.stop.execute({}))).toMatchObject({ error: 'not_recording' })
-    expect(JSON.parse(await t.start.execute({ name: 'demo' }))).toEqual({ recording: true, path: 'recordings/demo.webm', cursor_path: 'recordings/demo.cursor.jsonl', max_minutes: 15, max_megabytes: 200 })
+    expect(JSON.parse(await t.start.execute({ name: 'demo' }))).toEqual({ recording: true, path: 'recordings/demo.webm', cursor_path: 'recordings/demo.cursor.jsonl', max_minutes: 15, max_megabytes: 100 })
     expect(JSON.parse(await t.start.execute({}))).toMatchObject({ error: 'already_recording' })
     expect(JSON.parse(await t.stop.execute({}))).toMatchObject({ path: expect.stringMatching(/^recordings\//), duration_seconds: 4.2, size_bytes: 1234 })
     t.hub.stop()

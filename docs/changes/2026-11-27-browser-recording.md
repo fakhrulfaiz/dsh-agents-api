@@ -26,7 +26,7 @@ The browser guidance section gains one line while the tools are present: record 
 
 ## Auto-stop
 
-- **Limits**: the relay stops by itself after `maxMs` (15 minutes) or once the file reaches `maxBytes` (200 MB, checked once a second), when ffmpeg exits, and before the relay exits (stdin closed or SIGTERM).
+- **Limits**: the relay stops by itself after `maxMs` (15 minutes) or once the file reaches `maxBytes` (100 MB, the API's largest served file, checked once a second), when ffmpeg exits, and before the relay exits (stdin closed or SIGTERM).
 - **Turn end**: `AgentsGateway.applySessionEvent` sees the root session's `turn/end` (the same event that ends the sandbox changed-files turn) and calls `BrowserRecorder.turnEnded(sessionId)`, which sends the stop. The turn's end snapshot in `SandboxChanges` waits for that stop (`hold`), so the finished file lands in this turn's changed files.
 - A recording that stopped without `browser_recording_stop` is logged (`agents-api: browser recording ... stopped ...`) and reported in the next recording tool result: `browser_recording_stop` answers with it (plus a `note`), and `browser_recording_start` adds it as `earlier_recording`.
 - Deleting the session stops its recording (the file stays). If the relay itself dies, the hub reports `relay_ended` and the recording ends with whatever ffmpeg wrote.

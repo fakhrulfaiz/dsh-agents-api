@@ -96,7 +96,7 @@ function recordCommand(line, dir) {
   const stem = file.slice(0, -5)
   if (msg.cursorPath !== base + '/' + stem + '.cursor.jsonl') return invalid
   const lim = (v, d, max) => (Number.isInteger(v) && v > 0 && v <= max ? v : d)
-  return { on: true, dir: base, stem, maxMs: lim(msg.maxMs, 900000, 3600000), maxBytes: lim(msg.maxBytes, 209715200, 1073741824) }
+  return { on: true, dir: base, stem, maxMs: lim(msg.maxMs, 900000, 3600000), maxBytes: lim(msg.maxBytes, 104857600, 104857600) }
 }
 
 function createRecorder(d) {
