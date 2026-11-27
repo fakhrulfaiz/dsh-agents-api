@@ -141,8 +141,22 @@ export class BrowserPortAllocator {
 /** The process-wide allocator used by the mounted tool and the live view. */
 export const browserPorts = new BrowserPortAllocator()
 
-/** Writes the Playwright MCP config (launch arguments) to a file, then starts playwright-mcp with it. */
-const START_WITH_CONFIG = 'printf "%s" "$AGENTRY_MCP_CONFIG" > "$AGENTRY_MCP_CONFIG_PATH" && exec playwright-mcp --config "$AGENTRY_MCP_CONFIG_PATH" "$@"'
+/**
+ * Stops what an earlier start for the same port left behind, then writes the Playwright MCP config (launch
+ * arguments) to a file and starts playwright-mcp with it. An API restart leaves the old playwright-mcp and its
+ * Chromium running in the sandbox; that Chromium keeps the DevTools port, the new one runs without it, and the
+ * live view would show the old browser. The patterns hold the values, and this script's own command line only
+ * the variable names, so it never matches itself.
+ */
+export const START_WITH_CONFIG = [
+  'if command -v pkill >/dev/null 2>&1; then',
+  '  old="playwright-mcp --config $AGENTRY_MCP_CONFIG_PATH"; cdp="remote-debugging-port=$AGENTRY_MCP_PORT"',
+  '  pkill -TERM -f "$old" 2>/dev/null; pkill -TERM -f "$cdp" 2>/dev/null',
+  '  i=0; while { pgrep -f "$old" || pgrep -f "$cdp"; } >/dev/null 2>&1 && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done',
+  '  pkill -KILL -f "$old" 2>/dev/null; pkill -KILL -f "$cdp" 2>/dev/null',
+  'fi',
+  'printf "%s" "$AGENTRY_MCP_CONFIG" > "$AGENTRY_MCP_CONFIG_PATH" && exec playwright-mcp --config "$AGENTRY_MCP_CONFIG_PATH" "$@"',
+].join('\n')
 
 /**
  * The in-memory MCP tool that starts the browser inside `sandbox`.
@@ -174,6 +188,7 @@ export function browserMcpTool(sandbox: BrowserSandbox, credentials: { url: stri
         [BRIDGE_ENV.programEnv]: JSON.stringify({
           PLAYWRIGHT_BROWSERS_PATH: SANDBOX_BROWSERS_PATH,
           AGENTRY_MCP_CONFIG_PATH: `/tmp/agentry-browser-${String(port)}.json`,
+          AGENTRY_MCP_PORT: String(port),
           AGENTRY_MCP_CONFIG: JSON.stringify(mcpConfig),
         }),
       },

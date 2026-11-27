@@ -1,3 +1,7 @@
+import { spawn, spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import {
@@ -13,6 +17,7 @@ import {
   normalizeBrowserDefault,
   browserMcpTool,
   mountBrowserGuidance,
+  START_WITH_CONFIG,
   validateBrowserField,
 } from '../src/mount-browser.ts'
 import { bridgeConfigFromEnv } from '../src/sandbox/remote/stdio-bridge.ts'
@@ -40,6 +45,7 @@ describe('browserMcpTool', () => {
       env: {
         PLAYWRIGHT_BROWSERS_PATH: '/opt/ms-playwright',
         AGENTRY_MCP_CONFIG_PATH: `/tmp/agentry-browser-${String(port)}.json`,
+        AGENTRY_MCP_PORT: String(port),
         AGENTRY_MCP_CONFIG: JSON.stringify({ browser: { launchOptions: { args: [`--remote-debugging-port=${String(port)}`] } } }),
       },
     })
@@ -163,5 +169,41 @@ describe('BrowserPortAllocator', () => {
     const tool = browserMcpTool({ ...sandbox, sandboxId: 'sbx_alloc', sessionId: 'sess_alloc' }, credentials, '/b.js')
     expect(JSON.stringify(tool)).toContain(String(browserPorts.portOf('sbx_alloc', 'sess_alloc')))
     browserPorts.releaseSandbox('sbx_alloc')
+  })
+})
+
+describe('START_WITH_CONFIG', () => {
+  const hasPkill = spawnSync('sh', ['-c', 'command -v pkill && command -v pgrep']).status === 0
+  const alive = (pid: number | undefined) => { try { process.kill(pid ?? -1, 0); return true } catch { return false } }
+  const until = async (check: () => boolean, ms = 8000) => {
+    for (const end = Date.now() + ms; Date.now() < end;) { if (check()) return true; await new Promise((r) => setTimeout(r, 50)) }
+    return check()
+  }
+
+  // An API restart leaves the old playwright-mcp and its Chromium holding the DevTools port (seen live 2026-11-27).
+  it.skipIf(!hasPkill)('stops the browser an earlier start left on the same port, and nothing else', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agentry-start-'))
+    const forever = '#!/bin/sh\nwhile :; do sleep 1; done\n'
+    writeFileSync(join(dir, 'playwright-mcp'), forever)
+    chmodSync(join(dir, 'playwright-mcp'), 0o755)
+    const port = String(39_000 + Math.floor(Math.random() * 900))
+    const config = join(dir, `agentry-browser-${port}.json`)
+    const loop = ['-c', 'while :; do sleep 1; done', 'x']
+    const oldMcp = spawn(join(dir, 'playwright-mcp'), ['--config', config], { stdio: 'ignore' })
+    const oldChrome = spawn('sh', [...loop, `--remote-debugging-port=${port}`], { stdio: 'ignore' })
+    const neighbor = spawn('sh', [...loop, `--remote-debugging-port=${String(Number(port) + 1)}`], { stdio: 'ignore' })
+    const started = spawn('/bin/sh', ['-c', START_WITH_CONFIG, 'sh', '--headless'], {
+      stdio: 'ignore',
+      env: { PATH: `${dir}:${process.env['PATH'] ?? ''}`, AGENTRY_MCP_CONFIG_PATH: config, AGENTRY_MCP_PORT: port, AGENTRY_MCP_CONFIG: '{"ok":true}' },
+    })
+    try {
+      expect(await until(() => !alive(oldMcp.pid) && !alive(oldChrome.pid))).toBe(true)
+      expect(await until(() => existsSync(config) && readFileSync(config, 'utf8') === '{"ok":true}')).toBe(true)
+      expect(alive(started.pid)).toBe(true)
+      expect(alive(neighbor.pid)).toBe(true)
+    } finally {
+      for (const child of [oldMcp, oldChrome, neighbor, started]) child.kill('SIGKILL')
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
