@@ -109,7 +109,7 @@ describe('browser live route', () => {
       { event: 'idle', data: { reason: 'not_started' } },
       { event: 'frame', data: { data: '/9j/AA==', url: 'https://example.com/', title: 'Example', width: 1280, height: 720, timestamp: 5 } },
     ])
-    expect(startBrowserRelay).toHaveBeenCalledWith(envd, browserCdpPort('sess_on'), 100)
+    expect(startBrowserRelay).toHaveBeenCalledWith(envd, browserCdpPort('sess_on'), 100, '/workspace/recordings')
   })
 
   it('sends the agent\'s pointer and focus as events', async () => {

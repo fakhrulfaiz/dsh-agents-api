@@ -18,6 +18,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { BROWSER_SANDBOX_IMAGE } from './environment/browser-image.ts'
 import { BRIDGE_ENV } from './sandbox/remote/stdio-bridge.ts'
+import { BROWSER_RECORDING_GUIDANCE, BROWSER_RECORDING_START } from './mount-browser-recording.ts'
 import type { OAIAgent, OAIMcpTool } from './types.ts'
 
 /** MCP server label; tools are `mcp__browser__browser_navigate` and so on. */
@@ -73,6 +74,8 @@ export interface BrowserSandbox {
   sessionId: string
   /** The environment's provider name (to reach the sandbox for the auto-mode check). */
   provider?: string
+  /** The environment record's id (the live view and recordings are keyed by it). */
+  environmentId?: string
 }
 
 /**
@@ -229,13 +232,13 @@ export function mountBrowserGuidance(agentCtx: Context, mode: 'sandbox' | 'local
   agentCtx.systemPrompt.section({
     name: AGENTRY_BROWSER_SECTION,
     order: agentCtx.systemPrompt.getSectionOrder('TOOL_SCHEDULE') + 2,
-    text: ({ scope }) => browserGuidanceText(mode, agentCtx.tools.get(BROWSER_PROBE_TOOL, scope) !== undefined),
+    text: ({ scope }) => browserGuidanceText(mode, agentCtx.tools.get(BROWSER_PROBE_TOOL, scope) !== undefined, agentCtx.tools.get(BROWSER_RECORDING_START, scope) !== undefined),
   })
 }
 
-/** The section text for a chat `mode` and whether the browser tools are present. */
-export function browserGuidanceText(mode: 'sandbox' | 'local' | 'absent', hasTools: boolean): string {
-  if (hasTools) return BROWSER_GUIDANCE
+/** The section text for a chat `mode` and whether the browser tools (and the recording tools) are present. */
+export function browserGuidanceText(mode: 'sandbox' | 'local' | 'absent', hasTools: boolean, hasRecording = false): string {
+  if (hasTools) return hasRecording ? `${BROWSER_GUIDANCE}\n${BROWSER_RECORDING_GUIDANCE}` : BROWSER_GUIDANCE
   if (mode === 'absent') return BROWSER_ABSENT_NOTICE
   return mode === 'local' ? BROWSER_LOCAL_NOTICE : BROWSER_MISSING_NOTICE
 }
