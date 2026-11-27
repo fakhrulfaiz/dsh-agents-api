@@ -738,7 +738,7 @@ describe('AgentsGateway', () => {
 
     const now = new Date()
     await store.sessions.insert({
-      id: 'sess_orphan', ownerId: TEST_OWNER, agentId: saved.id, environmentId: null, dshSessionId: 'sess_orphan',
+      id: 'sess_orphan', ownerId: TEST_OWNER, agentId: saved.id, environmentId: null, projectId: null, dshSessionId: 'sess_orphan',
       status: 'idle', lastError: null, model: 'deepseek-chat', reasoningEffort: null, body: null, createdAt: now, updatedAt: now,
     })
     expect((await fetch(`${root}/v1/agents/sessions/sess_orphan`, { method: 'DELETE' })).status).toBe(200)

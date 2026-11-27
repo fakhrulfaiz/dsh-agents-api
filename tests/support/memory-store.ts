@@ -16,12 +16,13 @@ import {
   decodeSessionCursor,
   encodeSessionCursor,
   type OwnedCollection,
+  type ProjectCollection,
   type SessionIndexPatch,
   type SessionIndexRow,
   type SessionListQuery,
   type Store,
 } from '../../src/store/store.ts'
-import type { OAIAgent, OAIListResponse } from '../../src/types.ts'
+import type { OAIAgent, OAIListResponse, OAIProject, ProjectListQuery } from '../../src/types.ts'
 
 interface Entry<T> {
   owner: OwnerId
@@ -58,6 +59,63 @@ export class MemoryStore implements Store {
   readonly agents: OwnedCollection<OAIAgent> = this.#collection<OAIAgent>()
   readonly templates: OwnedCollection<EnvironmentTemplate> = this.#collection<EnvironmentTemplate>()
   readonly environments: OwnedCollection<EnvironmentRecord> = this.#collection<EnvironmentRecord>()
+
+  readonly #projects = new Map<string, Entry<OAIProject>>()
+
+  readonly projects: ProjectCollection = {
+    create: async (owner, value) => {
+      this.#check()
+      this.#requireOwner(owner)
+      if (this.#projects.has(value.id)) throw new Error(`duplicate project ${value.id}`)
+      this.#projects.set(value.id, { owner, value: structuredClone(value), seq: this.#seq++ })
+      return structuredClone(value)
+    },
+    get: async (owner, id) => {
+      this.#check()
+      const entry = this.#projects.get(id)
+      return entry !== undefined && entry.owner === owner ? structuredClone(entry.value) : undefined
+    },
+    update: async (owner, id, value) => {
+      this.#check()
+      const entry = this.#projects.get(id)
+      if (entry === undefined || entry.owner !== owner) return undefined
+      entry.value = structuredClone(value)
+      return structuredClone(value)
+    },
+    delete: async (owner, id) => {
+      this.#check()
+      const entry = this.#projects.get(id)
+      if (entry === undefined || entry.owner !== owner) return false
+      return this.#projects.delete(id)
+    },
+    list: async (q: ProjectListQuery) => {
+      this.#check()
+      const limit = q.limit ?? 20
+      const status = q.status ?? 'active'
+      let rows = [...this.#projects.values()]
+        .filter(entry => entry.owner === q.owner && (status === 'all' || entry.value.status === status))
+        .sort(byInsertion)
+      if (q.order !== 'asc') rows.reverse()
+      if (q.after !== undefined) {
+        const cursor = rows.findIndex(entry => entry.value.id === q.after)
+        if (cursor !== -1) rows = rows.slice(cursor + 1)
+      }
+      const data = rows.slice(0, limit).map(entry => structuredClone(entry.value))
+      return {
+        object: 'list' as const,
+        data,
+        first_id: data[0]?.id ?? null,
+        last_id: data.at(-1)?.id ?? null,
+        has_more: rows.length > limit,
+      }
+    },
+    countSessions: async (owner, id) => {
+      this.#check()
+      const entry = this.#projects.get(id)
+      if (entry === undefined || entry.owner !== owner) return 0
+      return [...this.#sessions.values()].filter(row => row.ownerId === owner && row.projectId === id).length
+    },
+  }
 
   readonly #skills = new Map<string, SkillRow>()
 
@@ -216,7 +274,7 @@ export class MemoryStore implements Store {
       const row = this.#session(id, owner)
       if (row === undefined) return undefined
       const next: SessionIndexRow = cloneRow(row)
-      for (const key of ['agentId', 'environmentId', 'dshSessionId', 'status', 'lastError', 'model', 'reasoningEffort', 'body'] as const) {
+      for (const key of ['agentId', 'environmentId', 'projectId', 'dshSessionId', 'status', 'lastError', 'model', 'reasoningEffort', 'body'] as const) {
         if (patch[key] !== undefined) (next as unknown as Record<string, unknown>)[key] = patch[key]
       }
       next.updatedAt = patch.updatedAt ?? new Date()
@@ -252,6 +310,7 @@ export class MemoryStore implements Store {
       const rows = [...this.#sessions.values()]
         .filter(row => q.owner === 'any' || row.ownerId === q.owner)
         .filter(row => q.agentId === undefined || row.agentId === q.agentId)
+        .filter(row => q.projectId === undefined || row.projectId === q.projectId)
         .filter(row => q.status === undefined || row.status === q.status)
         .filter(row => q.from === undefined || row.createdAt.getTime() >= q.from.getTime())
         .filter(row => q.to === undefined || row.createdAt.getTime() < q.to.getTime())

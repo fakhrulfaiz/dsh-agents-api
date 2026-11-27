@@ -12,6 +12,7 @@ import type {
   OAISandboxEnvironment,
   OAISandboxSessionEnvironment,
 } from './environment-types.ts'
+import type { OwnerId } from './auth/authenticator.ts'
 
 import type { ConnectRequest } from './connect-request.ts'
 
@@ -51,6 +52,33 @@ export interface OAIListResponse<T> {
   first_id: string | null
   last_id: string | null
   has_more: boolean
+}
+
+/** An owner-scoped grouping of sessions. `null` environment means the default workspace. */
+export interface OAIProject {
+  id: string
+  object: 'project'
+  name: string
+  status: 'active' | 'archived'
+  pinned: boolean
+  agent_id: string | null
+  environment: OAIEnvironmentConfig | null
+  archived_at: number | null
+  created_at: number
+  updated_at: number
+}
+
+/**
+ * Page query for `projects.list`. `status` defaults to `active`, `limit` to 20,
+ * and `order` to `desc`. `after` is the last id of the previous page, as in
+ * `OwnedCollection`; a foreign id starts the list from the beginning.
+ */
+export interface ProjectListQuery {
+  owner: OwnerId
+  status?: 'active' | 'archived' | 'all'
+  limit?: number
+  after?: string
+  order?: 'desc' | 'asc'
 }
 
 /** Custom function tool the application implements. */

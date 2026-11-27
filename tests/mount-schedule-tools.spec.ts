@@ -18,7 +18,7 @@ const BOB = ownerId('bob')
 
 function row(id: string, owner: OwnerId): SessionIndexRow {
   const now = new Date()
-  return { id, ownerId: owner, agentId: null, environmentId: null, dshSessionId: id, status: 'idle', lastError: null, model: 'm', reasoningEffort: null, body: null, createdAt: now, updatedAt: now }
+  return { id, ownerId: owner, agentId: null, environmentId: null, projectId: null, dshSessionId: id, status: 'idle', lastError: null, model: 'm', reasoningEffort: null, body: null, createdAt: now, updatedAt: now }
 }
 
 let store: MemoryStore

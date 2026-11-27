@@ -8,7 +8,7 @@ import pg from 'pg'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { ownerId, type OwnerId } from '../src/auth/authenticator.ts'
 import type { EnvironmentRecord, EnvironmentTemplate } from '../src/environment-types.ts'
-import type { SessionConfig } from '../src/types.ts'
+import type { OAIProject, SessionConfig } from '../src/types.ts'
 import { materializeAgent } from '../src/agent-records.ts'
 import { migrate } from '../src/store/migrate.ts'
 import { openPostgresStore } from '../src/store/postgres.ts'
@@ -46,7 +46,7 @@ const harnesses: Array<[string, Harness]> = [
       const client = new pg.Client({ connectionString: await contractUrl() })
       await client.connect()
       try {
-        await client.query('truncate admin_audit, skills, files, sessions, environments, environment_templates, agents, owners')
+        await client.query('truncate admin_audit, skills, files, sessions, projects, environments, environment_templates, agents, owners')
       } finally {
         await client.end()
       }
@@ -68,6 +68,7 @@ function sessionRow(id: string, owner: OwnerId, overrides: Partial<SessionIndexR
     ownerId: owner,
     agentId: null,
     environmentId: null,
+    projectId: null,
     dshSessionId: id,
     status: 'idle',
     lastError: null,
@@ -110,6 +111,22 @@ function environment(id: string, status: EnvironmentRecord['status']): Environme
     provider: 'local',
     provider_metadata: { workspace_directory: `/w/${id}` },
     created_at: 1,
+  }
+}
+
+function project(id: string, name: string, overrides: Partial<OAIProject> = {}): OAIProject {
+  return {
+    id,
+    object: 'project',
+    name,
+    status: 'active',
+    pinned: false,
+    agent_id: null,
+    environment: null,
+    archived_at: null,
+    created_at: 1_800,
+    updated_at: 1_800,
+    ...overrides,
   }
 }
 
@@ -413,22 +430,120 @@ describe.each(harnesses)('Store contract (%s)', (_name, harness) => {
   })
 })
 
+describe.each(harnesses)('Projects store (%s)', (_name, harness) => {
+  describe('projects', () => {
+    it('creates and reads a project within its owner', async () => {
+      const store = await harness.fresh()
+      await store.ensureOwner(A)
+      await store.ensureOwner(B)
+      const row = project('proj_1', 'Alpha', { agent_id: 'agent_1', environment: { type: 'none' }, pinned: true })
+      expect(await store.projects.create(A, row)).toEqual(row)
+      expect(await store.projects.get(A, row.id)).toEqual(row)
+      const renamed = { ...row, name: 'Renamed', updated_at: row.updated_at + 1 }
+      expect(await store.projects.update(A, row.id, renamed)).toEqual(renamed)
+      expect(await store.projects.get(A, row.id)).toEqual(renamed)
+      expect(await store.projects.delete(A, row.id)).toBe(true)
+      expect(await store.projects.get(A, row.id)).toBeUndefined()
+    })
+
+    it("treats another owner's project as absent", async () => {
+      const store = await harness.fresh()
+      await store.ensureOwner(A)
+      await store.ensureOwner(B)
+      const row = project('proj_1', 'Alpha')
+      await store.projects.create(A, row)
+      expect(await store.projects.get(B, row.id)).toBeUndefined()
+      expect((await store.projects.list({ owner: B, limit: 20 })).data).toEqual([])
+      expect(await store.projects.update(B, row.id, { ...row, name: 'stolen' })).toBeUndefined()
+      expect(await store.projects.delete(B, row.id)).toBe(false)
+      expect(await store.projects.get(A, row.id)).toEqual(row)
+    })
+
+    it('lists active, archived and all projects with correct paging', async () => {
+      const store = await harness.fresh()
+      await store.ensureOwner(A)
+      await store.ensureOwner(B)
+      for (const row of [
+        project('proj_1', 'one'),
+        project('proj_2', 'two'),
+        project('proj_3', 'three', { status: 'archived', archived_at: 1_900 }),
+        project('proj_4', 'four'),
+      ]) {
+        await store.projects.create(A, row)
+      }
+      await store.projects.create(B, project('proj_b', 'foreign'))
+      const ids = async (q: { status?: 'active' | 'archived' | 'all'; limit: number; after?: string; order?: 'asc' | 'desc' }) => (await store.projects.list({ owner: A, ...q })).data.map(row => row.id)
+      // The archived row between `proj_4` and `proj_2` must not consume a page slot.
+      const first = await store.projects.list({ owner: A, status: 'active', limit: 2 })
+      expect(first).toMatchObject({ object: 'list', first_id: 'proj_4', last_id: 'proj_2', has_more: true })
+      expect(first.data.map(row => row.id)).toEqual(['proj_4', 'proj_2'])
+      expect((await store.projects.list({ owner: A, status: 'active', limit: 2, after: 'proj_2' })).data.map(row => row.id)).toEqual(['proj_1'])
+      expect((await store.projects.list({ owner: A })).data.map(row => row.id)).toEqual(['proj_4', 'proj_2', 'proj_1'])
+      expect(await ids({ status: 'archived', limit: 20 })).toEqual(['proj_3'])
+      expect(await ids({ status: 'all', limit: 20 })).toEqual(['proj_4', 'proj_3', 'proj_2', 'proj_1'])
+      expect(await ids({ status: 'all', limit: 20, order: 'asc' })).toEqual(['proj_1', 'proj_2', 'proj_3', 'proj_4'])
+      expect((await store.projects.list({ owner: B, limit: 20 })).data.map(row => row.id)).toEqual(['proj_b'])
+    })
+
+    it('counts sessions attached to a project', async () => {
+      const store = await harness.fresh()
+      await store.ensureOwner(A)
+      await store.ensureOwner(B)
+      await store.projects.create(A, project('proj_1', 'one'))
+      await store.projects.create(A, project('proj_2', 'two'))
+      await store.projects.create(B, project('proj_b', 'foreign'))
+      await store.sessions.insert(sessionRow('sess_a1', A, { projectId: 'proj_1' }))
+      await store.sessions.insert(sessionRow('sess_a2', A, { projectId: 'proj_1' }))
+      await store.sessions.insert(sessionRow('sess_a3', A, { projectId: 'proj_2' }))
+      await store.sessions.insert(sessionRow('sess_b1', B, { projectId: 'proj_b' }))
+      expect(await store.projects.countSessions(A, 'proj_1')).toBe(2)
+      expect(await store.projects.countSessions(A, 'proj_2')).toBe(1)
+      expect(await store.projects.countSessions(A, 'proj_b')).toBe(0)
+      expect(await store.projects.countSessions(B, 'proj_1')).toBe(0)
+      expect(await store.projects.countSessions(A, 'proj_missing')).toBe(0)
+    })
+
+    it('filters sessions by projectId without dropping later pages', async () => {
+      const store = await harness.fresh()
+      await store.ensureOwner(A)
+      await store.projects.create(A, project('proj_1', 'one'))
+      await store.projects.create(A, project('proj_2', 'two'))
+      const at = (minute: number) => new Date(Date.UTC(2026, 10, 8, 10, minute))
+      await store.sessions.insert(sessionRow('sess_1', A, { projectId: 'proj_1', createdAt: at(1) }))
+      await store.sessions.insert(sessionRow('sess_2', A, { createdAt: at(2) }))
+      await store.sessions.insert(sessionRow('sess_3', A, { projectId: 'proj_1', createdAt: at(3) }))
+      await store.sessions.insert(sessionRow('sess_4', A, { projectId: 'proj_2', createdAt: at(4) }))
+      await store.sessions.insert(sessionRow('sess_5', A, { projectId: 'proj_1', createdAt: at(5) }))
+      const ids = (rows: { data: SessionIndexRow[] }) => rows.data.map(row => row.id)
+      expect(ids(await store.sessions.list({ owner: A, projectId: 'proj_1', limit: 20 }))).toEqual(['sess_5', 'sess_3', 'sess_1'])
+      expect(ids(await store.sessions.list({ owner: A, projectId: null, limit: 20 }))).toEqual(['sess_2'])
+      expect(ids(await store.sessions.list({ owner: A, limit: 20 }))).toEqual(['sess_5', 'sess_4', 'sess_3', 'sess_2', 'sess_1'])
+      const page1 = await store.sessions.list({ owner: A, projectId: 'proj_1', limit: 2 })
+      expect(ids(page1)).toEqual(['sess_5', 'sess_3'])
+      expect(page1.nextCursor).not.toBeNull()
+      const page2 = await store.sessions.list({ owner: A, projectId: 'proj_1', limit: 2, cursor: page1.nextCursor! })
+      expect(ids(page2)).toEqual(['sess_1'])
+      expect(page2.nextCursor).toBeNull()
+    })
+  })
+})
+
 describe('Postgres migrations', () => {
   it('migrations apply from empty', async () => {
     const url = await postgres!.createDatabase('empty')
-    expect(await migrate(url)).toEqual({ applied: ['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql'] })
+    expect(await migrate(url)).toEqual({ applied: ['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql'] })
     expect(await migrate(url)).toEqual({ applied: [] })
   })
 
   it('migrations are idempotent under concurrent start', async () => {
     const url = await postgres!.createDatabase('concurrent')
     const results = await Promise.all([migrate(url), migrate(url)])
-    expect(results.flatMap(result => result.applied)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql'])
+    expect(results.flatMap(result => result.applied)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql'])
     const client = new pg.Client({ connectionString: url })
     await client.connect()
     try {
       const rows = await client.query<{ name: string }>('select name from schema_migrations')
-      expect(rows.rows.map(row => row.name)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql'])
+      expect(rows.rows.map(row => row.name)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql'])
     } finally {
       await client.end()
     }
@@ -442,7 +557,7 @@ describe('Postgres migrations', () => {
         "select table_name from information_schema.tables where table_schema = 'public' order by table_name",
       )
       expect(tables.rows.map(row => row.table_name)).toEqual([
-        'admin_audit', 'agents', 'environment_templates', 'environments', 'files', 'owners', 'schema_migrations', 'sessions', 'skills',
+        'admin_audit', 'agents', 'environment_templates', 'environments', 'files', 'owners', 'projects', 'schema_migrations', 'sessions', 'skills',
       ])
       const indexes = await client.query<{ indexdef: string }>(
         "select indexdef from pg_indexes where schemaname = 'public' and indexname like '%\\_idx' order by indexname",
@@ -454,6 +569,9 @@ describe('Postgres migrations', () => {
         '(owner_id, session_id, attachment_id)',
         '(owner_id, status, created_at)',
         '(owner_id, created_at DESC)',
+        '(owner_id, status, pinned, created_at DESC)',
+        '(owner_id, created_at DESC)',
+        '(owner_id, project_id, created_at DESC)',
         '(status)',
         '(owner_id, scope, agent_id)',
         '(status, updated_at)',

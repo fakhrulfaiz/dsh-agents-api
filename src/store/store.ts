@@ -1,6 +1,6 @@
 /**
  * Durable Agentry records: owners, saved agents, environment templates,
- * environments, the session index, and the admin audit log.
+ * environments, projects, the session index, and the admin audit log.
  *
  * Every owner-scoped read and write takes the caller's `OwnerId`; a record of
  * another owner reads as absent. Items, turns, and steps are not stored here:
@@ -11,7 +11,7 @@ import type { FileAttachmentRef, ImageAttachmentRef } from '@deepseek-ai/dsh-att
 import type { OwnerId } from '../auth/authenticator.ts'
 import type { EnvironmentRecord, EnvironmentTemplate } from '../environment-types.ts'
 import type { ListQuery } from '../http.ts'
-import type { OAIAgent, OAIListResponse, SessionConfig, SessionStatus } from '../types.ts'
+import type { OAIAgent, OAIListResponse, OAIProject, ProjectListQuery, SessionConfig, SessionStatus } from '../types.ts'
 
 /** One row of the session index. Model-visible history stays in the DSH Session log. */
 export interface SessionIndexRow {
@@ -19,6 +19,8 @@ export interface SessionIndexRow {
   ownerId: OwnerId
   agentId: string | null
   environmentId: string | null
+  /** Project this chat belongs to; `null` means unfiled. */
+  projectId: string | null
   dshSessionId: string
   status: SessionStatus | 'interrupted'
   lastError: string | null
@@ -76,6 +78,21 @@ export interface OwnedCollection<T extends { id: string }> {
   list(owner: OwnerId, q: ListQuery): Promise<OAIListResponse<T>>
 }
 
+/** Owner-scoped projects. `list` has its own status filter and cursor query; the rest matches `OwnedCollection`. */
+export interface ProjectCollection extends Omit<OwnedCollection<OAIProject>, 'list'> {
+  /**
+   * @param q - owner, status filter, limit, `after` id, and order.
+   * @returns one page of the owner's projects, newest first unless `order` is `asc`.
+   */
+  list(q: ProjectListQuery): Promise<OAIListResponse<OAIProject>>
+  /**
+   * @param owner - calling principal.
+   * @param id - project id.
+   * @returns how many of the owner's sessions belong to the project; `0` when missing or foreign.
+   */
+  countSessions(owner: OwnerId, id: string): Promise<number>
+}
+
 /**
  * Session index filters. Rows are ordered by `createdAt`, then `id`, newest
  * first. `from` is inclusive and `to` exclusive; `cursor` is the `nextCursor`
@@ -84,6 +101,8 @@ export interface OwnedCollection<T extends { id: string }> {
 export interface SessionListQuery {
   owner: OwnerId | 'any'
   agentId?: string
+  /** `null` keeps only unfiled sessions; `undefined` keeps every session. */
+  projectId?: string | null
   status?: string
   from?: Date
   to?: Date
@@ -282,6 +301,7 @@ export interface Store {
   agents: OwnedCollection<OAIAgent>
   templates: OwnedCollection<EnvironmentTemplate>
   environments: OwnedCollection<EnvironmentRecord>
+  projects: ProjectCollection
   files: FileCollection
   skills: SkillCollection
   sessions: {
@@ -423,6 +443,22 @@ function guardCollection<T extends { id: string }>(collection: OwnedCollection<T
 }
 
 /**
+ * Guard every method of the project collection.
+ * @param projects - project collection.
+ * @returns the same collection with outage rejections normalized.
+ */
+function guardProjects(projects: ProjectCollection): ProjectCollection {
+  return {
+    create: guard(projects.create.bind(projects)),
+    get: guard(projects.get.bind(projects)),
+    update: guard(projects.update.bind(projects)),
+    delete: guard(projects.delete.bind(projects)),
+    list: guard(projects.list.bind(projects)),
+    countSessions: guard(projects.countSessions.bind(projects)),
+  }
+}
+
+/**
  * Guard every method of the file collection.
  * @param files - file collection.
  * @returns the same collection with outage rejections normalized.
@@ -475,6 +511,7 @@ export function guardStore(store: Store): Store {
     agents: guardCollection(store.agents),
     templates: guardCollection(store.templates),
     environments: guardCollection(store.environments),
+    projects: guardProjects(store.projects),
     sessions: {
       insert: guard(sessions.insert.bind(sessions)),
       update: guard(sessions.update.bind(sessions)),

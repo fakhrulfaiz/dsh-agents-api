@@ -35,7 +35,7 @@ async function listen(handler: Parameters<typeof createServer>[1]): Promise<stri
 
 function row(id: string, owner = 'test'): SessionIndexRow {
   const now = new Date()
-  return { id, ownerId: ownerId(owner), agentId: null, environmentId: null, dshSessionId: id, status: 'idle', lastError: null, model: 'm', reasoningEffort: null, body: null, createdAt: now, updatedAt: now }
+  return { id, ownerId: ownerId(owner), agentId: null, environmentId: null, projectId: null, dshSessionId: id, status: 'idle', lastError: null, model: 'm', reasoningEffort: null, body: null, createdAt: now, updatedAt: now }
 }
 
 const SUMMARY: ChangesSummary = {

@@ -40,7 +40,7 @@ function row(id: string, environment: SessionConfig['environment'], browser: boo
     agent: { id, object: 'agent', created_at: 1, updated_at: 1, name: null, instructions: null, model: 'm', tools: [], browser },
     environment, metadata: {}, vault_ids: [],
   } as unknown as SessionConfig
-  return { id, ownerId: ownerId('test'), agentId: null, environmentId: null, dshSessionId: id, status: 'idle', lastError: null, model: 'm', reasoningEffort: null, body, createdAt: now, updatedAt: now }
+  return { id, ownerId: ownerId('test'), agentId: null, environmentId: null, projectId: null, dshSessionId: id, status: 'idle', lastError: null, model: 'm', reasoningEffort: null, body, createdAt: now, updatedAt: now }
 }
 
 async function start() {

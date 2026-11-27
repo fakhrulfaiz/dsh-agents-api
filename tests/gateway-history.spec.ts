@@ -617,7 +617,7 @@ describe('resume', () => {
     const store = new MemoryStore()
     await store.ensureOwner(OWNER)
     const at = new Date()
-    const legacy = { ownerId: OWNER, agentId: null, environmentId: null, status: 'idle' as const, lastError: null, model: 'deepseek-chat', reasoningEffort: null, createdAt: at, updatedAt: at }
+    const legacy = { ownerId: OWNER, agentId: null, environmentId: null, projectId: null, status: 'idle' as const, lastError: null, model: 'deepseek-chat', reasoningEffort: null, createdAt: at, updatedAt: at }
     await store.sessions.insert({ ...legacy, id: 'sess_legacy', dshSessionId: 'sess_legacy', body: null })
     const query = new FakeSessionQuery()
     query.append('sess_legacy', logEvent('turn/start', { turn: 1 }, 1))

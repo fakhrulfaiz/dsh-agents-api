@@ -999,6 +999,8 @@ export class AgentsGateway {
       ownerId: owner,
       agentId: typeof body.agent_id === 'string' && body.agent_id !== '' ? body.agent_id : null,
       environmentId: null,
+      // New sessions start unfiled; project selection is resolved before this insert when supported.
+      projectId: null,
       dshSessionId: sessionId,
       status,
       lastError: null,
