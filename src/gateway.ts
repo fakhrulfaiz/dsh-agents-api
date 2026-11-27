@@ -94,7 +94,7 @@ import { SandboxChanges, type SandboxTarget } from './history/sandbox-changes.ts
 import type { WorkspaceChangesLike } from './history/turn-changes.ts'
 import { renderOfficePdf, WorkspaceUnavailableError, type OfficeToPdfLike, type SessionFile } from './render/office-api.ts'
 import { directorySegment } from './environment/local.ts'
-import type { CreateEnvironmentInput } from './environment/provider.ts'
+import type { CreateEnvironmentInput, EnvironmentCreateResult } from './environment/provider.ts'
 import { readRuntimeInfo } from './environment/runtime-info.ts'
 import { toSdkEnvironment, type SdkEnvironment } from './environment/environment-compat.ts'
 import { absoluteFilePath, parseFileListQuery, parseFileWrite, selectFilePage, type SdkEnvironmentFile } from './environment/file-compat.ts'
@@ -2463,7 +2463,7 @@ export class AgentsGateway {
 
   private async createEnvironment(req: IncomingMessage, res: ServerResponse, owner: OwnerId): Promise<void> {
     try {
-      json(res, 201, await this.provisionEnvironment(owner, await readBody(req)))
+      json(res, 201, await this.provisionEnvironment(owner, await readBody(req), undefined, { background: true }))
     } catch (error: unknown) {
       if (error instanceof AgentsApiRequestError) {
         writeRequestError(res, error)
@@ -2507,7 +2507,17 @@ export class AgentsGateway {
     return { ...config, files }
   }
 
-  async provisionEnvironment(owner: OwnerId, raw: Record<string, unknown>, inline?: EnvironmentTemplateConfig): Promise<SdkEnvironment> {
+  /** Environments whose provider `create` runs in the background, by id; `deleted` is set when the owner deleted one meanwhile. */
+  private readonly provisioning = new Map<string, { deleted: boolean }>()
+
+  /** How a create that timed out waits for the service to finish a sandbox it kept making (tests shorten it). */
+  environmentAdoption = { pollMs: 5000, maxMs: 15 * 60_000 }
+
+  /**
+   * @param opts.background - answer as soon as the record is stored as `pending` and run the provider's create afterwards
+   *   (sandbox providers only; the local provider's create is instant). The caller of an in-chat provision leaves it off and gets a ready environment.
+   */
+  async provisionEnvironment(owner: OwnerId, raw: Record<string, unknown>, inline?: EnvironmentTemplateConfig, opts: { background?: boolean } = {}): Promise<SdkEnvironment> {
     const fail = (message: string, code = 'bad_request'): never => { throw new AgentsApiRequestError(message, 400, code) }
     const body = raw as { template_id?: string; session_id?: string; image?: string; provider?: string; name?: unknown; place?: unknown }
     if (body.name !== undefined && (typeof body.name !== 'string' || body.name.trim().length > 80)) fail('Field "name" must be a string of at most 80 characters')
@@ -2542,21 +2552,33 @@ export class AgentsGateway {
     const unsupported = input.template === undefined ? [] : unsupportedFields(input.template, provider)
     if (unsupported.length > 0) fail(`sandbox provider "${provider.kind}" cannot apply template fields: ${unsupported.join(', ')}`, 'sandbox_template_unsupported')
     const id = `env_${randomUUID().replaceAll('-', '')}`
+    const createInput = input.template === undefined ? input : { ...input, template: await this.inlineFileRefs(owner, input.template) }
+    const base = {
+      id,
+      object: 'environment' as const,
+      provider: provider.kind,
+      created_at: Math.floor(Date.now() / 1000),
+      ...(input.template_id !== undefined ? { template_id: input.template_id } : {}),
+      ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
+    }
+    const named = input.name !== undefined ? { name: input.name } : {}
+    if (opts.background === true && provider.kind === 'sandbox') {
+      const pending: EnvironmentRecord = { ...base, status: 'pending', provider_metadata: { ...named } }
+      await this.store.environments.create(owner, pending)
+      this.provisioning.set(id, { deleted: false })
+      void this.finishProvisioning(owner, pending, provider, createInput, named)
+      return this.environmentJson(owner, pending)
+    }
     let created!: Awaited<ReturnType<SandboxProvider['create']>>
     try {
-      created = await provider.create(owner, id, input.template === undefined ? input : { ...input, template: await this.inlineFileRefs(owner, input.template) })
+      created = await provider.create(owner, id, createInput)
     } catch (error: unknown) {
       fail(errorMessage(error))
     }
     const record: EnvironmentRecord = {
-      id,
-      object: 'environment',
+      ...base,
       status: created.status,
-      provider: provider.kind,
-      provider_metadata: { ...(provider.kind === 'local' ? { workspace_directory: created.workspacePath } : { ...created.handle }), ...(input.name !== undefined ? { name: input.name } : {}) },
-      created_at: Math.floor(Date.now() / 1000),
-      ...(input.template_id !== undefined ? { template_id: input.template_id } : {}),
-      ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
+      provider_metadata: { ...(provider.kind === 'local' ? { workspace_directory: created.workspacePath } : { ...created.handle }), ...named },
       ...(created.error !== undefined ? { error: created.error } : {}),
     }
     try {
@@ -2570,16 +2592,82 @@ export class AgentsGateway {
     return this.environmentJson(owner, record)
   }
 
+  /**
+   * Runs the provider's create for a `pending` record and stores the outcome. A create that times out on our side
+   * may still finish in the service: its sandbox is adopted (polled for up to `environmentAdoption.maxMs`) instead
+   * of marking the environment failed. When the owner deleted the environment meanwhile, whatever was made is destroyed.
+   */
+  private async finishProvisioning(owner: OwnerId, pending: EnvironmentRecord, provider: SandboxProvider, input: CreateEnvironmentInput, named: Record<string, string>): Promise<void> {
+    const state = this.provisioning.get(pending.id) ?? { deleted: false }
+    const startedAt = Math.floor(Date.now() / 1000)
+    try {
+      let created: EnvironmentCreateResult
+      try {
+        created = await provider.create(owner, pending.id, input)
+      } catch (error: unknown) {
+        created = { status: 'failed', workspacePath: '', error: errorMessage(error) }
+      }
+      const adoptable = provider as Partial<AgentrySandboxProvider>
+      if (created.status === 'failed' && /time.?d? ?out|aborted/i.test(created.error ?? '') && typeof adoptable.adopt === 'function') {
+        created = await this.adoptTimedOut(adoptable as AgentrySandboxProvider, owner, pending.id, input, startedAt, state) ?? created
+      }
+      const { error: _pending, ...rest } = pending
+      const next: EnvironmentRecord = {
+        ...rest,
+        status: created.status,
+        provider_metadata: { ...created.handle, ...named },
+        updated_at: Math.floor(Date.now() / 1000),
+        ...(created.error !== undefined ? { error: created.error } : {}),
+      }
+      const stored = state.deleted ? undefined : await this.store.environments.update(owner, pending.id, next)
+      if (stored === undefined) {
+        // Deleted while it was being made (or the record vanished): nothing may be left running.
+        await this.destroyEnvironment(next).catch((destroyError: unknown) => {
+          this.ctx.logger.warn(`agents-api: environment ${pending.id} was deleted during setup and could not be destroyed: ${errorMessage(destroyError)}`)
+        })
+      }
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`agents-api: environment ${pending.id} setup bookkeeping failed: ${errorMessage(error)}`)
+    } finally {
+      this.provisioning.delete(pending.id)
+    }
+  }
+
+  private async adoptTimedOut(provider: AgentrySandboxProvider, owner: OwnerId, id: string, input: CreateEnvironmentInput, startedAt: number, state: { deleted: boolean }): Promise<EnvironmentCreateResult | undefined> {
+    const deadline = Date.now() + this.environmentAdoption.maxMs
+    for (;;) {
+      const found = await provider.adopt(owner, id, input, startedAt)
+      if (found === undefined || found.status !== 'pending' || state.deleted || Date.now() >= deadline) return found
+      await new Promise<void>(resolve => setTimeout(resolve, this.environmentAdoption.pollMs))
+    }
+  }
+
+  /**
+   * A `pending` record with no sandbox that no running background setup owns (the API restarted mid-setup) can never
+   * finish: mark it failed.
+   */
+  private async settleInterrupted(owner: OwnerId, record: EnvironmentRecord): Promise<EnvironmentRecord> {
+    if (record.status !== 'pending' || record.provider !== 'sandbox' || record.provider_metadata['sandbox_id'] !== undefined || this.provisioning.has(record.id)) return record
+    const next: EnvironmentRecord = { ...record, status: 'failed', error: 'Setup was interrupted.', updated_at: Math.floor(Date.now() / 1000) }
+    return await this.store.environments.update(owner, record.id, next) ?? next
+  }
+
   private async listEnvironments(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
     const page = await this.store.environments.list(owner, listQuery(url))
-    json(res, 200, { ...page, data: await Promise.all(page.data.map(record => this.environmentJson(owner, record))) })
+    json(res, 200, { ...page, data: await Promise.all(page.data.map(async record => this.environmentJson(owner, await this.settleInterrupted(owner, record)))) })
   }
 
   /** Read the backend status and store it when it changed. */
   private async getEnvironment(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
-    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
-    if (!record) {
+    const stored = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!stored) {
       notFound(res, 'environment not found')
+      return
+    }
+    const record = await this.settleInterrupted(owner, stored)
+    if (this.provisioning.has(record.id) || (record.provider === 'sandbox' && record.status === 'failed' && record.provider_metadata['sandbox_id'] === undefined)) {
+      // Still being set up in the background, or never got a sandbox: there is nothing to ask.
+      json(res, 200, await this.environmentJson(owner, record))
       return
     }
     let status: EnvironmentStatus
@@ -2852,7 +2940,13 @@ export class AgentsGateway {
       notFound(res, 'environment not found')
       return
     }
-    await this.destroyEnvironment(record)
+    const settingUp = this.provisioning.get(environmentId)
+    if (settingUp !== undefined) {
+      // The background setup destroys what it made when it finishes.
+      settingUp.deleted = true
+    } else {
+      await this.destroyEnvironment(record)
+    }
     await this.store.environments.delete(owner, environmentId)
     json(res, 200, { id: environmentId, object: 'environment.deleted', deleted: true })
   }
@@ -2904,6 +2998,11 @@ export class AgentsGateway {
       typeof provider?.describe === 'function' ? provider.describe(record) : undefined,
     ])
     const out = toSdkEnvironment(record, template)
+    // No sandbox yet: the background setup is still running (or the record is about to be settled).
+    if (record.provider === 'sandbox' && record.status === 'pending' && record.provider_metadata['sandbox_id'] === undefined) {
+      const name = record.provider_metadata['name']
+      return { ...out, ...(name !== undefined ? { name } : {}), sandbox: { state: 'provisioning' } }
+    }
     const name = record.provider_metadata['name']
     return { ...out, ...(name !== undefined ? { name } : {}), ...(sandbox !== undefined ? { sandbox } : {}) }
   }

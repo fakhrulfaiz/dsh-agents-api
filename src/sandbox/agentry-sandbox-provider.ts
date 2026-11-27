@@ -15,7 +15,7 @@ import { join, posix } from 'node:path'
 import { createSandboxApi, SandboxApiError, type SandboxApi, type WireBackend, type WireSandbox, type WireTemplate } from '@agentry/sandbox/client'
 import type { OwnerId } from '../auth/authenticator.ts'
 import { directorySegment } from '../environment/local.ts'
-import type { CreateEnvironmentInput } from '../environment/provider.ts'
+import type { CreateEnvironmentInput, EnvironmentCreateResult } from '../environment/provider.ts'
 import type { EnvironmentRecord, EnvironmentStatus, EnvironmentTemplateConfig } from '../environment-types.ts'
 import type { SandboxSummary } from '../environment/environment-compat.ts'
 import type { SandboxProvider } from './contract.ts'
@@ -36,6 +36,11 @@ export interface AgentrySandboxProvider extends SandboxProvider {
   /** Workspace files with size and modification time, skipping `.git` and `node_modules` (at most 5000). */
   listEntries(record: EnvironmentRecord): Promise<WorkspaceEntry[]>
   /** Whether a workspace-relative path exists in the sandbox. */
+  /**
+   * After a create that timed out client-side: find the sandbox the service made for it (same name, created since
+   * `sinceSeconds`, newest first). `undefined` when the service has none.
+   */
+  adopt(owner: OwnerId, environmentId: string, input: CreateEnvironmentInput, sinceSeconds: number): Promise<EnvironmentCreateResult | undefined>
   /** Live state, image and last use for the environment wire object. Never throws. */
   describe(record: EnvironmentRecord): Promise<SandboxSummary>
   /** Size of a workspace file, or `undefined` when there is no such file. */
@@ -222,6 +227,21 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
       } catch (e) {
         return { status: 'failed' as const, workspacePath: dir, error: (e as Error).message }
       }
+    },
+
+    async adopt(owner: OwnerId, environmentId: string, input: CreateEnvironmentInput, sinceSeconds: number) {
+      const name = input.name ?? environmentId
+      let found: WireSandbox | undefined
+      try {
+        found = (await quickApi(owner).list())
+          .filter((s) => s.name === name && s.created_at >= sinceSeconds - 5)
+          .sort((a, b) => b.created_at - a.created_at)[0]
+      } catch {
+        return undefined
+      }
+      if (found === undefined) return undefined
+      const dir = join(opts.workspacesRoot, directorySegment(owner, 'owner'), `sandbox-${environmentId}`)
+      return { status: statusOf(found.state), workspacePath: found.workspace_path, handle: { sandbox_id: found.id, workspace_directory: found.workspace_path, host_placeholder: dir, image: found.image, owner }, ...(found.error ? { error: found.error } : {}) }
     },
 
     async describe(record) {
