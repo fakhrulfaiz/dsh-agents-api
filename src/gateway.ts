@@ -2734,7 +2734,7 @@ export class AgentsGateway {
 
   /**
    * `GET /agents/sessions/{id}/browser/live`: the chat's browser as SSE `frame` events (base64 JPEG, url,
-   * title) and `idle` events with a `reason` while there is nothing to show. Read-only; the relay runs in the
+   * title), `idle` events with a `reason` while there is nothing to show, and `pointer` (`action` move, down or up, `x`, `y`) and `focus` (`x`, `y`, `width`, `height`) events for the agent's cursor (viewport CSS px, never replayed). Read-only; the relay runs in the
    * sandbox, so no sandbox address or key reaches the client.
    */
   private async streamBrowserLive(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
@@ -2748,6 +2748,8 @@ export class AgentsGateway {
       if (event.kind === 'frame') writeEvent(res, 'frame', { data: event.data, url: event.url, title: event.title, width: event.width ?? null, height: event.height ?? null, timestamp: event.ts })
       else if (event.kind === 'idle') writeEvent(res, 'idle', { reason: event.reason })
       else if (event.kind === 'control') writeEvent(res, 'control', event.controlled ? { controlled: true, since: event.since } : { controlled: false, reason: event.reason })
+      else if (event.kind === 'pointer') writeEvent(res, 'pointer', { action: event.action, x: event.x, y: event.y, timestamp: event.ts })
+      else if (event.kind === 'focus') writeEvent(res, 'focus', { x: event.x, y: event.y, width: event.width, height: event.height, timestamp: event.ts })
       else res.end()
     }
     let detach: (() => void) | undefined

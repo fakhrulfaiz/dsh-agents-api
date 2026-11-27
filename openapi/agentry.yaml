@@ -2814,6 +2814,9 @@ paths:
         - `control`: `{ controlled: true, since }` when the user takes control (also sent to a new reader while
           they have it), `{ controlled: false, reason }` when it ends: `released`, `idle` (5 minutes without input),
           `left` (no reader for a few seconds), `taken` (another tab took it), `closed` (the view ended).
+        - `pointer`: `{ action: move|down|up, x, y, timestamp }`, where the page's trusted mouse events happened (the
+          agent's clicks too), in the frame's CSS pixels; at most about 30 a second; never replayed to a new reader.
+        - `focus`: `{ x, y, width, height, timestamp }`, the field (input, textarea, select, contenteditable) that just took focus.
         - `idle`: `{ reason }`, nothing to show: `not_started` (no browser open yet, or the sandbox is not running),
           `no_browser` (the sandbox image has no browser; use the built-in Web and browser template), `browser_off`
           (the agent's `browser` is off), `not_sandbox` (the chat does not run in a sandbox).

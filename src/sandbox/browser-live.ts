@@ -30,8 +30,12 @@ export type LiveIdle = { kind: 'idle'; reason: IdleReason }
 /** Why control ended: handed back, idle too long, the user left the view, taken by another tab, or the view ended. */
 export type ControlEndReason = 'released' | 'idle' | 'left' | 'taken' | 'closed'
 export type LiveControl = { kind: 'control'; controlled: true; since: number } | { kind: 'control'; controlled: false; reason: ControlEndReason }
+/** Where the agent's pointer is (viewport CSS px, as in the frame) and what it did. Never stored: a new reader gets none. */
+export type LivePointer = { kind: 'pointer'; action: 'move' | 'down' | 'up'; x: number; y: number; ts: number }
+/** The field the page just focused (viewport CSS px). Never stored. */
+export type LiveFocus = { kind: 'focus'; x: number; y: number; width: number; height: number; ts: number }
 /** `closed`: the view ended (its environment stopped); the reader should end its stream. */
-export type LiveEvent = LiveFrame | LiveIdle | LiveControl | { kind: 'closed' }
+export type LiveEvent = LiveFrame | LiveIdle | LiveControl | LivePointer | LiveFocus | { kind: 'closed' }
 
 /** The part of `EnvdProcessStream` the hub uses. */
 export interface RelayProcess extends NodeJS.ReadableStream {
@@ -119,8 +123,8 @@ export function startRelay(envd: EnvdClient, port: number, intervalMs: number): 
   return new EnvdProcessStream(envd, { cmd: 'node', args: ['-e', BROWSER_LIVE_RELAY_SCRIPT], user: 'agent', env: relayEnv(port, intervalMs) })
 }
 
-/** Parses one relay line; undefined for anything that is not a frame or idle. */
-export function parseRelayLine(line: string): LiveFrame | LiveIdle | undefined {
+/** Parses one relay line; undefined for anything that is not a frame, idle, pointer or focus line. */
+export function parseRelayLine(line: string): LiveFrame | LiveIdle | LivePointer | LiveFocus | undefined {
   let msg: unknown
   try {
     msg = JSON.parse(line)
@@ -129,6 +133,22 @@ export function parseRelayLine(line: string): LiveFrame | LiveIdle | undefined {
   }
   if (msg === null || typeof msg !== 'object') return undefined
   const m = msg as Record<string, unknown>
+  const coord = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100_000 ? v : undefined)
+  if (m['type'] === 'pointer') {
+    const action = m['action']
+    const x = coord(m['x'])
+    const y = coord(m['y'])
+    if ((action !== 'move' && action !== 'down' && action !== 'up') || x === undefined || y === undefined) return undefined
+    return { kind: 'pointer', action, x, y, ts: typeof m['ts'] === 'number' && Number.isFinite(m['ts']) ? m['ts'] : Date.now() }
+  }
+  if (m['type'] === 'focus') {
+    const x = coord(m['x'])
+    const y = coord(m['y'])
+    const width = coord(m['width'])
+    const height = coord(m['height'])
+    if (x === undefined || y === undefined || width === undefined || height === undefined) return undefined
+    return { kind: 'focus', x, y, width, height, ts: typeof m['ts'] === 'number' && Number.isFinite(m['ts']) ? m['ts'] : Date.now() }
+  }
   if (m['type'] === 'idle') return { kind: 'idle', reason: m['reason'] === 'no_browser' ? 'no_browser' : 'not_started' }
   if (m['type'] !== 'frame' || typeof m['data'] !== 'string' || m['data'] === '') return undefined
   const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
@@ -261,7 +281,11 @@ export class BrowserLiveHub {
     view.restartDelay = Math.min(MAX_RESTART_MS, view.restartDelay * 2)
   }
 
-  private receive(view: View, event: LiveFrame | LiveIdle): void {
+  private receive(view: View, event: LiveFrame | LiveIdle | LivePointer | LiveFocus): void {
+    if (event.kind === 'pointer' || event.kind === 'focus') {
+      this.emit(view, event)
+      return
+    }
     if (event.kind === 'idle') {
       view.pending = undefined
       if (view.last?.kind === 'idle' && view.last.reason === event.reason) return

@@ -22,6 +22,12 @@
  * viewport too). Anything else is ignored, so stdin never
  * becomes a general DevTools channel.
  *
+ * Pointer and focus (the agent's cursor): the relay installs `POINTER_LISTENER_SOURCE` in the page it shows
+ * (binding `__agentryPointer`) and writes what the page's own mouse events say, so Playwright's clicks show up:
+ * - `{"type":"pointer","action":"move"|"down"|"up","x","y","ts"}` (viewport CSS px; at most 30 a second, never
+ *   dropping down or up),
+ * - `{"type":"focus","x","y","width","height","ts"}` when a field takes focus.
+ *
  * Configuration (environment): `AGENTRY_LIVE_CDP_PORT` (required),
  * `AGENTRY_LIVE_QUALITY`, `AGENTRY_LIVE_MAX_WIDTH`, `AGENTRY_LIVE_MAX_HEIGHT`,
  * `AGENTRY_LIVE_INTERVAL_MS`.
@@ -63,6 +69,76 @@ function relayCommands(line) {
 }
 `
 
+/**
+ * Runs inside the page (top frame only), once per document. Reports trusted `mousemove` (one per 50 ms, latest
+ * wins, trailing call kept), `mousedown`, `mouseup` and `focusin` on fields through the `__agentryPointer`
+ * binding as JSON strings. Tested on its own against a fake `window`.
+ */
+export const POINTER_LISTENER_SOURCE = String.raw`
+(function () {
+  if (window.top !== window || window.__agentryPointerInstalled) return
+  window.__agentryPointerInstalled = true
+  var send = function (o) {
+    try { if (typeof window.__agentryPointer === 'function') window.__agentryPointer(JSON.stringify(o)) } catch (e) {}
+  }
+  var lastMove = 0
+  var timer = null
+  var latest = null
+  var flush = function () {
+    timer = null
+    if (!latest) return
+    lastMove = Date.now()
+    send(latest)
+    latest = null
+  }
+  window.addEventListener('mousemove', function (e) {
+    if (!e.isTrusted) return
+    latest = { a: 'move', x: e.clientX, y: e.clientY }
+    var wait = lastMove + 50 - Date.now()
+    if (wait <= 0 && timer === null) flush()
+    else if (timer === null) timer = setTimeout(flush, Math.max(0, wait))
+  }, { capture: true, passive: true })
+  var button = function (a) {
+    return function (e) {
+      if (!e.isTrusted) return
+      if (timer !== null) { clearTimeout(timer); flush() }
+      send({ a: a, x: e.clientX, y: e.clientY, b: e.button })
+    }
+  }
+  window.addEventListener('mousedown', button('down'), { capture: true, passive: true })
+  window.addEventListener('mouseup', button('up'), { capture: true, passive: true })
+  window.addEventListener('focusin', function (e) {
+    if (!e.isTrusted) return
+    var t = e.target
+    if (!t || typeof t.matches !== 'function' || !t.matches('input, textarea, select, [contenteditable]')) return
+    var r = t.getBoundingClientRect()
+    send({ a: 'focus', x: r.left, y: r.top, w: r.width, h: r.height })
+  }, { capture: true, passive: true })
+})()
+`
+
+/**
+ * The relay's check of what the page's binding sent: `pointerLine(raw, now)` returns the line to write
+ * (`pointer` or `focus`), or undefined unless it is well formed and every number is finite and within 0..100000.
+ */
+export const RELAY_POINTER_SOURCE = String.raw`
+function pointerLine(raw, now) {
+  let m
+  try { m = JSON.parse(raw) } catch { return undefined }
+  if (!m || typeof m !== 'object') return undefined
+  const ok = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100000
+  if (m.a === 'move' || m.a === 'down' || m.a === 'up') {
+    if (!ok(m.x) || !ok(m.y)) return undefined
+    return { type: 'pointer', action: m.a, x: m.x, y: m.y, ts: now }
+  }
+  if (m.a === 'focus') {
+    if (!ok(m.x) || !ok(m.y) || !ok(m.w) || !ok(m.h)) return undefined
+    return { type: 'focus', x: m.x, y: m.y, width: m.w, height: m.h, ts: now }
+  }
+  return undefined
+}
+`
+
 /** The relay program (plain JavaScript for Node 22 or later: global `fetch` and `WebSocket`). */
 export const BROWSER_LIVE_RELAY_SCRIPT = String.raw`
 const env = process.env
@@ -79,6 +155,9 @@ const fs = require('node:fs')
 const path = require('node:path')
 const hasBrowser = () => (env.PATH || '/usr/local/bin:/usr/bin:/bin').split(':').some((dir) => { try { fs.accessSync(path.join(dir, 'playwright-mcp'), fs.constants.X_OK); return true } catch { return false } })
 ${RELAY_COMMAND_SOURCE}
+${RELAY_POINTER_SOURCE}
+const pointerSource = ${JSON.stringify(POINTER_LISTENER_SOURCE)}
+let lastPointerAt = 0
 let run = undefined
 let inbuf = ''
 process.stdin.setEncoding('utf8')
@@ -126,6 +205,9 @@ async function watch() {
       const { sessionId } = await send('Target.attachToTarget', { targetId: want.targetId, flatten: true })
       active = { targetId: want.targetId, sessionId }
       lastData = ''
+      await send('Runtime.addBinding', { name: '__agentryPointer' }, sessionId).catch(() => {})
+      await send('Page.addScriptToEvaluateOnNewDocument', { source: pointerSource }, sessionId).catch(() => {})
+      await send('Runtime.evaluate', { expression: pointerSource }, sessionId).catch(() => {})
       await send('Page.startScreencast', { format: 'jpeg', quality, maxWidth, maxHeight, everyNthFrame: 1 }, sessionId)
     }).catch(() => {})
   }
@@ -156,6 +238,16 @@ async function watch() {
         follow()
       } else if (msg.method === 'Target.detachedFromTarget') {
         if (active && active.sessionId === params.sessionId) { active = undefined; follow() }
+      } else if (msg.method === 'Runtime.bindingCalled') {
+        if (!active || msg.sessionId !== active.sessionId || params.name !== '__agentryPointer') return
+        const now = Date.now()
+        const line = pointerLine(String(params.payload), now)
+        if (!line) return
+        if (line.type === 'pointer' && line.action === 'move') {
+          if (now - lastPointerAt < 33) return
+          lastPointerAt = now
+        }
+        out(line)
       } else if (msg.method === 'Page.screencastFrame') {
         const session = msg.sessionId
         setTimeout(() => { send('Page.screencastFrameAck', { sessionId: params.sessionId }, session).catch(() => {}) }, interval)
