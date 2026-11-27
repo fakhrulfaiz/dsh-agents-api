@@ -35,6 +35,8 @@ function fakeContext(): {
       if (result instanceof Promise) effects.push(result.catch(() => undefined))
       return result
     },
+    // No `jobs` service in these tests, so nothing waits on it.
+    inject() { return () => {} },
     logger: { error: (error: unknown) => errors.push(error), warn: () => undefined },
     webServer: { register },
   }

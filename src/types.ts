@@ -750,6 +750,39 @@ export type OAISessionEvent =
   | { type: 'agent.session.subagent.closed'; event_id: string; session_id: string; subagent: OAISubagent }
   | { type: 'agent.session.subagent.item.added'; event_id: string; session_id: string; subagent_id: string; turn_id: string; item: OAISessionItem & { subagent_id: string } }
   | { type: 'agent.session.subagent.item.done'; event_id: string; session_id: string; subagent_id: string; turn_id: string; item: OAISessionItem & { subagent_id: string } }
+  | { type: 'agent.session.job.updated'; event_id: string; session_id: string; job: OAIJob }
+  | { type: 'agent.session.job.removed'; event_id: string; session_id: string; job_id: string }
+
+/** Output retained for one background job (`output` on `agent.session.job`). */
+export interface OAIJobOutput {
+  /** The newest retained output, stdout, stderr and log chunks in arrival order. */
+  text: string
+  /** Whole-stream bytes written so far. */
+  total_bytes: number
+  /** Whether earlier output is not included (cut to the route's bound or dropped by retention). */
+  truncated: boolean
+}
+
+/** A DSH background job owned by a session (`ctx.jobs`), for example a `run_in_background` shell command. */
+export interface OAIJob {
+  id: string
+  object: 'agent.session.job'
+  session_id: string
+  /** Producer kind: `bash`, `workflow`, ... */
+  kind: string
+  /** The producer's label: the command for shell jobs. */
+  command: string
+  status: 'running' | 'stopping' | 'completed' | 'killed' | 'failed'
+  /** Live progress line while running, terminal reason once settled (`exit code: 0`). */
+  detail: string | null
+  /** Exit code parsed from a completed shell job's detail; null otherwise. */
+  exit_code: number | null
+  /** Epoch seconds, like every other `*_at` on this API. */
+  started_at: number
+  finished_at: number | null
+  /** Absent on stream events. */
+  output?: OAIJobOutput
+}
 
 /** A Host child session observed under an Agents API session (`/subagents`). Turns and items stay on their own routes. */
 export interface OAISubagent {

@@ -42,7 +42,7 @@ import { API_KEY_HASH_PATTERN, createApiKeyAuthenticator, type ApiKeyEntry } fro
 import { createKeycloakAuthenticator } from './auth/keycloak.ts'
 import { createStaticKeyAuthenticator } from './auth/static-key.ts'
 import { claimAgent, installApprovalBridge } from './approvals/approval-bridge.ts'
-import { bridgeChildSessionEvent } from './bridge.ts'
+import { bridgeChildSessionEvent, mintEventId } from './bridge.ts'
 import { createLocalProvider, directorySegment } from './environment/local.ts'
 import { createAgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
 import { agentryPresetRows, createSandboxPresets, setSandboxCredentials, setSandboxPrepare, type PresetRegistryLike, type SandboxPresets } from './sandbox/presets.ts'
@@ -55,6 +55,7 @@ import { startSweeper } from './files/sweeper.ts'
 import { AgentsGateway } from './gateway.ts'
 import type { OfficeToPdfLike } from './render/office-api.ts'
 import type { WorkspaceChangesLike } from './history/turn-changes.ts'
+import { watchJobs, type JobRegistryLike } from './jobs.ts'
 import { errorMessage } from './http.ts'
 import { createSessionHistory } from './history/session-history.ts'
 import { recoverSessions, recoveryUnavailable } from './recovery.ts'
@@ -502,6 +503,12 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     attachments: () => ctx.get('attachments'),
     officeToPdf: () => ctx.get('officeToPdf') as OfficeToPdfLike | undefined,
     workspaceChanges: () => ctx.get('workspaceChanges') as WorkspaceChangesLike | undefined,
+    jobs: () => ctx.get('jobs') as JobRegistryLike | undefined,
+  })
+
+  // Job start, stop and finish reach the owning session's stream as ephemeral events (src/jobs.ts).
+  ctx.inject(['jobs'], (jobsCtx) => {
+    jobsCtx.effect(() => watchJobs(jobsCtx.get('jobs') as JobRegistryLike, (sessionId, event) => { sessionRegistry.emitEphemeral(sessionId, event) }, mintEventId), 'agents-api: job events')
   })
 
   if (staging !== undefined) ctx.effect(() => verifyStaging(staging, stagingDir!), 'agents-api: upload staging')
