@@ -117,7 +117,7 @@ const KILL = '/v1/agents/sessions/{session_id}/jobs/{job_id}/kill'
 describe('session jobs routes', () => {
   it('lists only the session\'s own jobs, with output and exit codes', async () => {
     const jobs = new FakeJobs()
-    jobs.add('bash-1', 'sess_a', 'running', 'building...\n', { progress: undefined })
+    jobs.add('bash-1', 'sess_a', 'running', 'building...\n')
     jobs.add('bash-2', 'sess_a', 'completed', 'done\n', { detail: 'exit code: 2', finishedAt: 1_700_000_003_900 })
     jobs.add('bash-3', undefined, 'running', 'unowned')
     jobs.add('bash-4', 'sess_b', 'running', 'theirs')
