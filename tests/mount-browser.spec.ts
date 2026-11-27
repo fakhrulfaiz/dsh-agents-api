@@ -6,6 +6,8 @@ import {
   BROWSER_LOCAL_NOTICE,
   BROWSER_MISSING_NOTICE,
   browserCdpPort,
+  BrowserPortAllocator,
+  browserPorts,
   BROWSER_ABSENT_NOTICE,
   browserMode,
   normalizeBrowserDefault,
@@ -117,5 +119,49 @@ describe('mountBrowserGuidance', () => {
     expect(text()).toBe(BROWSER_MISSING_NOTICE)
     expect(text()).toContain('Web and browser')
     expect(text()).toContain('agentry-sandbox-browser:1')
+  })
+})
+
+describe('BrowserPortAllocator', () => {
+  const collide = (): BrowserPortAllocator => new BrowserPortAllocator(() => 25_000)
+
+  it('gives sessions on one sandbox different ports even when their hashes collide', () => {
+    const ports = collide()
+    expect(ports.acquire('sbx', 'a')).toBe(25_000)
+    expect(ports.acquire('sbx', 'b')).toBe(25_001)
+  })
+
+  it('is stable on re-acquire and lets the live view find the allocated port', () => {
+    const ports = collide()
+    ports.acquire('sbx', 'a')
+    const b = ports.acquire('sbx', 'b')
+    expect(ports.acquire('sbx', 'b')).toBe(b)
+    expect(ports.portOf('sbx', 'b')).toBe(b)
+    expect(ports.portOf('sbx', 'unknown')).toBe(25_000)
+  })
+
+  it('reuses released ports and keeps sandboxes independent', () => {
+    const ports = collide()
+    ports.acquire('sbx', 'a')
+    ports.acquire('sbx', 'b')
+    expect(ports.acquire('other', 'c')).toBe(25_000)
+    ports.release('sbx', 'a')
+    expect(ports.acquire('sbx', 'd')).toBe(25_000)
+    ports.releaseSession('b')
+    expect(ports.acquire('sbx', 'e')).toBe(25_001)
+    ports.releaseSandbox('sbx')
+    expect(ports.acquire('sbx', 'f')).toBe(25_000)
+  })
+
+  it('wraps inside 20000..39999', () => {
+    const ports = new BrowserPortAllocator(() => 39_999)
+    expect(ports.acquire('sbx', 'a')).toBe(39_999)
+    expect(ports.acquire('sbx', 'b')).toBe(20_000)
+  })
+
+  it('mounts the tool on the allocated port', () => {
+    const tool = browserMcpTool({ ...sandbox, sandboxId: 'sbx_alloc', sessionId: 'sess_alloc' }, credentials, '/b.js')
+    expect(JSON.stringify(tool)).toContain(String(browserPorts.portOf('sbx_alloc', 'sess_alloc')))
+    browserPorts.releaseSandbox('sbx_alloc')
   })
 })

@@ -83,6 +83,64 @@ export function browserCdpPort(sessionId: string): number {
   return 20_000 + (createHash('sha256').update(sessionId).digest().readUInt32BE(0) % 20_000)
 }
 
+const PORT_BASE = 20_000
+const PORT_SPAN = 20_000
+
+/**
+ * Hands out DevTools ports per sandbox so two live sessions on one sandbox never share one. A session's
+ * port starts at its hash-derived port and probes forward (wrapping inside 20000-39999) past ports other
+ * sessions on that sandbox hold. In memory only: lost on restart, when the browsers are gone too.
+ */
+export class BrowserPortAllocator {
+  private readonly held = new Map<string, Map<string, number>>()
+
+  constructor(private readonly derive: (sessionId: string) => number = browserCdpPort) {}
+
+  /** The session's port on this sandbox: its held one, else the first free one from its derived port. */
+  acquire(sandboxId: string, sessionId: string): number {
+    let sessions = this.held.get(sandboxId)
+    if (sessions === undefined) this.held.set(sandboxId, sessions = new Map())
+    const existing = sessions.get(sessionId)
+    if (existing !== undefined) return existing
+    const taken = new Set(sessions.values())
+    const start = this.derive(sessionId) - PORT_BASE
+    for (let i = 0; i < PORT_SPAN; i++) {
+      const port = PORT_BASE + (start + i) % PORT_SPAN
+      if (!taken.has(port)) {
+        sessions.set(sessionId, port)
+        return port
+      }
+    }
+    throw new Error(`no free browser DevTools port on sandbox ${sandboxId}`)
+  }
+
+  /** The held port, or the derived port when this session holds none (for example after a restart). */
+  portOf(sandboxId: string, sessionId: string): number {
+    return this.held.get(sandboxId)?.get(sessionId) ?? this.derive(sessionId)
+  }
+
+  /** Frees one session's port on one sandbox. */
+  release(sandboxId: string, sessionId: string): void {
+    const sessions = this.held.get(sandboxId)
+    if (sessions === undefined) return
+    sessions.delete(sessionId)
+    if (sessions.size === 0) this.held.delete(sandboxId)
+  }
+
+  /** Frees a session's ports on every sandbox. */
+  releaseSession(sessionId: string): void {
+    for (const sandboxId of [...this.held.keys()]) this.release(sandboxId, sessionId)
+  }
+
+  /** Frees every port of a sandbox (stopped, reset or deleted: its browsers are gone). */
+  releaseSandbox(sandboxId: string): void {
+    this.held.delete(sandboxId)
+  }
+}
+
+/** The process-wide allocator used by the mounted tool and the live view. */
+export const browserPorts = new BrowserPortAllocator()
+
 /** Writes the Playwright MCP config (launch arguments) to a file, then starts playwright-mcp with it. */
 const START_WITH_CONFIG = 'printf "%s" "$AGENTRY_MCP_CONFIG" > "$AGENTRY_MCP_CONFIG_PATH" && exec playwright-mcp --config "$AGENTRY_MCP_CONFIG_PATH" "$@"'
 
@@ -94,7 +152,7 @@ const START_WITH_CONFIG = 'printf "%s" "$AGENTRY_MCP_CONFIG" > "$AGENTRY_MCP_CON
  */
 export function browserMcpTool(sandbox: BrowserSandbox, credentials: { url: string; key: string }, bridgePath = DEFAULT_BRIDGE_PATH): OAIMcpTool {
   // Chromium also listens for DevTools on the sandbox's loopback, so the live view can screencast it.
-  const port = browserCdpPort(sandbox.sessionId)
+  const port = browserPorts.acquire(sandbox.sandboxId, sandbox.sessionId)
   const command = ['/bin/sh', '-c', START_WITH_CONFIG, 'sh', '--browser', 'chromium', '--isolated', '--headless', '--output-dir', `${sandbox.workspace.replace(/\/+$/, '')}/.browser`]
   const mcpConfig = { browser: { launchOptions: { args: [`--remote-debugging-port=${String(port)}`] } } }
   return {

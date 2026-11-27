@@ -1,6 +1,10 @@
 /** The sandbox changes recorder against a fake envd exec. */
 import { describe, expect, it, vi } from 'vitest'
-import { SandboxChanges, shadowDir, type SandboxTarget } from '../src/history/sandbox-changes.ts'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { SandboxChanges, shadowDir, snapshotScript, type SandboxTarget } from '../src/history/sandbox-changes.ts'
 
 const T1 = 'a'.repeat(40)
 const T2 = 'b'.repeat(40)
@@ -74,5 +78,27 @@ describe('SandboxChanges', () => {
     expect(await rec.diff('s', 'turn_1', 0, new AbortController().signal)).toMatchObject({ kind: 'oversized' })
     exec.mockResolvedValueOnce({ code: 128, stdout: '', stderr: 'bad object' })
     expect(await rec.diff('s', 'turn_1', 0, new AbortController().signal)).toBeUndefined()
+  })
+})
+
+describe('snapshotScript with a real git', () => {
+  it('leaves the .browser folder out of the snapshot but keeps normal files', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chg-ws-'))
+    const sessionId = `sess_excl_${String(process.pid)}`
+    try {
+      writeFileSync(join(dir, 'report.md'), 'x\n')
+      mkdirSync(join(dir, '.browser'))
+      writeFileSync(join(dir, '.browser', 'x.md'), 'snapshot\n')
+      const run = (): string => execFileSync('bash', ['-c', snapshotScript(sessionId, dir)], { encoding: 'utf8' }).trim()
+      const tree = run()
+      const files = execFileSync('bash', ['-c', `export GIT_DIR='${shadowDir(sessionId)}'; git ls-tree -r --name-only ${tree}`], { encoding: 'utf8' }).trim().split('\n')
+      expect(files).toEqual(['report.md'])
+      // A shadow repository from before the exclusion gets it on the next snapshot.
+      writeFileSync(join(shadowDir(sessionId), 'info', 'exclude'), 'node_modules/\n')
+      expect(run()).toBe(tree)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(shadowDir(sessionId), { recursive: true, force: true })
+    }
   })
 })

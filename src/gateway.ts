@@ -67,7 +67,7 @@ import { mountComposioAppTools } from './mount-composio-app-tools.ts'
 import { mountScheduleGuidance } from './mount-schedule-guidance.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
-import { BRIDGE_HOST_CWD, browserCdpPort, BROWSER_PROBE_COMMAND, browserMcpTool, browserMode, normalizeBrowserDefault, type BrowserMode, mountBrowserGuidance, validateBrowserField, type BrowserSandbox } from './mount-browser.ts'
+import { BRIDGE_HOST_CWD, browserPorts, BROWSER_PROBE_COMMAND, browserMcpTool, browserMode, normalizeBrowserDefault, type BrowserMode, mountBrowserGuidance, validateBrowserField, type BrowserSandbox } from './mount-browser.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
 import { slashCommandItem } from './items.ts'
@@ -1460,6 +1460,7 @@ export class AgentsGateway {
       await setup.settled
     }
     this.setupFailures.delete(sessionId)
+    browserPorts.releaseSession(sessionId)
     this.sandboxChanges.forget(sessionId)
     this.approvals.cancelAll(sessionId)
     this.pendingBySession.get(sessionId)?.rejectAll(new Error(`Session "${sessionId}" was deleted`))
@@ -2659,6 +2660,7 @@ export class AgentsGateway {
     if (action !== 'start') {
       this.terminals.closeEnvironment(record.id)
       this.browserLive.closeEnvironment(record.id)
+      browserPorts.releaseSandbox(sandboxId)
     }
     this.browserProbes.delete(sandboxId)
     if (action === 'reset') forgetWorkspaceAlias(sandboxId)
@@ -2755,7 +2757,7 @@ export class AgentsGateway {
     let detach: (() => void) | undefined
     if (sandbox !== undefined && sandboxId !== undefined && browserMode(configOf(row).agent, this.browserDefault) !== 'off') {
       const envd = sandbox.provider.api(owner).envd(sandboxId)
-      const port = browserCdpPort(sessionId)
+      const port = browserPorts.portOf(sandboxId, sessionId)
       try {
         writeSSEHeaders(res)
         detach = this.browserLive.attach(
@@ -2909,6 +2911,7 @@ export class AgentsGateway {
   private async destroyEnvironment(record: EnvironmentRecord): Promise<void> {
     this.terminals.closeEnvironment(record.id)
     this.browserLive.closeEnvironment(record.id)
+    browserPorts.releaseSandbox(record.provider_metadata['sandbox_id'] ?? '')
     forgetWorkspaceAlias(record.provider_metadata['sandbox_id'] ?? '')
     this.browserProbes.delete(record.provider_metadata['sandbox_id'] ?? '')
     const provider = this.sandboxes.get(record.provider)
