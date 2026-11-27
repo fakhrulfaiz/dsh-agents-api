@@ -50,7 +50,9 @@ import { sweepStaged, type InstallDeps } from './skills/install.ts'
 import { SkillInstallApi } from './skills/routes.ts'
 import { builtinTemplate, BUILTIN_TEMPLATES, isBuiltinTemplateId } from './environment/builtin-templates.ts'
 import { TerminalError, TerminalHub } from './sandbox/terminals.ts'
-import { BrowserLiveError, BrowserLiveHub, startRelay, type LiveEvent, type RelayProcess } from './sandbox/browser-live.ts'
+import { BrowserLiveError, BrowserLiveHub, recordingsDirOf, startRelay, type LiveEvent, type RelayProcess } from './sandbox/browser-live.ts'
+import { BrowserRecorder } from './sandbox/browser-recording.ts'
+import { mountBrowserRecordingTools } from './mount-browser-recording.ts'
 import { parseInputEvents } from './sandbox/browser-input.ts'
 import { browserLookNote, browserToolGate, type BrowserGateDecision } from './sandbox/browser-control.ts'
 import { forgetWorkspaceAlias, workspaceOf } from './sandbox/workspace-alias.ts'
@@ -187,7 +189,7 @@ export interface GatewayOptions {
   /** Most frames a second the live browser view sends (`browser.liveFps`, default 10, at most 15). */
   browserLiveFps?: number
   /** Starts the live-view relay in a sandbox (tests); default `startRelay`. */
-  startBrowserRelay?: (envd: EnvdClient, port: number, intervalMs: number) => RelayProcess
+  startBrowserRelay?: (envd: EnvdClient, port: number, intervalMs: number, recordingsDir?: string) => RelayProcess
   /** GitHub endpoints for skill imports (tests point it at a fake). */
   skillsGithub?: GithubDeps
   /** Host skill discovery sources hidden from the catalog (developer folders). */
@@ -304,7 +306,9 @@ export class AgentsGateway {
   /** Deliverables per session, reused until the session changes. */
   private readonly terminals = new TerminalHub()
   private readonly browserLive: BrowserLiveHub
-  private readonly startBrowserRelay: (envd: EnvdClient, port: number, intervalMs: number) => RelayProcess
+  private readonly startBrowserRelay: (envd: EnvdClient, port: number, intervalMs: number, recordingsDir?: string) => RelayProcess
+  /** Browser recordings (`browser_recording_*` tools), stopped at turn end. */
+  readonly browserRecorder: BrowserRecorder
   private readonly deliverablesCache = new DeliverablesCache<DeliverableEntry>(500)
   private readonly skillsGithub: GithubDeps | undefined
   private readonly composio: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
@@ -375,6 +379,7 @@ export class AgentsGateway {
     })
     this.browserBridgePath = options.browserBridgePath
     this.browserLive = new BrowserLiveHub({ minIntervalMs: Math.round(1000 / Math.min(15, Math.max(1, options.browserLiveFps ?? 10))) })
+    this.browserRecorder = new BrowserRecorder(this.browserLive, { log: (message) => { this.ctx.logger.info(message) } })
     this.startBrowserRelay = options.startBrowserRelay ?? startRelay
     this.skillInstallApi = new SkillInstallApi(this.installDeps(), options.skillsGithub)
     const skillsApi = new SkillsApi({
@@ -1460,6 +1465,7 @@ export class AgentsGateway {
     }
     this.setupFailures.delete(sessionId)
     browserPorts.releaseSession(sessionId)
+    this.browserRecorder.forget(sessionId)
     this.sandboxChanges.forget(sessionId)
     this.approvals.cancelAll(sessionId)
     this.pendingBySession.get(sessionId)?.rejectAll(new Error(`Session "${sessionId}" was deleted`))
@@ -1788,7 +1794,12 @@ export class AgentsGateway {
   applySessionEvent(sessionId: string, event: SessionEvent): void {
     if ((event.type as string) === 'agent-preset/selected') this.commandsApi.invalidate()
     if (event.type === 'turn/start') this.sandboxChanges.start(sessionId, `turn_${String(event.seq)}`)
-    else if (event.type === 'turn/end') this.sandboxChanges.end(sessionId)
+    else if (event.type === 'turn/end') {
+      // A recording still running stops with the turn; the end snapshot waits for its file.
+      const recording = this.browserRecorder.turnEnded(sessionId)
+      if (recording !== undefined) this.sandboxChanges.hold(sessionId, recording)
+      this.sandboxChanges.end(sessionId)
+    }
     const step = this.sessionRegistry.apply(sessionId, event)
     if (step?.status) this.recordStatus(sessionId, step.status.status, step.status.error)
     // The turn's end cleared the shown actions; a subagent's requests outlive it.
@@ -1903,7 +1914,7 @@ export class AgentsGateway {
     const lease = await this.sandboxPresets.acquire(owner, sandboxId, workspace)
     ;(agentCtx as { effect?: (fn: () => () => void) => void }).effect?.(() => () => { void lease[Symbol.asyncDispose]() })
     await mountDefaultPreset(agentCtx, lease.presetId)
-    return { owner, sandboxId, workspace, provider: record.provider }
+    return { owner, sandboxId, workspace, provider: record.provider, environmentId: record.id }
   }
 
   /** Whether the sandbox has the browser, checked once and cached; a failed check counts as no and is not cached. */
@@ -1943,10 +1954,26 @@ export class AgentsGateway {
     mountBrowserGuidance(agentCtx, 'sandbox')
     try {
       await mountMcpTools(agentCtx, [browserMcpTool(sandbox, credentials, this.browserBridgePath)], BRIDGE_HOST_CWD)
+      this.mountBrowserRecording(agentCtx, sandbox)
     } catch (error: unknown) {
       // `required: false` already tolerates a server that fails to start; this covers the client itself.
       this.ctx.logger.warn(`agents-api: the web browser did not start for sandbox ${sandbox.sandboxId}: ${errorMessage(error)}`)
     }
+  }
+
+  /** The recording tools for a sandbox chat that just got its browser tools. */
+  private mountBrowserRecording(agentCtx: Context, sandbox: BrowserSandbox): void {
+    const provider = this.sandboxes.get(sandbox.provider ?? '') as Partial<AgentrySandboxProvider> | undefined
+    if (typeof provider?.api !== 'function' || sandbox.environmentId === undefined) return
+    const api = provider.api.bind(provider)
+    const { owner, sandboxId, sessionId, workspace } = sandbox
+    mountBrowserRecordingTools(agentCtx, this.browserRecorder, {
+      owner,
+      sessionId,
+      environmentId: sandbox.environmentId,
+      workspace,
+      start: () => this.startBrowserRelay(api(owner as OwnerId).envd(sandboxId), browserPorts.portOf(sandboxId, sessionId), this.browserLive.intervalMs, recordingsDirOf(workspace)),
+    })
   }
 
   /**
@@ -2739,7 +2766,7 @@ export class AgentsGateway {
         writeSSEHeaders(res)
         detach = this.browserLive.attach(
           { owner, sessionId, environmentId: sandbox.record.id },
-          () => this.startBrowserRelay(envd, port, this.browserLive.intervalMs),
+          () => this.startBrowserRelay(envd, port, this.browserLive.intervalMs, sandbox.record.provider_metadata['workspace_directory'] === undefined ? undefined : recordingsDirOf(sandbox.record.provider_metadata['workspace_directory'])),
           send,
         )
       } catch (error) {

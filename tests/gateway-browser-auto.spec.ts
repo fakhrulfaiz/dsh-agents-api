@@ -7,6 +7,7 @@ import { setSandboxCredentials } from '../src/sandbox/presets.ts'
 import { SandboxRegistry } from '../src/sandbox/registry.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
 import { BROWSER_ABSENT_NOTICE, BROWSER_GUIDANCE, BROWSER_LOCAL_NOTICE } from '../src/mount-browser.ts'
+import { BROWSER_RECORDING_GUIDANCE, BROWSER_RECORDING_START, BROWSER_RECORDING_STOP } from '../src/mount-browser-recording.ts'
 import type { OAIAgent } from '../src/types.ts'
 import { openAuthenticator } from './open-auth.ts'
 import { FakeSessionQuery, testGatewayOptions } from './support/fake-session-query.ts'
@@ -35,27 +36,53 @@ function setup(has: boolean | Error, browserDefault?: 'auto' | 'on' | 'off') {
   const api = new AgentsGateway(ctx, openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), options)
   const sections: { text: (c: { scope?: unknown }) => string }[] = []
   const hasTools = hasToolsRef
+  const registered: string[] = []
   const agentCtx = {
     get: (name: string) => name === 'systemPrompt' ? {} : undefined,
     systemPrompt: { section: (s: (typeof sections)[number]) => { sections.push(s) }, getSectionOrder: () => 1 },
-    tools: { get: () => hasTools.value ? {} : undefined },
+    tools: {
+      get: (name: string) => (name.startsWith('browser_recording_') ? registered.includes(name) && hasTools.value : hasTools.value) ? {} : undefined,
+      register: (def: { name: string }) => { registered.push(def.name) },
+    },
   } as unknown as Context
   const mount = async (browser: boolean | null | undefined, sandbox = true) => {
     sections.length = 0
     const agent = { id: 'a', ...(browser === undefined ? {} : { browser }) } as unknown as OAIAgent
-    await (api as unknown as { mountBrowser: (...a: unknown[]) => Promise<void> }).mountBrowser(agentCtx, agent, sandbox ? { owner: 'o', sandboxId: 'sbx_1', workspace: '/workspace', sessionId: 's', provider: 'sandbox' } : undefined)
+    await (api as unknown as { mountBrowser: (...a: unknown[]) => Promise<void> }).mountBrowser(agentCtx, agent, sandbox ? { owner: 'o', sandboxId: 'sbx_1', workspace: '/workspace', sessionId: 's', provider: 'sandbox', environmentId: 'env_1' } : undefined)
     return sections[0]?.text({})
   }
-  return { api, mount, sandboxHasBrowser }
+  return { api, mount, sandboxHasBrowser, registered }
 }
 
 describe('browser auto mode', () => {
-  it('mounts the browser when the sandbox has it', async () => {
-    const { mount, sandboxHasBrowser } = setup(true)
+  it('mounts the browser and the recording tools when the sandbox has it', async () => {
+    const { mount, sandboxHasBrowser, registered } = setup(true)
     hasToolsOn()
-    expect(await mount(null)).toBe(BROWSER_GUIDANCE)
+    expect(await mount(null)).toBe(`${BROWSER_GUIDANCE}\n${BROWSER_RECORDING_GUIDANCE}`)
     expect(mounted.calls).toHaveLength(1)
+    expect(registered).toEqual([BROWSER_RECORDING_START, BROWSER_RECORDING_STOP])
     expect(sandboxHasBrowser).toHaveBeenCalledTimes(1)
+  })
+
+  it('registers no recording tools where the browser is not mounted', async () => {
+    const absent = setup(false)
+    await absent.mount(null)
+    expect(absent.registered).toEqual([])
+    const off = setup(true)
+    await off.mount(false)
+    expect(off.registered).toEqual([])
+    const local = setup(true)
+    await local.mount(true, false)
+    expect(local.registered).toEqual([])
+  })
+
+  it('registers no recording tools when the browser MCP failed to mount', async () => {
+    const { mount, registered } = setup(true)
+    const failing = vi.spyOn(await import('../src/mount-mcp-tools.ts'), 'mountMcpTools')
+    failing.mockRejectedValueOnce(new Error('no client'))
+    await mount(true)
+    expect(registered).toEqual([])
+    failing.mockRestore()
   })
 
   it('adds the notice and no tools when the sandbox has none', async () => {
@@ -110,5 +137,16 @@ describe('browser auto mode', () => {
     const on = setup(false, 'on')
     await on.mount(null)
     expect(mounted.calls).toHaveLength(1)
+  })
+})
+
+describe('browser recording at turn end', () => {
+  it('stops a running recording when the turn ends', () => {
+    const { api } = setup(true)
+    const turnEnded = vi.spyOn(api.browserRecorder, 'turnEnded').mockReturnValue(Promise.resolve())
+    api.applySessionEvent('s', { type: 'turn/end', seq: 2 } as never)
+    expect(turnEnded).toHaveBeenCalledWith('s')
+    api.applySessionEvent('s', { type: 'turn/start', seq: 3 } as never)
+    expect(turnEnded).toHaveBeenCalledTimes(1)
   })
 })

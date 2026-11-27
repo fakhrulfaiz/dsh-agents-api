@@ -15,6 +15,7 @@ Package-local reference and change notes for `@agentry/api`.
 | Note | Summary |
 | --- | --- |
 | [2026-11-27-projects.md](changes/2026-11-27-projects.md) | Owner-scoped Project CRUD, archive/unarchive, and the 409 `project_has_sessions` delete guard |
+| [2026-11-27-browser-recording.md](changes/2026-11-27-browser-recording.md) | Browser recording tools: `browser_recording_start`/`stop`, VP8 WebM from the relay's frames through the image's ffmpeg, cursor sidecar, auto-stop at turn end and limits |
 | [2026-11-27-browser-takeover.md](changes/2026-11-27-browser-takeover.md) | Browser take-over: `/sessions/{id}/browser/control` and `/browser/input`, input through the relay, agent's browser tools wait during control, 10 fps default |
 | [2026-11-27-browser-live.md](changes/2026-11-27-browser-live.md) | Live browser view: `/sessions/{id}/browser/live` SSE frames from a CDP screencast relay inside the sandbox, idle reasons |
 | [2026-11-26-browser.md](changes/2026-11-26-browser.md) | Web browser for agents: `browser` agent field, Playwright MCP inside the sandbox through the envd stdio bridge, no host browser |

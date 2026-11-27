@@ -134,6 +134,12 @@ export class SandboxChanges {
     })
   }
 
+  /** Queues a wait for `work` (a file still being written, such as a browser recording) before the next snapshot. */
+  hold(sessionId: string, work: Promise<unknown>): void {
+    if (!this.sessions.has(sessionId)) return
+    void this.enqueue(sessionId, async () => { await work.catch(() => {}) })
+  }
+
   /** The open turn ended: take the end snapshot and keep the summary when anything changed. */
   end(sessionId: string): void {
     const state = this.sessions.get(sessionId)

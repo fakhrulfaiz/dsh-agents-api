@@ -34,6 +34,23 @@ export type LiveControl = { kind: 'control'; controlled: true; since: number } |
 export type LivePointer = { kind: 'pointer'; action: 'move' | 'down' | 'up'; x: number; y: number; ts: number }
 /** The field the page just focused (viewport CSS px). Never stored. */
 export type LiveFocus = { kind: 'focus'; x: number; y: number; width: number; height: number; ts: number }
+/**
+ * A recording's progress, from the relay (`browser-live-relay.ts`); never sent to live-view readers, only to the
+ * recording listener (`BrowserLiveHub.attachRecorder`). `relay_ended` is added by the hub when the relay exits.
+ */
+export type LiveRecord = {
+  kind: 'record'
+  state: 'started' | 'stopped' | 'error'
+  path?: string
+  cursorPath?: string
+  reason?: string
+  code?: string
+  message?: string
+  durationMs?: number
+  bytes?: number
+  frames?: number
+  empty?: boolean
+}
 /** `closed`: the view ended (its environment stopped); the reader should end its stream. */
 export type LiveEvent = LiveFrame | LiveIdle | LiveControl | LivePointer | LiveFocus | { kind: 'closed' }
 
@@ -76,6 +93,8 @@ interface View extends LiveKey {
   windowStart: number
   windowEvents: number
   readers: Set<(event: LiveEvent) => void>
+  /** Listeners of recording lines (the recorder's hold on this view). */
+  recordListeners: Set<(event: LiveRecord) => void>
   start: () => RelayProcess
   relay: RelayProcess | undefined
   last: LiveFrame | LiveIdle | undefined
@@ -113,18 +132,39 @@ export interface ControlGrant {
 const MAX_RESTART_MS = 30_000
 const NOT_STARTED: LiveIdle = { kind: 'idle', reason: 'not_started' }
 
-/** One frame every `ms`, as the relay's environment. */
-export function relayEnv(port: number, intervalMs: number): Record<string, string> {
-  return { [RELAY_ENV.port]: String(port), [RELAY_ENV.intervalMs]: String(intervalMs), [RELAY_ENV.quality]: '60', [RELAY_ENV.maxWidth]: '1280', [RELAY_ENV.maxHeight]: '960' }
+/** One frame every `ms`, as the relay's environment; recordings go in `recordingsDir` (absent: refused). */
+export function relayEnv(port: number, intervalMs: number, recordingsDir?: string): Record<string, string> {
+  return {
+    [RELAY_ENV.port]: String(port), [RELAY_ENV.intervalMs]: String(intervalMs), [RELAY_ENV.quality]: '60', [RELAY_ENV.maxWidth]: '1280', [RELAY_ENV.maxHeight]: '960',
+    ...(recordingsDir !== undefined && recordingsDir !== '' ? { [RELAY_ENV.recordingsDir]: recordingsDir } : {}),
+  }
+}
+
+/** The recordings folder of a sandbox workspace (inside the sandbox). */
+export function recordingsDirOf(workspace: string): string {
+  return `${workspace.replace(/\/+$/, '')}/recordings`
 }
 
 /** Starts the relay as `agent` in the sandbox behind `envd`, watching the browser on `port`. */
-export function startRelay(envd: EnvdClient, port: number, intervalMs: number): RelayProcess {
-  return new EnvdProcessStream(envd, { cmd: 'node', args: ['-e', BROWSER_LIVE_RELAY_SCRIPT], user: 'agent', env: relayEnv(port, intervalMs) })
+export function startRelay(envd: EnvdClient, port: number, intervalMs: number, recordingsDir?: string): RelayProcess {
+  return new EnvdProcessStream(envd, { cmd: 'node', args: ['-e', BROWSER_LIVE_RELAY_SCRIPT], user: 'agent', env: relayEnv(port, intervalMs, recordingsDir) })
 }
 
-/** Parses one relay line; undefined for anything that is not a frame, idle, pointer or focus line. */
-export function parseRelayLine(line: string): LiveFrame | LiveIdle | LivePointer | LiveFocus | undefined {
+/** Parses a relay `record` line. */
+function parseRecordLine(m: Record<string, unknown>): LiveRecord | undefined {
+  const state = m['state']
+  if (state !== 'started' && state !== 'stopped' && state !== 'error') return undefined
+  const text = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
+  const count = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined)
+  const out: LiveRecord = { kind: 'record', state }
+  const fields = { path: text(m['path']), cursorPath: text(m['cursorPath']), reason: text(m['reason']), code: text(m['code']), message: text(m['message']), durationMs: count(m['durationMs']), bytes: count(m['bytes']), frames: count(m['frames']) }
+  for (const [key, value] of Object.entries(fields)) if (value !== undefined) (out as Record<string, unknown>)[key] = value
+  if (m['empty'] === true) out.empty = true
+  return out
+}
+
+/** Parses one relay line; undefined for anything that is not a frame, idle, pointer, focus or record line. */
+export function parseRelayLine(line: string): LiveFrame | LiveIdle | LivePointer | LiveFocus | LiveRecord | undefined {
   let msg: unknown
   try {
     msg = JSON.parse(line)
@@ -133,6 +173,7 @@ export function parseRelayLine(line: string): LiveFrame | LiveIdle | LivePointer
   }
   if (msg === null || typeof msg !== 'object') return undefined
   const m = msg as Record<string, unknown>
+  if (m['type'] === 'record') return parseRecordLine(m)
   const coord = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100_000 ? v : undefined)
   if (m['type'] === 'pointer') {
     const action = m['action']
@@ -206,7 +247,7 @@ export class BrowserLiveHub {
         throw new BrowserLiveError(`at most ${String(this.maxPerOwner)} live browser views can be open; close one first`, 429, 'too_many_live_views')
       }
       view = {
-        ...key, readers: new Set(), start, relay: undefined, last: undefined, lastSentAt: 0, pending: undefined,
+        ...key, readers: new Set(), recordListeners: new Set(), start, relay: undefined, last: undefined, lastSentAt: 0, pending: undefined,
         flushTimer: undefined, stopTimer: undefined, restartTimer: undefined, restartDelay: this.restartMs,
         control: undefined, leaveTimer: undefined, windowStart: 0, windowEvents: 0,
       }
@@ -271,6 +312,7 @@ export class BrowserLiveHub {
 
   private relayEnded(view: View): void {
     if (this.views.get(view.sessionId) !== view) return
+    for (const listener of [...view.recordListeners]) listener({ kind: 'record', state: 'stopped', reason: 'relay_ended' })
     this.receive(view, NOT_STARTED)
     if (view.readers.size === 0) return
     view.restartTimer = setTimeout(() => {
@@ -281,7 +323,11 @@ export class BrowserLiveHub {
     view.restartDelay = Math.min(MAX_RESTART_MS, view.restartDelay * 2)
   }
 
-  private receive(view: View, event: LiveFrame | LiveIdle | LivePointer | LiveFocus): void {
+  private receive(view: View, event: LiveFrame | LiveIdle | LivePointer | LiveFocus | LiveRecord): void {
+    if (event.kind === 'record') {
+      for (const listener of [...view.recordListeners]) listener(event)
+      return
+    }
     if (event.kind === 'pointer' || event.kind === 'focus') {
       this.emit(view, event)
       return
@@ -335,6 +381,30 @@ export class BrowserLiveHub {
       this.emit(view, { kind: 'closed' })
     }
     view.readers.clear()
+    view.recordListeners.clear()
+  }
+
+  /**
+   * A recording's hold on `key`'s view: a reader (so the relay keeps running with no viewer) plus a listener of
+   * the relay's `record` lines. Throws like `attach`.
+   * @returns the release function.
+   */
+  attachRecorder(key: LiveKey, start: () => RelayProcess, onEvent: (event: LiveEvent) => void, onRecord: (event: LiveRecord) => void): () => void {
+    const detach = this.attach(key, start, onEvent)
+    const view = this.views.get(key.sessionId)
+    view?.recordListeners.add(onRecord)
+    return () => {
+      view?.recordListeners.delete(onRecord)
+      detach()
+    }
+  }
+
+  /** Sends a `record` command to `sessionId`'s relay. @returns false when no relay runs. */
+  recordCommand(sessionId: string, command: Record<string, unknown>): boolean {
+    const relay = this.views.get(sessionId)?.relay
+    if (relay === undefined) return false
+    relay.write(`${JSON.stringify({ ...command, type: 'record' })}\n`)
+    return true
   }
 
   /**
