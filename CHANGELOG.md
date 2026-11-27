@@ -5,6 +5,8 @@ Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
 ## Unreleased
 
+## 0.3.0 — 2026-11-28
+
 - 2026-11-28: Fixed Composio being disconnected in every new chat since the Composio relay landed. The relay route was registered as `/internal/mcp-relay/` (trailing slash); DSH's web server matches a prefix `p` only for `p` and `p/<rest>`, so no relay URL ever matched, requests fell through to the web UI (405 on POST), and the agent's Composio MCP client gave up (`gmail_search_emails` answered `unknown tool "mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL"`). The route is now `RELAY_ROUTE_PATH` (`/internal/mcp-relay`). Found and checked in a live chat.
 - 2026-11-28: Artifact bytes (`GET /agents/sessions/{id}/artifacts/{path}`) carry `Content-Length`. Without it the web app could not answer byte ranges, so recorded videos played but could not seek. Found in a live check.
 - 2026-11-27: Fixed the browser live view showing a stale browser after an API restart. The restart left the old `playwright-mcp` and its Chromium running in the sandbox, holding the session's DevTools port; the new Chromium ran without it, so the live view (and the agent cursor) watched the old browser while the agent drove the new one. Starting a session's browser now stops whatever an earlier start left on the same config and port first (`START_WITH_CONFIG` in `src/mount-browser.ts`, new `AGENTRY_MCP_PORT` in the program environment). Found in a live check.
