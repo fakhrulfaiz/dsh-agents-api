@@ -477,6 +477,7 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents/environments/:environment_id/terminals/:terminal_id/resize', handler: (req, res, _url, params, p) => this.terminalCall(req, res, params, p.owner, 'resize') },
       { method: 'DELETE', pattern: '/agents/environments/:environment_id/terminals/:terminal_id', handler: (_req, res, _url, params, p) => this.terminalCall(undefined, res, params, p.owner, 'close') },
       { method: 'GET', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.getEnvironment(res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/environments/:environment_id', handler: (req, res, _url, params, p) => this.updateEnvironment(req, res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.deleteEnvironment(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/sessions', handler: (req, res, url, _params, p) => this.createSession(req, res, url, p.owner) },
       { method: 'GET', pattern: '/agents/sessions', handler: (_req, res, url, _params, p) => this.listSessions(res, url, p.owner) },
@@ -2573,6 +2574,28 @@ export class AgentsGateway {
   private async listEnvironments(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
     const page = await this.store.environments.list(owner, listQuery(url))
     json(res, 200, { ...page, data: await Promise.all(page.data.map(record => this.environmentJson(owner, record))) })
+  }
+
+  /** Rename an environment (`name`; empty clears it). Nothing else about an environment changes after it is made. */
+  private async updateEnvironment(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!record) {
+      notFound(res, 'environment not found')
+      return
+    }
+    const body = await readBody(req) as { name?: unknown }
+    if (typeof body.name !== 'string' || body.name.trim().length > 80) {
+      badRequest(res, 'Field "name" must be a string of at most 80 characters')
+      return
+    }
+    const name = body.name.trim()
+    const { name: _old, ...metadata } = record.provider_metadata
+    const next: EnvironmentRecord = {
+      ...record,
+      provider_metadata: { ...metadata, ...(name !== '' ? { name } : {}) },
+      updated_at: Math.floor(Date.now() / 1000),
+    }
+    json(res, 200, await this.environmentJson(owner, await this.store.environments.update(owner, record.id, next) ?? next))
   }
 
   /** Read the backend status and store it when it changed. */

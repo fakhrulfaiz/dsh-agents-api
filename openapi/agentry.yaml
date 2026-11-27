@@ -1809,6 +1809,40 @@ paths:
         "503":
           $ref: "#/components/responses/StoreUnavailable"
       description: Reports status `failed` when the workspace directory is gone.
+    post:
+      summary: Rename an environment
+      description: Extension. Sets the environment's `name`; an empty string clears it. Nothing else changes.
+      tags:
+        - Environments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  maxLength: 80
+              required:
+                - name
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Environment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
     delete:
       summary: Delete an environment and its workspace
       tags:

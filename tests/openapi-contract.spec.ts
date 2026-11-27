@@ -123,6 +123,7 @@ describe('OpenAPI responses', () => {
     const env = await call('POST', '/v1/agents/environments', {}, {}, 201)
     await call('GET', '/v1/agents/environments', {}, undefined, 200)
     await call('GET', '/v1/agents/environments/{environment_id}', { environment_id: env.id }, undefined, 200)
+    await call('POST', '/v1/agents/environments/{environment_id}', { environment_id: env.id }, { name: 'Renamed' }, 200)
     // The earlier write body and the SDK's inline body both work and answer `agent.environment.file`.
     await call('POST', '/v1/agents/environments/{environment_id}/files', { environment_id: env.id }, { path: 'a/b.txt', content: 'hi' }, 201)
     await call('POST', '/v1/agents/environments/{environment_id}/files', { environment_id: env.id }, { type: 'inline', path: '/workspace/c.txt', data: Buffer.from('hey').toString('base64') }, 201)

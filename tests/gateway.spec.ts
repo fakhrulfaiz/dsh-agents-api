@@ -1287,6 +1287,12 @@ describe('sandbox environments through the gateway', () => {
       expect(local.name).toBe('Scratch')
       expect(local.sandbox).toBeUndefined()
       expect((await call('/agents/environments', { method: 'POST', body: JSON.stringify({ name: 'x'.repeat(81) }) })).status).toBe(400)
+      const renamed = (await (await call(`/agents/environments/${local.id}`, { method: 'POST', body: JSON.stringify({ name: ' Notes ' }) })).json()) as { name?: string }
+      expect(renamed.name).toBe('Notes')
+      expect(((await (await call(`/agents/environments/${local.id}`)).json()) as { name?: string }).name).toBe('Notes')
+      expect(((await (await call(`/agents/environments/${local.id}`, { method: 'POST', body: JSON.stringify({ name: '' }) })).json()) as { name?: string }).name).toBeUndefined()
+      expect((await call(`/agents/environments/${local.id}`, { method: 'POST', body: JSON.stringify({ name: 'x'.repeat(81) }) })).status).toBe(400)
+      expect((await call('/agents/environments/env_missing', { method: 'POST', body: JSON.stringify({ name: 'a' }) })).status).toBe(404)
       const refused = await call(`/agents/environments/${local.id}/start`, { method: 'POST' })
       expect(refused.status).toBe(409)
       expect(JSON.stringify(await refused.json())).not.toContain(svc.key)
