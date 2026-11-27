@@ -19,6 +19,7 @@ tags:
   - name: Environments
   - name: Sessions
   - name: Subagents
+  - name: Jobs
   - name: Schedules
   - name: Files
   - name: Projects
@@ -2458,7 +2459,7 @@ paths:
 
         Ids. Every event derived from the Session log carries an `id:`. Session status, turn, assistant message and slash-command events are numbered `1, 2, 3, ...` (`agent.session.created` is always 1). Item frames for the rest of the item log (user messages, reasoning, tool calls and outputs; `agent.session.turn.item.added` for a call, `agent.session.turn.item.done` otherwise) are numbered after the frame before them: `<n>.1`, `<n>.2`, ... (a reasoning item comes before the assistant message it belongs to). So the item frames never moved an existing id, and an integer `Last-Event-ID` saved before they existed still resumes at the same place. Compare ids as (`n`, `sub`) pairs, not as decimals (`12.10` follows `12.9`). The sequence is a pure function of the Session log, so ids and the payload `event_id` (`evt_<session_id>_<id>`) survive server restarts. A user message item's attachments carry their file ids, as in `GET .../items`.
 
-        Ephemeral frames have no `id:` line, are never replayed, and do not shift later ids: the status snapshot written when a stream connects, the `idle` event that closes a streamed create without input, `error` events for a failed input dispatch, and the `requires_action`/`in_progress` events raised by approvals, and the `agent.session.subagent.*` events (subagent created, turn opened or ended, item saved, closed; they are not in this session's log, so re-read `/subagents`, which is rebuilt from the child logs, on open and on reconnect).
+        Ephemeral frames have no `id:` line, are never replayed, and do not shift later ids: the status snapshot written when a stream connects, the `idle` event that closes a streamed create without input, `error` events for a failed input dispatch, and the `requires_action`/`in_progress` events raised by approvals, and the `agent.session.subagent.*` events (subagent created, turn opened or ended, item saved, closed; they are not in this session's log, so re-read `/subagents`, which is rebuilt from the child logs, on open and on reconnect), and the `agent.session.job.*` events (a background job started, changed, settled or left the list; re-read `/jobs` on open and on reconnect).
 
         Resume. Send `Last-Event-ID: <n>` or `<n>.<sub>` to receive every event after it, derived from the Session log, then live events without gaps or duplicates. A value that is not an id replays the whole history. A `Last-Event-ID` connection to a session with pending approvals additionally receives one ephemeral `agent.session.requires_action` snapshot. Without the header the stream starts with one status snapshot (`idle`, `in_progress`, `requires_action`, or `failed`).
   /v1/agents/sessions/{session_id}/items:
@@ -3084,6 +3085,121 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /v1/agents/sessions/{session_id}/jobs:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      summary: List background jobs
+      description: |
+        The session's own DSH background jobs (`ctx.jobs`): `run_in_background` shell commands, foreground
+        commands while they run, commands moved to the background by their timeout, and workflows. Oldest
+        first; each carries the newest 16 KiB of its output. Reading output never moves the agent's own
+        `job_output` cursor. Jobs live in memory: the list is empty after an API restart or once the
+        session's agent is disposed. A finished foreground command leaves the list. Subagents' jobs belong
+        to the subagent and are not listed.
+      tags:
+        - Jobs
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Job"
+                required:
+                  - object
+                  - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/jobs/{job_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/JobId"
+    get:
+      summary: Retrieve a background job
+      description: One job with the newest 64 KiB of its output.
+      tags:
+        - Jobs
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/jobs/{job_id}/kill:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/JobId"
+    post:
+      summary: Stop a background job
+      description: |
+        Requests cancellation; the job shows `stopping` until it settles `killed`. The reason (default
+        "stopped by the user") joins the job's terminal detail, and the agent is told the job ended, as for
+        any job it did not stop itself (an idle agent is woken by that notice). A finished job answers
+        `already_finished`.
+      tags:
+        - Jobs
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: Short reason, at most 200 characters kept.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  outcome:
+                    type: string
+                    enum:
+                      - cancellation_requested
+                      - already_finished
+                  job:
+                    $ref: "#/components/schemas/Job"
+                required:
+                  - outcome
+                  - job
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
   /v1/agents/sessions/{session_id}/subagents:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -3351,6 +3467,12 @@ components:
         type: string
     TurnId:
       name: turn_id
+      in: path
+      required: true
+      schema:
+        type: string
+    JobId:
+      name: job_id
       in: path
       required: true
       schema:
@@ -6034,6 +6156,109 @@ components:
         - type
         - event_id
         - error
+    Job:
+      type: object
+      description: A DSH background job owned by the session.
+      properties:
+        id:
+          type: string
+        object:
+          const: agent.session.job
+        session_id:
+          type: string
+        kind:
+          type: string
+          description: Producer kind, e.g. `bash` or `workflow`.
+        command:
+          type: string
+          description: The producer's label; the command line for shell jobs.
+        status:
+          type: string
+          enum:
+            - running
+            - stopping
+            - completed
+            - killed
+            - failed
+        detail:
+          type:
+            - string
+            - "null"
+          description: "Live progress line while running; terminal reason once settled (`exit code: 0`, `signal: SIGTERM; stopped by the user`)."
+        exit_code:
+          type:
+            - integer
+            - "null"
+          description: "Parsed from a completed job's `exit code: N` detail; null otherwise."
+        started_at:
+          type: integer
+        finished_at:
+          type:
+            - integer
+            - "null"
+        output:
+          $ref: "#/components/schemas/JobOutput"
+      required:
+        - id
+        - object
+        - session_id
+        - kind
+        - command
+        - status
+        - detail
+        - exit_code
+        - started_at
+        - finished_at
+    JobOutput:
+      type: object
+      description: The newest retained output (stdout, stderr and producer log chunks in arrival order), bounded per route. Absent on stream events.
+      properties:
+        text:
+          type: string
+        total_bytes:
+          type: integer
+          description: Bytes the job has written in all.
+        truncated:
+          type: boolean
+          description: Earlier output is not included (cut to the bound, or dropped by the registry's retention).
+      required:
+        - text
+        - total_bytes
+        - truncated
+    JobUpdatedEvent:
+      description: Ephemeral (no `id:`, never replayed). A job of this session started, changed progress, is stopping, or settled.
+      type: object
+      properties:
+        type:
+          const: agent.session.job.updated
+        event_id:
+          type: string
+        session_id:
+          type: string
+        job:
+          $ref: "#/components/schemas/Job"
+      required:
+        - type
+        - event_id
+        - session_id
+        - job
+    JobRemovedEvent:
+      description: Ephemeral (no `id:`, never replayed). A job left the list (a foreground command that finished in time).
+      type: object
+      properties:
+        type:
+          const: agent.session.job.removed
+        event_id:
+          type: string
+        session_id:
+          type: string
+        job_id:
+          type: string
+      required:
+        - type
+        - event_id
+        - session_id
+        - job_id
     SubagentCreatedEvent:
       description: Ephemeral (no `id:`, never replayed). A subagent of this session started.
       type: object
@@ -6158,6 +6383,8 @@ components:
         - $ref: "#/components/schemas/SubagentClosedEvent"
         - $ref: "#/components/schemas/SubagentItemAddedEvent"
         - $ref: "#/components/schemas/SubagentItemDoneEvent"
+        - $ref: "#/components/schemas/JobUpdatedEvent"
+        - $ref: "#/components/schemas/JobRemovedEvent"
       discriminator:
         propertyName: type
     ScheduleStatus:

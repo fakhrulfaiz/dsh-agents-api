@@ -14,6 +14,7 @@ Package-local reference and change notes for `@agentry/api`.
 
 | Note | Summary |
 | --- | --- |
+| [2026-11-27-session-jobs.md](changes/2026-11-27-session-jobs.md) | Session background jobs: `/sessions/{id}/jobs`, `/jobs/{job_id}`, `/jobs/{job_id}/kill`, ephemeral `agent.session.job.*` stream events |
 | [2026-11-27-projects.md](changes/2026-11-27-projects.md) | Owner-scoped Project CRUD, archive/unarchive, and the 409 `project_has_sessions` delete guard |
 | [2026-11-27-browser-takeover.md](changes/2026-11-27-browser-takeover.md) | Browser take-over: `/sessions/{id}/browser/control` and `/browser/input`, input through the relay, agent's browser tools wait during control, 10 fps default |
 | [2026-11-27-browser-live.md](changes/2026-11-27-browser-live.md) | Live browser view: `/sessions/{id}/browser/live` SSE frames from a CDP screencast relay inside the sandbox, idle reasons |

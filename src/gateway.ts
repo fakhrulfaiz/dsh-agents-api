@@ -92,6 +92,7 @@ import { artifactContentDisposition, artifactContentType, getS3Artifact, getWork
 import { ChangesApi } from './history/changes-api.ts'
 import { SandboxChanges, type SandboxTarget } from './history/sandbox-changes.ts'
 import type { WorkspaceChangesLike } from './history/turn-changes.ts'
+import { JobsApi, type JobRegistryLike } from './jobs.ts'
 import { renderOfficePdf, WorkspaceUnavailableError, type OfficeToPdfLike, type SessionFile } from './render/office-api.ts'
 import { directorySegment } from './environment/local.ts'
 import type { CreateEnvironmentInput } from './environment/provider.ts'
@@ -201,6 +202,8 @@ export interface GatewayOptions {
   officeToPdf?: () => OfficeToPdfLike | undefined
   /** DSH's workspace-changes service when the profile provides one, read at call time (absent: local chats list no changes). */
   workspaceChanges?: () => WorkspaceChangesLike | undefined
+  /** DSH's background job registry (`ctx.jobs`), read at call time. */
+  jobs?: () => JobRegistryLike | undefined
 }
 
 /** A session created by `provisionSession`: projector registered, agent live, index row written, no turn started. */
@@ -413,6 +416,10 @@ export class AgentsGateway {
       isSandbox: async (owner, sessionId) => await this.sandboxOfSession(owner, sessionId) !== undefined,
       sandbox: this.sandboxChanges,
     })
+    const jobsApi = new JobsApi({
+      requireSession: (res, owner, sessionId) => this.requireSession(res, owner, sessionId),
+      jobs: options.jobs ?? (() => undefined),
+    })
     this.officeRender = {
       officeToPdf: options.officeToPdf ?? (() => undefined),
       requireSession: (res, owner, sessionId) => this.requireSession(res, owner, sessionId),
@@ -499,6 +506,7 @@ export class AgentsGateway {
       { method: 'GET', pattern: '/agents/sessions/:session_id/events', handler: (req, res, _url, params, p) => this.streamEvents(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/items', handler: (_req, res, url, params, p) => this.listItems(res, url, params, p.owner) },
       ...changesApi.routes(),
+      ...jobsApi.routes(),
       { method: 'GET', pattern: '/agents/sessions/:session_id/turns/:turn_id', handler: (_req, res, _url, params, p) => this.getTurn(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/turns', handler: (_req, res, url, params, p) => this.listTurns(res, url, params, p.owner) },
       { method: 'POST', pattern: '/agents/sessions/:session_id', handler: (req, res, _url, params, p) => this.updateSession(req, res, params, p.owner) },
