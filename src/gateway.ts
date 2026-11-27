@@ -2998,10 +2998,10 @@ export class AgentsGateway {
       typeof provider?.describe === 'function' ? provider.describe(record) : undefined,
     ])
     const out = toSdkEnvironment(record, template)
-    // No sandbox yet: the background setup is still running (or the record is about to be settled).
-    if (record.provider === 'sandbox' && record.status === 'pending' && record.provider_metadata['sandbox_id'] === undefined) {
+    // No sandbox id: the background setup is still running (or the record is about to be settled), or the setup failed.
+    if (record.provider === 'sandbox' && record.provider_metadata['sandbox_id'] === undefined && (record.status === 'pending' || record.status === 'failed')) {
       const name = record.provider_metadata['name']
-      return { ...out, ...(name !== undefined ? { name } : {}), sandbox: { state: 'provisioning' } }
+      return { ...out, ...(name !== undefined ? { name } : {}), sandbox: { state: record.status === 'pending' ? 'provisioning' : 'failed' } }
     }
     const name = record.provider_metadata['name']
     return { ...out, ...(name !== undefined ? { name } : {}), ...(sandbox !== undefined ? { sandbox } : {}) }
