@@ -2,8 +2,9 @@
  * HTTP dispatcher for the OpenAI Agents API.
  *
  * Route order is load-bearing: `/agents/sessions`, `/agents/tools`, `/agents/skills`,
- * `/agents/commands`, `/agents/schedules`, and `/agents/files` are matched before
- * `/agents/:agent_id` so those literal segments are never captured as an agent id.
+ * `/agents/commands`, `/agents/schedules`, `/agents/files`, and `/agents/projects`
+ * are matched before `/agents/:agent_id` so those literal segments are never
+ * captured as an agent id.
  */
 
 import { mkdir, readFile, stat } from 'node:fs/promises'
@@ -119,6 +120,7 @@ import type {
   OAIHostToolsConfig,
   OAIInputEvent,
   OAIOpenAIHostedEnvironment,
+  OAIProject,
   OAIRequiredAction,
   OAISessionEvent,
   OAIToolResultInputEvent,
@@ -446,6 +448,13 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents', handler: (req, res, _url, _params, p) => this.createAgent(req, res, p.owner) },
       { method: 'GET', pattern: '/agents', handler: (_req, res, url, _params, p) => this.listAgents(res, url, p.owner) },
       { method: 'GET', pattern: '/agents/tools', handler: (_req, res, url, _params, p) => this.listHostTools(res, url, p.owner) },
+      { method: 'POST', pattern: '/agents/projects', handler: (req, res, _url, _params, p) => this.createProject(req, res, p.owner) },
+      { method: 'GET', pattern: '/agents/projects', handler: (_req, res, url, _params, p) => this.listProjects(res, url, p.owner) },
+      { method: 'POST', pattern: '/agents/projects/:project_id/archive', handler: (_req, res, _url, params, p) => this.setProjectStatus(res, params, p.owner, true) },
+      { method: 'POST', pattern: '/agents/projects/:project_id/unarchive', handler: (_req, res, _url, params, p) => this.setProjectStatus(res, params, p.owner, false) },
+      { method: 'GET', pattern: '/agents/projects/:project_id', handler: (_req, res, _url, params, p) => this.getProject(res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/projects/:project_id', handler: (req, res, _url, params, p) => this.updateProject(req, res, params, p.owner) },
+      { method: 'DELETE', pattern: '/agents/projects/:project_id', handler: (_req, res, _url, params, p) => this.deleteProject(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/environments/templates', handler: (req, res, _url, _params, p) => this.createTemplate(req, res, p.owner) },
       { method: 'GET', pattern: '/agents/environments/templates', handler: (_req, res, url, _params, p) => this.listTemplates(res, url, p.owner) },
       { method: 'GET', pattern: '/agents/environments/templates/:template_id', handler: (_req, res, _url, params, p) => this.getTemplate(res, params, p.owner) },
@@ -665,6 +674,97 @@ export class AgentsGateway {
       data = maskHostCatalog(data, configOf(row).agent.host_tools)
     }
     json(res, 200, { object: 'list', data })
+  }
+
+  /** A project of this owner, or a 404 response when it is missing or foreign. */
+  private async projectFor(res: ServerResponse, owner: OwnerId, params: Record<string, string>): Promise<OAIProject | undefined> {
+    const id = routeParam(params, 'project_id')
+    const project = await this.store.projects.get(owner, id)
+    if (project === undefined) notFound(res, `Project "${id}" not found`)
+    return project
+  }
+
+  private async createProject(req: IncomingMessage, res: ServerResponse, owner: OwnerId): Promise<void> {
+    const parsed = parseProjectInput(await readBody(req), false)
+    if ('error' in parsed) {
+      badRequest(res, parsed.error)
+      return
+    }
+    const now = Math.floor(Date.now() / 1000)
+    const project: OAIProject = {
+      id: `proj_${randomUUID().replaceAll('-', '')}`,
+      object: 'project',
+      name: parsed.value.name!,
+      status: 'active',
+      pinned: parsed.value.pinned ?? false,
+      agent_id: parsed.value.agent_id ?? null,
+      environment: parsed.value.environment ?? null,
+      archived_at: null,
+      created_at: now,
+      updated_at: now,
+    }
+    json(res, 201, await this.store.projects.create(owner, project))
+  }
+
+  private async listProjects(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
+    const status = url.searchParams.get('status')
+    json(res, 200, await this.store.projects.list({
+      owner,
+      ...listQuery(url),
+      ...(status === 'active' || status === 'archived' || status === 'all' ? { status } : {}),
+    }))
+  }
+
+  private async getProject(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const project = await this.projectFor(res, owner, params)
+    if (project !== undefined) json(res, 200, project)
+  }
+
+  private async updateProject(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const project = await this.projectFor(res, owner, params)
+    if (project === undefined) return
+    const parsed = parseProjectInput(await readBody(req), true)
+    if ('error' in parsed) {
+      badRequest(res, parsed.error)
+      return
+    }
+    const updated = await this.store.projects.update(owner, project.id, {
+      ...project,
+      ...parsed.value,
+      updated_at: Math.floor(Date.now() / 1000),
+    })
+    if (updated === undefined) notFound(res, `Project "${project.id}" not found`)
+    else json(res, 200, updated)
+  }
+
+  private async setProjectStatus(res: ServerResponse, params: Record<string, string>, owner: OwnerId, archive: boolean): Promise<void> {
+    const project = await this.projectFor(res, owner, params)
+    if (project === undefined) return
+    const now = Math.floor(Date.now() / 1000)
+    const updated = await this.store.projects.update(owner, project.id, {
+      ...project,
+      status: archive ? 'archived' : 'active',
+      archived_at: archive ? now : null,
+      updated_at: now,
+    })
+    if (updated === undefined) notFound(res, `Project "${project.id}" not found`)
+    else json(res, 200, updated)
+  }
+
+  private async deleteProject(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const project = await this.projectFor(res, owner, params)
+    if (project === undefined) return
+    const sessions = await this.store.projects.countSessions(owner, project.id)
+    if (sessions > 0) {
+      writeRequestError(res, new AgentsApiRequestError(
+        `Project "${project.id}" still has ${String(sessions)} session(s); archive it instead or move its chats out first`,
+        409,
+        'project_has_sessions',
+      ))
+      return
+    }
+    await this.store.projects.delete(owner, project.id)
+    json(res, 200, { id: project.id, object: 'project.deleted', deleted: true })
   }
 
   /**
@@ -3201,6 +3301,36 @@ export class AgentsGateway {
       })
     })
   }
+}
+
+/** Project fields a caller may set. Omitted fields keep their stored value. */
+type ProjectInput = Partial<Pick<OAIProject, 'name' | 'agent_id' | 'environment' | 'pinned'>>
+
+/**
+ * Validate a project create or update body.
+ * @param raw - parsed JSON body.
+ * @param partial - update: omitted fields are left alone; create: `name` is required.
+ * @returns the accepted fields, or a client-facing error message.
+ */
+function parseProjectInput(raw: Record<string, unknown>, partial: boolean): { value: ProjectInput } | { error: string } {
+  const value: ProjectInput = {}
+  if (!partial || raw.name !== undefined) {
+    if (typeof raw.name !== 'string' || raw.name.trim() === '') return { error: 'Field "name" must be a non-empty string' }
+    value.name = raw.name.trim()
+  }
+  if (raw.agent_id !== undefined) {
+    if (raw.agent_id !== null && typeof raw.agent_id !== 'string') return { error: 'Field "agent_id" must be a string or null' }
+    value.agent_id = raw.agent_id
+  }
+  if (raw.environment !== undefined) {
+    if (raw.environment !== null && (typeof raw.environment !== 'object' || Array.isArray(raw.environment))) return { error: 'Field "environment" must be an environment config or null' }
+    value.environment = raw.environment as OAIEnvironmentConfig | null
+  }
+  if (raw.pinned !== undefined) {
+    if (typeof raw.pinned !== 'boolean') return { error: 'Field "pinned" must be a boolean' }
+    value.pinned = raw.pinned
+  }
+  return { value }
 }
 
 /**

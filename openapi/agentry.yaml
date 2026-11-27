@@ -21,6 +21,7 @@ tags:
   - name: Subagents
   - name: Schedules
   - name: Files
+  - name: Projects
   - name: Health
 paths:
   /v1/agents:
@@ -122,6 +123,198 @@ paths:
                 required:
                   - object
                   - data
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/projects:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    post:
+      summary: Create a project
+      description: Creates an owner-scoped grouping of chats. `agent_id` and `environment` become the defaults for new chats started from this project; null keeps the caller's current defaults.
+      tags:
+        - Projects
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    get:
+      summary: List projects
+      description: Only the caller's projects, newest first. `status` defaults to `active`; `after` is the last id of the previous page.
+      tags:
+        - Projects
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum:
+              - active
+              - archived
+              - all
+            default: active
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Order"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/projects/{project_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/ProjectId"
+    get:
+      summary: Retrieve a project
+      tags:
+        - Projects
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    post:
+      summary: Update a project
+      description: Replaces only the fields present in the body; omitted fields keep their values.
+      tags:
+        - Projects
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProjectRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+    delete:
+      summary: Delete a project
+      description: Refuses with 409 `project_has_sessions` while any of the caller's chats still belongs to the project; archive it instead or move its chats first. The project's environment is not deleted.
+      tags:
+        - Projects
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  object:
+                    const: project.deleted
+                  deleted:
+                    const: true
+                required:
+                  - id
+                  - object
+                  - deleted
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/ProjectConflict"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/projects/{project_id}/archive:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/ProjectId"
+    post:
+      summary: Archive a project
+      description: Hides the project from the default `active` list and blocks new chats on it; existing chats and history stay untouched.
+      tags:
+        - Projects
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/projects/{project_id}/unarchive:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/ProjectId"
+    post:
+      summary: Unarchive a project
+      description: Restores the project to `active` and clears `archived_at`.
+      tags:
+        - Projects
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
@@ -3101,6 +3294,12 @@ components:
       required: true
       schema:
         type: string
+    ProjectId:
+      name: project_id
+      in: path
+      required: true
+      schema:
+        type: string
     SessionId:
       name: session_id
       in: path
@@ -3205,6 +3404,12 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
     ScheduleConflict:
       description: "`schedule_conflict` (stale `revision`), `schedule_execution_pending`, `schedule_target_archived`, or `session_not_resumable`."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ProjectConflict:
+      description: "`project_has_sessions`: the project still has chats and cannot be deleted."
       content:
         application/json:
           schema:
@@ -3658,6 +3863,110 @@ components:
             - low
             - medium
             - high
+    Project:
+      description: An owner-scoped grouping of chats with optional default agent and workspace. `null` environment means the caller's default workspace.
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          const: project
+        name:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - archived
+        pinned:
+          type: boolean
+        agent_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        environment:
+          oneOf:
+            - $ref: "#/components/schemas/EnvironmentConfig"
+            - type: "null"
+        archived_at:
+          oneOf:
+            - type: integer
+            - type: "null"
+        created_at:
+          type: integer
+        updated_at:
+          type: integer
+      required:
+        - id
+        - object
+        - name
+        - status
+        - pinned
+        - agent_id
+        - environment
+        - archived_at
+        - created_at
+        - updated_at
+    CreateProjectRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Must not be empty after trimming.
+        agent_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        environment:
+          oneOf:
+            - $ref: "#/components/schemas/EnvironmentConfig"
+            - type: "null"
+        pinned:
+          type: boolean
+          default: false
+      required:
+        - name
+    UpdateProjectRequest:
+      description: Fields to replace on a project; omitted fields keep their values.
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Must not be empty after trimming.
+        agent_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        environment:
+          oneOf:
+            - $ref: "#/components/schemas/EnvironmentConfig"
+            - type: "null"
+        pinned:
+          type: boolean
+    ProjectListResponse:
+      type: object
+      properties:
+        object:
+          const: list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Project"
+        first_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        last_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        has_more:
+          type: boolean
+      required:
+        - object
+        - data
     Agent:
       type: object
       properties:
