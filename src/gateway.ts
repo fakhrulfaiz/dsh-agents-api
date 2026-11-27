@@ -66,6 +66,7 @@ import { mountSandboxTools } from './mount-sandbox-tools.ts'
 import { mountComposioAppTools } from './mount-composio-app-tools.ts'
 import { mountScheduleGuidance } from './mount-schedule-guidance.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
+import type { ComposioRelay } from './composio-relay.ts'
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
 import { BRIDGE_HOST_CWD, browserCdpPort, BROWSER_PROBE_COMMAND, browserMcpTool, browserMode, normalizeBrowserDefault, type BrowserMode, mountBrowserGuidance, validateBrowserField, type BrowserSandbox } from './mount-browser.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
@@ -178,6 +179,8 @@ export interface GatewayOptions {
   skillsRoot?: string
   /** Composio grant enforcement and send approvals (`composio` config). */
   composio?: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
+  /** Relay that Composio MCP tools are pointed at so agent setup does not wait for the connector (`composio-relay.ts`). */
+  composioRelay?: ComposioRelay
   /** What agents without a `browser` value do (`browser.default`: auto, on or off; `true`/`false` mean on/off; default auto). */
   browserDefault?: BrowserMode | boolean
   /** Whether the sandbox behind `envd` has the browser (default: runs `command -v playwright-mcp` as `agent`). */
@@ -307,6 +310,7 @@ export class AgentsGateway {
   private readonly startBrowserRelay: (envd: EnvdClient, port: number, intervalMs: number) => RelayProcess
   private readonly deliverablesCache = new DeliverablesCache<DeliverableEntry>(500)
   private readonly skillsGithub: GithubDeps | undefined
+  private readonly composioRelay: ComposioRelay | undefined
   private readonly composio: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
   private readonly browserDefault: BrowserMode
   private readonly sandboxHasBrowser: (envd: EnvdClient) => Promise<boolean>
@@ -364,6 +368,7 @@ export class AgentsGateway {
     this.builtinSkills = options.builtinSkills ?? (() => [])
     this.skillsRoot = options.skillsRoot ?? ''
     this.skillsGithub = options.skillsGithub
+    this.composioRelay = options.composioRelay
     this.composio = options.composio ?? { serverLabel: 'composio', approvalVerbs: DEFAULT_APPROVAL_VERBS, approvalSlugs: [] }
     this.browserDefault = normalizeBrowserDefault(options.browserDefault)
     this.sandboxHasBrowser = options.sandboxHasBrowser ?? (async (envd) => {
@@ -2023,7 +2028,8 @@ export class AgentsGateway {
       }
       mountScheduleGuidance(agentCtx)
       mountFunctionTools(agentCtx, functionTools, pending)
-      await mountMcpTools(agentCtx, mcpToolsFrom(resolved.tools), cwd)
+      const mcpTools = mcpToolsFrom(resolved.tools)
+      await mountMcpTools(agentCtx, this.composioRelay === undefined ? mcpTools : this.composioRelay.rewriteAll(mcpTools), cwd)
       await this.mountBrowser(agentCtx, resolved, sandbox === undefined ? undefined : { ...sandbox, sessionId })
       mountComposio(agentCtx, {
         grants: effectiveGrants(resolved),
