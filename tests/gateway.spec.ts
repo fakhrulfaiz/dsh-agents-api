@@ -1440,6 +1440,8 @@ describe('workspace data of sandbox sessions', () => {
       expect(listed.data.map((e) => e.path)).toEqual(['report.md'])
       const read = await call(`/agents/sessions/${sbx.id}/artifacts/report.md`)
       expect(read.status).toBe(200)
+      // The web app needs the size to answer byte ranges (video seeking).
+      expect(read.headers.get('content-length')).toBe(String(Buffer.byteLength('# from the sandbox')))
       expect(await read.text()).toBe('# from the sandbox')
       expect((await call(`/agents/sessions/${sbx.id}/artifacts/missing.md`)).status).toBe(404)
 

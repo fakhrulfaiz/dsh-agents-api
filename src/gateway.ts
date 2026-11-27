@@ -3236,6 +3236,8 @@ export class AgentsGateway {
     res.setHeader('Content-Type', artifactContentType(rawPath))
     res.setHeader('Content-Disposition', artifactContentDisposition(rawPath, download))
     res.setHeader('X-Content-Type-Options', 'nosniff')
+    // The web app answers byte ranges (video seeking) only when it knows the size.
+    res.setHeader('Content-Length', String(body.byteLength))
     res.end(body)
   }
 
