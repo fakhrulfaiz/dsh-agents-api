@@ -89,6 +89,13 @@ async function createProject(call: Awaited<ReturnType<typeof start>>['call'], ov
   return body
 }
 
+/** A project's fields apart from `updated_at`, which each edit legitimately bumps. */
+function projectWithoutUpdatedAt(project: Record<string, unknown>): Record<string, unknown> {
+  const stable: Record<string, unknown> = { ...project }
+  delete stable.updated_at
+  return stable
+}
+
 /** Save an agent owned by Alice for a Project default or a session override. */
 async function seedAgent(store: MemoryStore, model: string, instructions: string) {
   await store.ensureOwner(ALICE)
@@ -149,11 +156,11 @@ describe('/agents/projects', () => {
     const path = `/agents/projects/${created.id}`
     const renamed = await call('alice', 'POST', path, { name: 'Renamed' })
     expect(renamed.status).toBe(200)
-    expect(renamed.body).toMatchObject({ ...created, name: 'Renamed' })
+    expect(renamed.body).toMatchObject({ ...projectWithoutUpdatedAt(created), name: 'Renamed' })
     const changed = await call('alice', 'POST', path, { agent_id: null, environment: DEFAULT_WORKSPACE, pinned: false })
     expect(changed.status).toBe(200)
     expect(changed.body).toMatchObject({
-      ...renamed.body,
+      ...projectWithoutUpdatedAt(renamed.body),
       name: 'Renamed',
       agent_id: null,
       environment: DEFAULT_WORKSPACE,
@@ -168,13 +175,13 @@ describe('/agents/projects', () => {
     const path = `/agents/projects/${created.id}`
     const archived = await call('alice', 'POST', `${path}/archive`)
     expect(archived.status).toBe(200)
-    expect(archived.body).toMatchObject({ ...created, archived_at: expect.any(Number), status: 'archived' })
+    expect(archived.body).toMatchObject({ ...projectWithoutUpdatedAt(created), archived_at: expect.any(Number), status: 'archived' })
     expect(typeof archived.body.archived_at).toBe('number')
     expect((await call('alice', 'GET', '/agents/projects')).body.data).toEqual([])
     expect((await call('alice', 'GET', '/agents/projects?status=archived')).body.data.map((row: { id: string }) => row.id)).toEqual([created.id])
     const restored = await call('alice', 'POST', `${path}/unarchive`)
     expect(restored.status).toBe(200)
-    expect(restored.body).toMatchObject({ ...archived.body, status: 'active', archived_at: null })
+    expect(restored.body).toMatchObject({ ...projectWithoutUpdatedAt(archived.body), status: 'active', archived_at: null })
     expect((await call('alice', 'GET', '/agents/projects')).body.data.map((row: { id: string }) => row.id)).toEqual([created.id])
   })
 
