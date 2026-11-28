@@ -2151,6 +2151,58 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/environments/{environment_id}/folders:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/EnvironmentId"
+    get:
+      summary: List the sub-folders of one workspace folder
+      description: "Immediate sub-directories only (symlinks skipped, dot-folders included), sorted by name ignoring case, at most 500. A stopped sandbox is started first."
+      tags:
+        - Environments
+      parameters:
+        - name: path
+          in: query
+          required: false
+          description: Folder relative to the workspace root; empty or missing means the root. No absolute paths or `..`.
+          schema: { type: string }
+      responses:
+        "200":
+          description: The folders.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  path:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        path: { type: string }
+                      required: [name, path]
+                  has_more:
+                    type: boolean
+                required:
+                  - object
+                  - path
+                  - data
+                  - has_more
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
   /v1/agents/environments/{environment_id}/files/{path}:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -4984,6 +5036,9 @@ components:
           type: string
         template_id:
           type: string
+        directory:
+          type: string
+          description: Folder inside the environment's workspace the session starts in (extension). Relative, no `..`, at most 200 characters and 8 segments; created when missing (400 `bad_request` when invalid, 409 `directory_unavailable` when it cannot be made). Stored on the session's environment.
       required:
         - type
       description: Alias kept for earlier clients. With `environment_id` it attaches that environment to the session; with `template_id` it provisions one.

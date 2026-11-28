@@ -17,6 +17,8 @@
           devKey:
             key: !!js process.env.AGENTRY_DEV_KEY
             owner: dev
+          # Optional: also accept Keycloak tokens (the web app's Keycloak live check). Off unless set.
+          keycloak: !!js "process.env.AGENTRY_KEYCLOAK_ISSUER ? { issuer: process.env.AGENTRY_KEYCLOAK_ISSUER, audience: process.env.AGENTRY_KEYCLOAK_AUDIENCE ?? 'agentry-api' } : undefined"
 
 # Office skills (docx, pptx, xlsx, render, recalculate, export-pdf, office) in
 # the host-level skill layer, so every preset's tool-skill lists them by name.

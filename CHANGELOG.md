@@ -5,6 +5,11 @@ Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
 ## Unreleased
 
+## 0.4.0 — 2026-11-28
+
+- 2026-11-28: `GET /v1/agents/environments/{id}/folders?path=` lists one workspace folder's immediate sub-folders (`{name, path}`, sorted ignoring case, at most 500 with `has_more`; dot-folders included, symlinks skipped) for the web app's folder picker. `path` follows the Project folder rules (400 when bad), a missing folder answers 404, a stopped sandbox is started first.
+- 2026-11-28: Project folders. A `sandbox` session environment (and a Project's default `environment`) takes an optional `directory`: a folder inside the environment's workspace. The session's working directory is that folder, created with `mkdir -p` as the agent user first (a stopped sandbox is started; local environments use the host), and the stored environment keeps `directory`. A starting folder, not isolation. Invalid folders answer 400 (also on project create and update), a failed `mkdir` 409 `directory_unavailable`. See `docs/changes/2026-11-28-project-folders.md`.
+- 2026-11-28: The dev profile (`cordis.patch.yml`) can also accept Keycloak tokens next to the dev key: set `AGENTRY_KEYCLOAK_ISSUER` (and optionally `AGENTRY_KEYCLOAK_AUDIENCE`, default `agentry-api`) before `scripts/dev.sh`. Unset, nothing changes. Used for the web app's Keycloak live check.
 ## 0.3.0 — 2026-11-28
 
 - 2026-11-28: Fixed Composio being disconnected in every new chat since the Composio relay landed. The relay route was registered as `/internal/mcp-relay/` (trailing slash); DSH's web server matches a prefix `p` only for `p` and `p/<rest>`, so no relay URL ever matched, requests fell through to the web UI (405 on POST), and the agent's Composio MCP client gave up (`gmail_search_emails` answered `unknown tool "mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL"`). The route is now `RELAY_ROUTE_PATH` (`/internal/mcp-relay`). Found and checked in a live chat.

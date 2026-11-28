@@ -7,8 +7,8 @@
  * captured as an agent id.
  */
 
-import { mkdir, readFile, stat } from 'node:fs/promises'
-import { isAbsolute, join } from 'node:path'
+import { mkdir, readdir, readFile, stat } from 'node:fs/promises'
+import { isAbsolute, join, posix } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
@@ -42,6 +42,7 @@ import { fileIdsFromInput, overlayAgent, parseApprovalResponse, userTextFromInpu
 import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
 import { mountAgentInstructions } from './mount-instructions.ts'
 import { AGENTRY_PRESET_ID } from './preset.ts'
+import { normalizeWorkspaceSubdir, shellQuote } from './sandbox/workspace-subdir.ts'
 import { copyIntoSandboxUploads, MAX_ARTIFACT_BYTES, providerRows, type AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
 import { sandboxCredentials, sandboxStartErrorIn, type SandboxPresets } from './sandbox/presets.ts'
 import { runInEnvd, SandboxApiError, type EnvdClient } from '@agentry/sandbox/client'
@@ -485,6 +486,7 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents/environments/:environment_id/files', handler: (req, res, _url, params, p) => this.writeEnvironmentFile(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/:environment_id/files/*path', handler: (_req, res, _url, params, p) => this.readEnvironmentFile(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/:environment_id/files', handler: (_req, res, url, params, p) => this.listEnvironmentFiles(res, url, params, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/:environment_id/folders', handler: (_req, res, url, params, p) => this.listEnvironmentFolders(res, url, params, p.owner) },
       { method: 'POST', pattern: '/agents/environments/:environment_id/start', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'start') },
       { method: 'POST', pattern: '/agents/environments/:environment_id/stop', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'stop') },
       { method: 'POST', pattern: '/agents/environments/:environment_id/reset', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'reset') },
@@ -2260,7 +2262,11 @@ export class AgentsGateway {
       if (record.status === 'failed') throw new AgentsApiRequestError(`environment ${record.id} failed${record.error ? `: ${record.error}` : ''}; create a new one`, 409, 'environment_failed')
       const directory = record.provider_metadata['workspace_directory']
       if (directory === undefined) throw bad(`environment ${record.id} has no host workspace`, 'sandbox_exec_unavailable')
-      return { cwd: directory, environment: { type: 'sandbox', environment_id: record.id } }
+      const folder = this.sessionFolder(spec)
+      if (folder === undefined) return { cwd: directory, environment: { type: 'sandbox', environment_id: record.id } }
+      const cwd = posix.join(directory, folder)
+      await this.ensureFolder(owner, record, provider, cwd)
+      return { cwd, environment: { type: 'sandbox', environment_id: record.id, directory: folder } }
     }
     const templateId = spec.type === 'sandbox' ? spec.template_id : typeof spec.environment_template_id === 'string' ? spec.environment_template_id : undefined
     const template = templateId === undefined ? undefined : await this.templateFor(owner, templateId)
@@ -2301,7 +2307,42 @@ export class AgentsGateway {
       ...(created.error !== undefined ? { error: created.error } : {}),
     }
     await this.store.environments.create(owner, record)
-    return { cwd: created.workspacePath, environment: { type: 'sandbox', environment_id: id } }
+    const folder = this.sessionFolder(spec)
+    if (folder === undefined) return { cwd: created.workspacePath, environment: { type: 'sandbox', environment_id: id } }
+    const cwd = posix.join(created.workspacePath, folder)
+    await this.ensureFolder(owner, record, provider, cwd)
+    return { cwd, environment: { type: 'sandbox', environment_id: id, directory: folder } }
+  }
+
+  /** The validated starting folder of a sandbox session spec, or `undefined` for the workspace root. */
+  private sessionFolder(spec: OAISandboxEnvironment | OAIOpenAIHostedEnvironment): string | undefined {
+    if (spec.type !== 'sandbox') return undefined
+    const folder = normalizeWorkspaceSubdir(spec.directory)
+    if (typeof folder === 'object') throw new AgentsApiRequestError(folder.error, 400, 'bad_request')
+    return folder
+  }
+
+  /**
+   * Create a session's starting folder in its environment, starting a stopped sandbox first.
+   * @throws AgentsApiRequestError 409 `directory_unavailable` when the folder cannot be made.
+   */
+  private async ensureFolder(owner: OwnerId, record: EnvironmentRecord, provider: SandboxProvider, cwd: string): Promise<void> {
+    const unavailable = (detail: string) => new AgentsApiRequestError(`the folder "${cwd}" is not available: ${detail}`, 409, 'directory_unavailable')
+    try {
+      if (provider.kind === 'local') {
+        await mkdir(cwd, { recursive: true })
+        return
+      }
+      const sandbox = provider as Partial<AgentrySandboxProvider>
+      if (typeof sandbox.exec !== 'function') return
+      const sandboxId = record.provider_metadata['sandbox_id']
+      if (typeof sandbox.api === 'function' && sandboxId !== undefined) await sandbox.api(owner).start(sandboxId)
+      const result = await sandbox.exec(record, `mkdir -p -- ${shellQuote(cwd)}`)
+      if (result.code !== 0) throw unavailable(result.stderr.trim().slice(-500) || `exit code ${String(result.code)}`)
+    } catch (error: unknown) {
+      if (error instanceof AgentsApiRequestError) throw error
+      throw unavailable(errorMessage(error))
+    }
   }
 
   private async defaultWorkspace(owner: OwnerId, sessionId: string): Promise<string> {
@@ -3137,6 +3178,64 @@ export class AgentsGateway {
     }
   }
 
+  /** `GET /agents/environments/{id}/folders?path=`: the immediate sub-folders of one workspace folder. */
+  private async listEnvironmentFolders(res: ServerResponse, url: URL, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!record) {
+      notFound(res, 'environment not found')
+      return
+    }
+    const folder = normalizeWorkspaceSubdir(url.searchParams.get('path') ?? undefined)
+    if (typeof folder === 'object') {
+      badRequest(res, folder.error)
+      return
+    }
+    const provider = this.providerOr400(res, record)
+    if (provider === undefined) return
+    const root = record.provider_metadata['workspace_directory']
+    if (root === undefined) {
+      badRequest(res, `environment ${record.id} has no workspace`)
+      return
+    }
+    const dir = folder === undefined ? root : posix.join(root, folder)
+    try {
+      let names: string[]
+      if (provider.kind === 'local') {
+        try {
+          names = (await readdir(dir, { withFileTypes: true })).filter(e => e.isDirectory()).map(e => e.name)
+        } catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ENOTDIR') {
+            notFound(res, `folder not found: ${folder ?? ''}`)
+            return
+          }
+          throw error
+        }
+      } else {
+        const sandbox = provider as Partial<AgentrySandboxProvider>
+        if (typeof sandbox.exec !== 'function') {
+          badRequest(res, `sandbox provider "${provider.kind}" cannot list folders`)
+          return
+        }
+        const sandboxId = record.provider_metadata['sandbox_id']
+        if (typeof sandbox.api === 'function' && sandboxId !== undefined) await sandbox.api(owner).start(sandboxId)
+        const script = `cd -- ${shellQuote(dir)} 2>/dev/null || exit 44; for d in .[!.]* ..?* *; do if [ -d "$d" ] && [ ! -L "$d" ]; then printf '%s\\n' "$d"; fi; done`
+        const result = await sandbox.exec(record, script)
+        if (result.code === 44) {
+          notFound(res, `folder not found: ${folder ?? ''}`)
+          return
+        }
+        if (result.code !== 0) throw new Error(result.stderr.trim().slice(-500) || `exit code ${String(result.code)}`)
+        names = result.stdout.split('\n').filter(n => n !== '')
+      }
+      names.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()) || (a < b ? -1 : a > b ? 1 : 0))
+      const limit = 500
+      const data = names.slice(0, limit).map(name => ({ name, path: folder === undefined ? name : `${folder}/${name}` }))
+      json(res, 200, { object: 'list', path: folder ?? '', data, has_more: names.length > limit })
+    } catch (error: unknown) {
+      json(res, 503, { error: { type: 'server_error', code: 'sandbox_unavailable', message: errorMessage(error) } })
+    }
+  }
+
   private async readEnvironmentFile(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
     if (!record) {
@@ -3526,6 +3625,11 @@ function parseProjectInput(raw: Record<string, unknown>, partial: boolean): { va
   if (raw.environment !== undefined) {
     if (raw.environment !== null && (typeof raw.environment !== 'object' || Array.isArray(raw.environment))) return { error: 'Field "environment" must be an environment config or null' }
     value.environment = raw.environment as OAIEnvironmentConfig | null
+    const directory = (raw.environment as { directory?: unknown } | null)?.directory
+    if (directory !== undefined) {
+      const folder = normalizeWorkspaceSubdir(directory)
+      if (typeof folder === 'object') return { error: folder.error }
+    }
   }
   if (raw.pinned !== undefined) {
     if (typeof raw.pinned !== 'boolean') return { error: 'Field "pinned" must be a boolean' }

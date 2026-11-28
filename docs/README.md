@@ -15,6 +15,7 @@ Package-local reference and change notes for `@agentry/api`.
 | Note | Summary |
 | --- | --- |
 | [2026-11-27-environment-create-background.md](changes/2026-11-27-environment-create-background.md) | `POST /agents/environments` on the sandbox provider answers `pending` at once and sets up in the background; timed-out creates adopt the sandbox; delete during setup; interrupted setups fail |
+| [2026-11-28-project-folders.md](changes/2026-11-28-project-folders.md) | Project folders: `directory` on sandbox session environments and Project defaults, `directory_unavailable` |
 | [2026-11-27-session-jobs.md](changes/2026-11-27-session-jobs.md) | Session background jobs: `/sessions/{id}/jobs`, `/jobs/{job_id}`, `/jobs/{job_id}/kill`, ephemeral `agent.session.job.*` stream events |
 | [2026-11-27-projects.md](changes/2026-11-27-projects.md) | Owner-scoped Project CRUD, archive/unarchive, and the 409 `project_has_sessions` delete guard |
 | [2026-11-27-browser-recording.md](changes/2026-11-27-browser-recording.md) | Browser recording tools: `browser_recording_start`/`stop`, VP8 WebM from the relay's frames through the image's ffmpeg, cursor sidecar, auto-stop at turn end and limits |
