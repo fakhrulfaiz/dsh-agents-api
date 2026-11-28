@@ -3096,7 +3096,8 @@ export class AgentsGateway {
       if (typeof v === 'string') headers[name] = v
     }
     try {
-      const withPath = (params['path'] ?? '').split('/').map(encodeURIComponent).join('/')
+      // The raw path after the port, trailing slash included: `/dir` and `/dir/` are different URLs to the app.
+      const withPath = /\/ports\/\d+\/(.*)$/.exec(url.pathname)?.[1] ?? ''
       const up = await target.provider.proxyPort(owner, target.sandboxId, port, `${withPath}${url.search}`, {
         method: req.method ?? 'GET', headers, signal: abort.signal, ...(req.method === 'POST' ? { body: req } : {}),
       })

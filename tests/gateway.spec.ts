@@ -2083,6 +2083,8 @@ describe('environment snapshots through the gateway', () => {
     expect(text).not.toContain('secret')
     expect(text).toContain('cookie=undefined')
     expect(svc.calls).toContain('POST /v1/sandboxes/' + [...svc.sandboxes.keys()][0]! + '/ports/8765/a/b.html?x=1')
+    const dir = await call(`/agents/environments/${env.id}/ports/8765/sub/`)
+    expect(await dir.text()).toContain('path sub/ ')
     expect((await call('/agents/environments/env_missing/ports/8765/')).status).toBe(404)
     expect((await call(`/agents/environments/${env.id}/ports/99999/`)).status).toBe(400)
     const local = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({}) })).json()) as { id: string }
