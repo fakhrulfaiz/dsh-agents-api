@@ -92,6 +92,8 @@ import { openAttached, type AttachmentsPort } from './files/attached.ts'
 import { AttachmentIngest, type AttachedFiles } from './files/ingest.ts'
 import { FilesApi, uploadedFileSource, type FilesRuntime } from './files/api.ts'
 import type { FileSource, ServedFile } from './files/content.ts'
+import { WatchHub, WatchLimitError } from './files/watch.ts'
+import { watchLocalDir } from './files/local-watch.ts'
 import { SkillsApi, type SkillTarget } from './skills.ts'
 import { SessionRegistry, subagentResource } from './session-registry.ts'
 import { compareFramePositions, framePosition, frameSseId, parseFrameId, WireProjector, type FramePosition, type ProjectionBase } from './history/projector.ts'
@@ -333,6 +335,7 @@ export class AgentsGateway {
   /** Browser recordings (`browser_recording_*` tools), stopped at turn end. */
   readonly browserRecorder: BrowserRecorder
   private readonly deliverablesCache = new DeliverablesCache<DeliverableEntry>(500)
+  private readonly watchHub = new WatchHub()
   private readonly skillsGithub: GithubDeps | undefined
   private readonly composioRelay: ComposioRelay | undefined
   private readonly composio: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[]; mcpUrl?: string }
@@ -541,6 +544,7 @@ export class AgentsGateway {
       { method: 'DELETE', pattern: '/agents/environments/:environment_id', handler: (_req, res, url, params, p) => this.deleteEnvironment(res, params, p.owner, url) },
       { method: 'POST', pattern: '/agents/sessions', handler: (req, res, url, _params, p) => this.createSession(req, res, url, p.owner) },
       { method: 'GET', pattern: '/agents/sessions', handler: (_req, res, url, _params, p) => this.listSessions(res, url, p.owner) },
+      { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts/watch', handler: (req, res, _url, params, p) => this.streamArtifactWatch(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts/*path', handler: (_req, res, url, params, p) => this.getArtifact(res, params, p.owner, url.searchParams.get('download') === '1') },
       { method: 'GET', pattern: '/agents/sessions/:session_id/renders/pdf/*path', handler: (req, res, _url, params, p) => renderOfficePdf(this.officeRender, req, res, p.owner, routeParam(params, 'session_id'), params['path'] ?? '') },
       { method: 'GET', pattern: '/agents/sessions/:session_id/deliverables', handler: (_req, res, _url, params, p) => this.listDeliverables(res, params, p.owner) },
@@ -3567,6 +3571,48 @@ export class AgentsGateway {
     } catch (error: unknown) {
       badRequest(res, errorMessage(error))
     }
+  }
+
+  private async streamArtifactWatch(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const sessionId = routeParam(params, 'session_id')
+    if (!await this.requireSession(res, owner, sessionId)) return
+
+    const sandbox = await this.sandboxOfSession(owner, sessionId)
+    let source: ((signal: AbortSignal) => AsyncIterable<string[]>) | undefined
+    if (sandbox !== undefined) {
+      source = (signal) => sandbox.provider.watch(sandbox.record, signal)
+    } else if (this.artifacts === undefined) {
+      const workspace = this.sessionRegistry.get(sessionId)?.workspace ?? await this.history.workspace(sessionId)
+      if (workspace !== undefined) source = (signal) => watchLocalDir(workspace, signal)
+    }
+
+    if (source === undefined) {
+      notFound(res, `Session "${sessionId}" workspace cannot be watched`)
+      return
+    }
+
+    let unsub: (() => void) | undefined
+    try {
+      unsub = this.watchHub.subscribe(owner, sessionId, source, (event) => {
+        if (res.writableEnded || res.destroyed) return
+        if (event.type === 'changed') writeEvent(res, 'changed', { paths: event.paths })
+        else if (event.type === 'reset') writeEvent(res, 'reset', {})
+        else if (event.type === 'closed') writeEvent(res, 'closed', {})
+      })
+    } catch (error) {
+      if (error instanceof WatchLimitError) {
+        json(res, 429, { error: { type: 'rate_limit_error', code: error.code, message: error.message } })
+        return
+      }
+      throw error
+    }
+
+    writeSSEHeaders(res)
+    const ping = setInterval(() => { if (!res.writableEnded && !res.destroyed) res.write(': ping\n\n') }, 15_000)
+    req.on('close', () => {
+      clearInterval(ping)
+      unsub?.()
+    })
   }
 
   private async listArtifacts(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {

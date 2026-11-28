@@ -11,10 +11,10 @@ export async function* watchLocalDir(dir: string, signal: AbortSignal): AsyncIte
       if (signal.aborted) return
       const raw = event.filename
       if (raw === null || raw === undefined) continue
-      const name = typeof raw === 'string' ? raw : raw.toString()
+      const name = typeof raw === 'string' ? raw : (raw as unknown as { toString(): string }).toString()
       const rel = name.split(path.sep).join('/').replace(/^\/+/, '')
       if (!rel || rel === '.' || rel.startsWith('..')) continue
-      if (rel.split('/').some((seg) => SKIP.has(seg))) continue
+      if (rel.split('/').some((seg: string) => SKIP.has(seg))) continue
       yield [rel]
     }
   } catch (error) {

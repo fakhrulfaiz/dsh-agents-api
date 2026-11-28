@@ -3506,6 +3506,40 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/sessions/{session_id}/artifacts/watch:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      summary: Watch workspace artifact changes
+      tags:
+        - Sessions
+      description: |
+        Server-sent events for changes in the session workspace. `changed` carries `{ paths: string[] }`
+        (workspace-relative paths, deduplicated, debounced). `reset` means the client should reload the full
+        listing. `closed` means the watch ended (for example the sandbox stopped). Comment `: ping` frames
+        keep the connection alive. Reconnects start a fresh watch.
+      responses:
+        "200":
+          description: An SSE stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          description: Too many watched sessions for this owner.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/StoreUnavailable"
   /v1/agents/sessions/{session_id}/artifacts/{path}:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
