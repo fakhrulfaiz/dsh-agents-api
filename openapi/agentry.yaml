@@ -731,9 +731,49 @@ paths:
         - name: toolkits
           in: query
           required: true
-          description: Comma-separated toolkit slugs, for example `gmail,github` (at most 500).
+          description: Comma-separated toolkit slugs, for example `gmail,github` (at most 2000).
           schema:
             type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorConnections"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "409":
+          description: "`connector_key_missing`: no key is stored for the caller."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: "`connector_unavailable`: Composio refused the key (`error.reason: rejected`) or could not be reached (`unavailable`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      summary: The caller's connected Composio accounts (long toolkit lists)
+      description: Agentry extension. Same as the GET, with the toolkit slugs in the body (at most 2000), for the whole app catalog.
+      tags:
+        - Agents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                toolkits:
+                  type: array
+                  items:
+                    type: string
+              required: [toolkits]
       responses:
         "200":
           description: OK

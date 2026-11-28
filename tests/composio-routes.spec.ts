@@ -109,5 +109,6 @@ describe('Composio connections route', () => {
     expect(await refused.json()).toMatchObject({ error: { code: 'connector_unavailable', reason: 'rejected' } })
     expect((await call('/connections?toolkits=../x')).status).toBe(400)
     expect((await call('/connections')).status).toBe(400)
+    expect((await call('/connections', { method: 'POST', body: JSON.stringify({ toolkits: ['gmail'] }) })).status).toBe(502)
   })
 })

@@ -4,7 +4,8 @@
  * - `GET /agents/connectors/composio`: `{ object, configured, last4, updated_at }`, never the key.
  * - `POST /agents/connectors/composio` `{ key }`: save or replace it (400 `invalid_key` unless it starts with `ck_`).
  * - `DELETE /agents/connectors/composio`: remove it.
- * - `GET /agents/connectors/composio/connections?toolkits=a,b`: the owner's accounts per toolkit.
+ * - `GET /agents/connectors/composio/connections?toolkits=a,b`: the owner's accounts per toolkit;
+ *   `POST` with `{ toolkits: [...] }` for a long list (the whole app catalog).
  *
  * Without `secrets.key` the key routes answer 501 `secrets_disabled`. A saved key reaches sessions
  * when their agent is next created or resumed (`mount-owner-composio.ts`).
@@ -20,7 +21,7 @@ import { listInventory } from './composio-status.ts'
 /** Toolkit slugs as Composio writes them. */
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/u
 /** Most toolkits one connections call asks about. */
-const MAX_TOOLKITS = 500
+const MAX_TOOLKITS = 2000
 /** Longest accepted key. */
 const MAX_KEY_LENGTH = 512
 
@@ -48,7 +49,11 @@ export class ComposioConnectorsApi {
       { method: 'GET', pattern: '/agents/connectors/composio', handler: (_req, res, _url, _params, p) => this.status(res, p.owner) },
       { method: 'POST', pattern: '/agents/connectors/composio', handler: (req, res, _url, _params, p) => this.save(req, res, p.owner) },
       { method: 'DELETE', pattern: '/agents/connectors/composio', handler: (_req, res, _url, _params, p) => this.remove(res, p.owner) },
-      { method: 'GET', pattern: '/agents/connectors/composio/connections', handler: (_req, res, url, _params, p) => this.connections(res, url, p.owner) },
+      { method: 'GET', pattern: '/agents/connectors/composio/connections', handler: (_req, res, url, _params, p) => this.connections(res, (url.searchParams.get('toolkits') ?? '').split(','), p.owner) },
+      { method: 'POST', pattern: '/agents/connectors/composio/connections', handler: async (req, res, _url, _params, p) => {
+        const toolkits = (await readBody(req))['toolkits']
+        await this.connections(res, Array.isArray(toolkits) ? toolkits.map(String) : [], p.owner)
+      } },
     ]
   }
 
@@ -79,10 +84,11 @@ export class ComposioConnectorsApi {
     json(res, 200, body(await this.deps.secrets.remove(owner, COMPOSIO_SECRET)))
   }
 
-  private async connections(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
-    const slugs = [...new Set((url.searchParams.get('toolkits') ?? '').split(',').map(s => s.trim().toLowerCase()).filter(s => s !== ''))]
-    if (slugs.length === 0 || slugs.length > MAX_TOOLKITS || !slugs.every(s => SLUG.test(s))) {
-      fail(res, 400, 'bad_request', `toolkits must be a comma-separated list of 1 to ${String(MAX_TOOLKITS)} toolkit slugs`)
+  private async connections(res: ServerResponse, toolkits: readonly string[], owner: OwnerId): Promise<void> {
+    // Entries that are not toolkit slugs are dropped, so one odd catalog row does not fail the whole list.
+    const slugs = [...new Set(toolkits.map(s => s.trim().toLowerCase()).filter(s => SLUG.test(s)))]
+    if (slugs.length === 0 || slugs.length > MAX_TOOLKITS) {
+      fail(res, 400, 'bad_request', `toolkits must list 1 to ${String(MAX_TOOLKITS)} toolkit slugs`)
       return
     }
     const key = await this.deps.secrets.get(owner, COMPOSIO_SECRET)
