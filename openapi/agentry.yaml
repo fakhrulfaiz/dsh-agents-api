@@ -736,6 +736,31 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /v1/agents/library/builtin:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    get:
+      summary: List the built-in agent Library
+      description: "Agentry extension. Agentry's built-in agents (adapted from ECC), sorted by name. Each item has `ref` (`Agentry:<file>`, kept as `metadata.library_ref` on agents added from it), `source`, `name`, `slug`, `description`, optional `origin`, `icon`, `color`, `browser`, `subagents` and `apps`, the file's `text`, and `draft`: the agent as `POST /agents/import` drafts it (tools this server lacks are dropped)."
+      tags:
+        - Agents
+      responses:
+        "200":
+          description: The built-in Library.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      type: object
+                required: [object, data]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
   /v1/agents/library/sources:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -1821,6 +1846,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
     delete:
@@ -1851,6 +1878,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
   /v1/agents/environments/runtimes:
@@ -5012,6 +5041,9 @@ components:
           oneOf:
             - type: boolean
             - type: "null"
+        built_in:
+          description: "Agentry extension: a built-in agent (id `agentry`, the setup assistant), listed first on the first page of `GET /agents` for every owner, readable, usable as `agent_id` on a session, never changed or deleted (409 `agent_built_in`). Absent on saved agents."
+          type: boolean
         skills:
           description: "Agentry extension: skill selection. Absent or null uses every built-in skill; an explicit selection uses exactly the listed built-ins and library skills. The agent's private skills always apply."
           oneOf:

@@ -2,8 +2,8 @@
  * Agent definitions to a draft `CreateAgentParams` (nothing is saved here):
  *
  * - Claude Code / ECC agent files: YAML front matter (`name`, `description`, `tools`, `model`) and a Markdown body (the prompt).
- *   Agentry's own library files add optional hints: `title` (display name), `subagents: true`, `browser: true|false`
- *   and `apps` (Composio toolkit slugs, each granted in full).
+ *   Agentry's own library files add optional hints: `title` (display name), `subagents: true`, `browser: true|false`,
+ *   `apps` (Composio toolkit slugs, each granted in full) and `icon`/`color` (the avatar, kept in metadata).
  * - Agentry agent JSON (the `GET /agents/{id}` shape; `id`, timestamps and masked MCP tools are dropped).
  */
 import { parse as parseYaml } from 'yaml'
@@ -95,7 +95,12 @@ function fromMarkdown(text: string, catalog: ReadonlySet<string>): ParsedAgent |
   const draft: AgentDraft = {
     name: title ?? titleFromSlug(data['name']),
     instructions,
-    metadata: { description: data['description'].trim().slice(0, 512) },
+    metadata: {
+      description: data['description'].trim().slice(0, 512),
+      // Agentry library files name an avatar.
+      ...(typeof data['icon'] === 'string' && data['icon'] !== '' ? { icon: data['icon'] } : {}),
+      ...(typeof data['color'] === 'string' && data['color'] !== '' ? { color: data['color'] } : {}),
+    },
   }
   const tools = toolList(data['tools'])
   if (tools !== undefined) {

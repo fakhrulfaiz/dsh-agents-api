@@ -4,6 +4,7 @@
  */
 
 import { APP_TOOLS } from '../src/mount-composio-app-tools.ts'
+import { AGENTRY_TOOL_NAMES } from '../src/mount-agentry-tools.ts'
 import { fakeLlm, fakeModel } from './support/fake-model.ts'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -601,7 +602,7 @@ describe('resume', () => {
     ])
     expect(posted.map(response => response.status)).toEqual([200, 200])
     expect(second.resume).toHaveBeenCalledOnce()
-    expect(second.tools.map(tool => tool.name).filter(name => !name.startsWith('skill_') && !APP_TOOL_NAMES.has(name))).toEqual(['get_weather'])
+    expect(second.tools.map(tool => tool.name).filter(name => !name.startsWith('skill_') && !APP_TOOL_NAMES.has(name) && !(AGENTRY_TOOL_NAMES as readonly string[]).includes(name))).toEqual(['get_weather'])
     expect(second.agents.get(id)!.followup).toHaveBeenCalledOnce()
 
     // The call parked before the restart was closed by the Session layer; a late result for it is refused.

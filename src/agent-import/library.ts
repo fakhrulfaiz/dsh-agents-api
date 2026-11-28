@@ -18,7 +18,7 @@ import type { Route } from '../gateway.ts'
 import { json, readBody } from '../http.ts'
 import type { LibrarySource, Store } from '../store/store.ts'
 import { fetchAllowed, type ImportCandidate, type ImportFetchDeps, listFolderCandidates, resolveImportTarget } from './fetch.ts'
-import { ImportError, splitFrontMatter } from './parse.ts'
+import { type AgentDraft, ImportError, parseAgentDefinition, splitFrontMatter } from './parse.ts'
 
 /** Most sources one owner may keep. */
 export const MAX_LIBRARY_SOURCES = 10
@@ -122,6 +122,34 @@ export class LibrarySourcesApi {
       if (!(error instanceof ImportError)) throw error
       failImport(res, error)
     }
+  }
+
+  /**
+   * Every source of `owner` with its agent files (cached like the route); a source that cannot be read has
+   * `error` and no files. For the `library_search` and `library_add` tools.
+   */
+  async sourceAgents(owner: OwnerId): Promise<Array<{ source: LibrarySource; candidates: ImportCandidate[]; error?: string }>> {
+    return Promise.all((await this.all(owner)).map(async (source) => {
+      try {
+        return { source, candidates: await this.read(source.url, false) }
+      } catch (error: unknown) {
+        if (!(error instanceof ImportError)) throw error
+        return { source, candidates: [], error: error.message }
+      }
+    }))
+  }
+
+  /**
+   * A source file's agent draft, fetched and parsed like `POST /agents/import`.
+   * @param url - a candidate's link.
+   * @param catalog - Host tool names.
+   * @throws ImportError when the link is not allowed, cannot be read, or is not an agent definition.
+   */
+  async draft(url: string, catalog: ReadonlySet<string>): Promise<AgentDraft> {
+    const target = resolveImportTarget(url, this.deps.hosts)
+    if (target.kind !== 'file') throw new ImportError('import_unrecognized', 'That Library entry is a folder, not an agent file.')
+    const draft = parseAgentDefinition(await fetchAllowed(this.deps, target.url), catalog).draft
+    return { ...draft, metadata: { ...(draft.metadata ?? {}), source_url: url.slice(0, 512) } }
   }
 
   /** @throws ImportError unless `url` is a GitHub folder or a gist on an allowed host. */

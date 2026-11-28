@@ -42,7 +42,7 @@ import {
   writeRequestError,
 } from './http.ts'
 import { fileIdsFromInput, overlayAgent, parseApprovalResponse, userTextFromInput } from './input.ts'
-import { applyHostToolsRestrict, validateHostTools } from './host-tools.ts'
+import { applyHostToolsRestrict, validateHostTools, withToolFilter } from './host-tools.ts'
 import { mountAgentInstructions } from './mount-instructions.ts'
 import { AGENTRY_PRESET_ID } from './preset.ts'
 import { normalizeWorkspaceSubdir, shellQuote } from './sandbox/workspace-subdir.ts'
@@ -82,6 +82,9 @@ import { ComposioConnectorsApi } from './connectors/composio-routes.ts'
 import { AgentImportApi } from './agent-import/routes.ts'
 import { DEFAULT_IMPORT_HOSTS } from './agent-import/fetch.ts'
 import { LibrarySourcesApi } from './agent-import/library.ts'
+import { BuiltinLibraryApi } from './agent-import/builtin-library.ts'
+import { builtinAgent, builtinAgents } from './builtin-agents.ts'
+import { mountAgentryTools } from './mount-agentry-tools.ts'
 import { BRIDGE_HOST_CWD, browserPorts, BROWSER_PROBE_COMMAND, browserMcpTool, browserMode, normalizeBrowserDefault, type BrowserMode, mountBrowserGuidance, validateBrowserField, type BrowserSandbox } from './mount-browser.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
@@ -103,6 +106,7 @@ import { NO_STORED_CONFIG } from './recovery.ts'
 import { findMaskedSecret, MASKED_SECRET, redactAgentSecrets } from './redact.ts'
 import { applySessionUpdate, baseOf, configOf, sessionFromRow } from './session-resource.ts'
 import { resolveProjectDefaults } from './session-project.ts'
+import { createProject, parseProjectInput, updateProject } from './projects.ts'
 import { writeEvent, writeSSEHeaders } from './sse.ts'
 import type { ArtifactS3Config } from './artifacts.ts'
 import { artifactContentDisposition, artifactContentType, getS3Artifact, getWorkspaceArtifact, listS3Artifacts, listWorkspaceArtifacts, sanitizeRelativePath, statWorkspaceArtifact } from './artifacts.ts'
@@ -351,6 +355,10 @@ export class AgentsGateway {
   /** Commands Agentry exposes; `undefined` exposes all. */
   private readonly commandsAllow: ReadonlySet<string> | undefined
   private readonly commandsApi: CommandsApi
+  /** The owner's Library sources (routes and the `library_*` tools). */
+  private readonly libraryApi: LibrarySourcesApi
+  /** The built-in Library (route and the `library_*` tools). */
+  private readonly builtinLibraryApi: BuiltinLibraryApi
   private readonly ingest: AttachmentIngest
   /** Where uploaded bytes are read from (also used to copy template `file_id` files). */
   private fileSources: FileSource[] = []
@@ -423,6 +431,8 @@ export class AgentsGateway {
       hosts: options.importHosts ?? DEFAULT_IMPORT_HOSTS,
       store: () => this.store,
     })
+    this.libraryApi = libraryApi
+    this.builtinLibraryApi = new BuiltinLibraryApi(() => this.hostToolCatalog())
     const connectorsApi = new ComposioConnectorsApi({
       secrets: this.ownerSecrets,
       mcpUrl: this.composio.mcpUrl ?? DEFAULT_COMPOSIO_MCP_URL,
@@ -579,6 +589,7 @@ export class AgentsGateway {
       ...connectorsApi.routes(),
       ...importApi.routes(),
       ...libraryApi.routes(),
+      ...this.builtinLibraryApi.routes(),
       ...this.skillInstallApi.routes(),
       ...skillsApi.routes(),
       ...this.commandsApi.routes(),
@@ -731,8 +742,28 @@ export class AgentsGateway {
   }
 
   private async listAgents(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
-    const page = await this.store.agents.list(owner, listQuery(url))
-    json(res, 200, { ...page, data: page.data.map(redactAgentSecrets) })
+    const query = listQuery(url)
+    const page = await this.store.agents.list(owner, query)
+    // Built-in agents lead the first page (they have no cursor position).
+    const builtins = query.after === undefined ? builtinAgents(this.defaultModelName()) : []
+    json(res, 200, { ...page, data: [...builtins, ...page.data.map(redactAgentSecrets)] })
+  }
+
+  /** The deployment's default model name (built-in agents use it). */
+  private defaultModelName(): string {
+    return String(this.ctx.agentDefaultModel.currentSelection().model)
+  }
+
+  /** Host tool names (the `GET /agents/tools` catalog). */
+  private async hostToolCatalog(): Promise<ReadonlySet<string>> {
+    return new Set((await this.hostToolSchemas()).map(schema => schema.name))
+  }
+
+  /** Answers 409 `agent_built_in` and returns true when `agentId` is a built-in agent. */
+  private refuseBuiltin(res: ServerResponse, agentId: string): boolean {
+    if (builtinAgent(agentId, '') === undefined) return false
+    writeRequestError(res, new AgentsApiRequestError(`Agent "${agentId}" is built in and cannot be changed or deleted`, 409, 'agent_built_in'))
+    return true
   }
 
   private async listHostTools(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
@@ -780,20 +811,7 @@ export class AgentsGateway {
       badRequest(res, parsed.error)
       return
     }
-    const now = Math.floor(Date.now() / 1000)
-    const project: OAIProject = {
-      id: `proj_${randomUUID().replaceAll('-', '')}`,
-      object: 'project',
-      name: parsed.value.name!,
-      status: 'active',
-      pinned: parsed.value.pinned ?? false,
-      agent_id: parsed.value.agent_id ?? null,
-      environment: parsed.value.environment ?? null,
-      archived_at: null,
-      created_at: now,
-      updated_at: now,
-    }
-    json(res, 201, await this.store.projects.create(owner, project))
+    json(res, 201, await createProject(this.store, owner, parsed.value))
   }
 
   private async listProjects(res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
@@ -818,11 +836,7 @@ export class AgentsGateway {
       badRequest(res, parsed.error)
       return
     }
-    const updated = await this.store.projects.update(owner, project.id, {
-      ...project,
-      ...parsed.value,
-      updated_at: Math.floor(Date.now() / 1000),
-    })
+    const updated = await updateProject(this.store, owner, project, parsed.value)
     if (updated === undefined) notFound(res, `Project "${project.id}" not found`)
     else json(res, 200, updated)
   }
@@ -943,6 +957,11 @@ export class AgentsGateway {
 
   private async getAgent(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const agentId = routeParam(params, 'agent_id')
+    const builtin = builtinAgent(agentId, this.defaultModelName())
+    if (builtin) {
+      json(res, 200, builtin)
+      return
+    }
     const agent = await this.store.agents.get(owner, agentId)
     if (!agent) {
       notFound(res, `Agent "${agentId}" not found`)
@@ -953,6 +972,7 @@ export class AgentsGateway {
 
   private async updateAgent(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const agentId = routeParam(params, 'agent_id')
+    if (this.refuseBuiltin(res, agentId)) return
     const body = await readBody(req) as unknown as UpdateAgentParams
     if (body.tools !== undefined && body.tools !== null) {
       const toolError = validateMountableTools(body.tools)
@@ -990,6 +1010,7 @@ export class AgentsGateway {
 
   private async deleteAgent(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
     const agentId = routeParam(params, 'agent_id')
+    if (this.refuseBuiltin(res, agentId)) return
     if (!await this.store.agents.delete(owner, agentId)) {
       notFound(res, `Agent "${agentId}" not found`)
       return
@@ -2062,19 +2083,25 @@ export class AgentsGateway {
       const sandbox = await this.mountSessionPreset(agentCtx, owner, environment)
       this.mountAgentrySkills(agentCtx, resolved.id, owner)
       mountAgentInstructions(agentCtx, resolved.instructions, resolved.name)
-      // Mounted before the mask so an agent's `host_tools` can hide the agent tools.
-      mountAgentTools(agentCtx, {
+      // Tools this session registers on its own scope are outside DSH's mask: `host_tools.deny` skips them
+      // here, and a built-in agent's `allow` keeps only the ones it lists (saved agents keep them all).
+      const scopeNames = new Set<string>()
+      const denied = new Set(resolved.host_tools?.deny ?? [])
+      const allowed = resolved.built_in === true && resolved.host_tools?.allow != null ? new Set(resolved.host_tools.allow) : undefined
+      const scopeCtx = withToolFilter(agentCtx, name => !denied.has(name) && (allowed === undefined || allowed.has(name)), scopeNames)
+      mountAgentTools(scopeCtx, {
         owner,
         store: this.store,
         defaultModel: resolved.model,
         // What the agent can really call: its own scope (preset tools plus this session's MCP and wire tools).
         // Without the agent, the default preset's catalog (the model-facing tools are not in the global registry).
+        // A built-in agent (the setup assistant) creates agents for other work: offer them the whole Host catalog, not its own few tools.
         listTools: async (agent) => maskHostCatalog(
-          (agent !== undefined
+          (agent !== undefined && resolved.built_in !== true
             ? this.ctx.tools.schemas(agent as Parameters<Context['tools']['schemas']>[0])
             : await this.hostToolSchemas()
           ).map(schema => ({ name: schema.name, description: schema.description })),
-          resolved.host_tools,
+          resolved.built_in === true ? null : resolved.host_tools,
         ),
         callerGrants: effectiveGrants(resolved),
         builtinSkills: () => new Set(this.builtinSkills().map(b => b.name)),
@@ -2087,10 +2114,30 @@ export class AgentsGateway {
           }
         },
       })
+      // Projects, the Library and environments (before the mask, like the agent tools).
+      mountAgentryTools(scopeCtx, {
+        owner,
+        store: this.store,
+        sessionId,
+        defaultModel: resolved.model,
+        callerGrants: effectiveGrants(resolved),
+        builtinAgentIds: new Set(builtinAgents('').map(agent => agent.id)),
+        library: {
+          builtin: () => this.builtinLibraryApi.items(),
+          sources: (who) => this.libraryApi.sourceAgents(who),
+          draft: async (url) => this.libraryApi.draft(url, await this.hostToolCatalog()),
+        },
+        describe: (record) => this.environmentJson(owner, record),
+        askSchedules: resolved.built_in === true,
+        moveChat: async (id, projectId) => {
+          const row = await this.store.sessions.get(id, owner)
+          return row !== undefined && await this.changeSettings(row, owner, { project_id: projectId }) !== undefined
+        },
+      })
       // The user's isolated sandboxes, when Agentry Sandbox is configured.
       const sandboxProvider = this.sandboxes.get('sandbox') as AgentrySandboxProvider | undefined
       if (sandboxProvider?.api !== undefined) {
-        mountSandboxTools(agentCtx, {
+        mountSandboxTools(scopeCtx, {
           owner,
           store: this.store,
           provider: sandboxProvider,
@@ -2101,13 +2148,13 @@ export class AgentsGateway {
           ...(environment?.type === 'sandbox' && typeof environment['environment_id'] === 'string' ? { currentEnvironmentId: environment['environment_id'] } : {}),
         })
       }
-      mountSkillTools(agentCtx, {
+      mountSkillTools(scopeCtx, {
         owner,
         deps: this.installDeps(),
         agentId: async () => (await this.store.agents.get(owner, resolved.id))?.id,
         ...(this.skillsGithub ? { github: this.skillsGithub } : {}),
       })
-      applyHostToolsRestrict(agentCtx, resolved.host_tools)
+      applyHostToolsRestrict(agentCtx, resolved.host_tools, scopeNames)
       // Owner-scoped copies of DSH's schedule tools shadow the preset's, which see every user's tasks.
       // Loaded only with a Host schedule service: the schedule packages are optional peers.
       if (this.schedule() !== undefined) {
@@ -2269,7 +2316,7 @@ export class AgentsGateway {
    */
   private async resolveSessionAgent(body: CreateSessionParams, owner: OwnerId): Promise<OAIAgent> {
     if (typeof body.agent_id === 'string' && body.agent_id !== '') {
-      const saved = await this.store.agents.get(owner, body.agent_id)
+      const saved = builtinAgent(body.agent_id, this.defaultModelName()) ?? await this.store.agents.get(owner, body.agent_id)
       if (!saved) throw new AgentsApiRequestError(`Agent "${body.agent_id}" not found`, 404, 'resource_not_found')
       return body.agent ? overlayAgent(saved, body.agent) : saved
     }
@@ -3964,41 +4011,6 @@ export class AgentsGateway {
       })
     })
   }
-}
-
-/** Project fields a caller may set. Omitted fields keep their stored value. */
-type ProjectInput = Partial<Pick<OAIProject, 'name' | 'agent_id' | 'environment' | 'pinned'>>
-
-/**
- * Validate a project create or update body.
- * @param raw - parsed JSON body.
- * @param partial - update: omitted fields are left alone; create: `name` is required.
- * @returns the accepted fields, or a client-facing error message.
- */
-function parseProjectInput(raw: Record<string, unknown>, partial: boolean): { value: ProjectInput } | { error: string } {
-  const value: ProjectInput = {}
-  if (!partial || raw.name !== undefined) {
-    if (typeof raw.name !== 'string' || raw.name.trim() === '') return { error: 'Field "name" must be a non-empty string' }
-    value.name = raw.name.trim()
-  }
-  if (raw.agent_id !== undefined) {
-    if (raw.agent_id !== null && typeof raw.agent_id !== 'string') return { error: 'Field "agent_id" must be a string or null' }
-    value.agent_id = raw.agent_id
-  }
-  if (raw.environment !== undefined) {
-    if (raw.environment !== null && (typeof raw.environment !== 'object' || Array.isArray(raw.environment))) return { error: 'Field "environment" must be an environment config or null' }
-    value.environment = raw.environment as OAIEnvironmentConfig | null
-    const directory = (raw.environment as { directory?: unknown } | null)?.directory
-    if (directory !== undefined) {
-      const folder = normalizeWorkspaceSubdir(directory)
-      if (typeof folder === 'object') return { error: folder.error }
-    }
-  }
-  if (raw.pinned !== undefined) {
-    if (typeof raw.pinned !== 'boolean') return { error: 'Field "pinned" must be a boolean' }
-    value.pinned = raw.pinned
-  }
-  return { value }
 }
 
 /**

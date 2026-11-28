@@ -14,6 +14,7 @@ Package-local reference and change notes for `@agentry/api`.
 
 | Note | Summary |
 | --- | --- |
+| [2026-11-28-ask-agentry.md](changes/2026-11-28-ask-agentry.md) | Ask Agentry: the Agentry tools (projects, Library, environments) with approvals, the built-in Library served by the API, the built-in `agentry` setup agent |
 | [2026-11-28-session-start-speed.md](changes/2026-11-28-session-start-speed.md) | Parallel MCP mounts, opt-in per-server timing, measurement recipe, and deferred caching / prompt-prefix work |
 | [2026-11-28-agent-library.md](changes/2026-11-28-agent-library.md) | Agent Library sources: per-owner GitHub folder or gist sources, cached listings through the import fetch, library hints in the import parser |
 | [2026-11-28-agent-import.md](changes/2026-11-28-agent-import.md) | Agent import: drafts from Claude Code / ECC agent files and Agentry JSON, by GitHub or gist link or pasted text |

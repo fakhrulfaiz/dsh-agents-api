@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { APP_TOOLS } from '../src/mount-composio-app-tools.ts'
+import { AGENTRY_TOOL_NAMES } from '../src/mount-agentry-tools.ts'
 import { materializeAgent } from '../src/agent-records.ts'
 import { createLocalProvider } from '../src/environment/local.ts'
 import type { CreateAgentParams, OAIAgent } from '../src/types.ts'
@@ -821,7 +822,7 @@ describe('AgentsGateway', () => {
         },
       }),
     })).json() as { id: string }
-    expect(registeredTools.map(tool => tool.name).filter(name => !name.startsWith('skill_') && !APP_TOOL_NAMES.has(name))).toEqual(['get_weather'])
+    expect(registeredTools.map(tool => tool.name).filter(name => !name.startsWith('skill_') && !APP_TOOL_NAMES.has(name) && !(AGENTRY_TOOL_NAMES as readonly string[]).includes(name))).toEqual(['get_weather'])
 
     feed(created.id, logEvent('turn/start', { turn: 1 }, 1))
     const events: unknown[] = []
@@ -1182,7 +1183,7 @@ describe('AgentsGateway store and owner scoping', () => {
     expect((await fetch(`${root}/v1/agents/${agent.id}`, as('bob'))).status).toBe(404)
     expect((await fetch(`${root}/v1/agents/${agent.id}`, as('bob', { method: 'POST', body: '{"name":"x"}' }))).status).toBe(404)
     expect((await fetch(`${root}/v1/agents/${agent.id}`, as('bob', { method: 'DELETE' }))).status).toBe(404)
-    expect((await (await fetch(`${root}/v1/agents`, as('bob'))).json() as { data: unknown[] }).data).toEqual([])
+    expect((await (await fetch(`${root}/v1/agents`, as('bob'))).json() as { data: unknown[] }).data.filter(a => !(a as { built_in?: boolean }).built_in)).toEqual([])
     expect((await fetch(`${root}/v1/agents/sessions`, as('bob', { method: 'POST', body: JSON.stringify({ agent_id: agent.id }) }))).status).toBe(404)
 
     const session = await (await fetch(`${root}/v1/agents/sessions`, as('alice', { method: 'POST', body: JSON.stringify({ agent_id: agent.id }) }))).json() as { id: string }
@@ -1256,6 +1257,26 @@ describe('AgentsGateway.createIdleSession', () => {
     await store.ensureOwner(TEST_OWNER)
     await expect(api.createIdleSession(TEST_OWNER, { agent_id: 'missing' })).rejects.toMatchObject({ status: 404, code: 'resource_not_found' })
     await expect(api.createIdleSession(TEST_OWNER, {})).rejects.toBeInstanceOf(AgentsApiRequestError)
+  })
+
+  it('lists the built-in Agentry agent first, refuses changes, and runs it on agent_id "agentry"', async () => {
+    const { base, api, store, registeredTools, restrictCalls } = gateway()
+    await store.ensureOwner(TEST_OWNER)
+    const root = await base
+    const list = await (await fetch(`${root}/v1/agents`)).json() as { data: Array<{ id: string; built_in?: boolean; model: string }> }
+    expect(list.data[0]).toMatchObject({ id: 'agentry', built_in: true, model: 'deepseek-flash' })
+    expect((await fetch(`${root}/v1/agents/agentry`)).status).toBe(200)
+    expect((await fetch(`${root}/v1/agents/agentry`, { method: 'POST', body: '{"name":"x"}' })).status).toBe(409)
+    expect((await fetch(`${root}/v1/agents/agentry`, { method: 'DELETE' })).status).toBe(409)
+    const session = await api.createIdleSession(TEST_OWNER, { agent_id: 'agentry' })
+    expect(session.agent).toMatchObject({ id: 'agentry', name: 'Agentry', model: 'deepseek-flash' })
+    // Scope tools: only those the built-in lists (no skill installs); the DSH mask names global tools only.
+    const names = registeredTools.map(tool => tool.name)
+    expect(names).toEqual(expect.arrayContaining(['project_create', 'library_add', 'environment_list']))
+    expect(names.filter(name => name.startsWith('skill_'))).toEqual([])
+    expect(restrictCalls.at(-1)?.allow).toEqual(expect.arrayContaining(['schedule_create', 'read', 'web_search']))
+    expect(restrictCalls.at(-1)?.allow).not.toContain('project_create')
+    expect(restrictCalls.at(-1)?.allow).not.toContain('bash')
   })
 
   it('rolls back the registration and writes no row when agents.create fails', async () => {

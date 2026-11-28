@@ -247,6 +247,8 @@ export interface OAIAgent {
   reasoning?: OAIReasoningConfig | null
   service_tier?: ServiceTier | null
   text?: OAITextConfig | null
+  /** Agentry extension: a built-in agent (`src/builtin-agents.ts`), listed for every owner and read-only. */
+  built_in?: boolean
 }
 
 /** Body for `POST /v1/agents`. */

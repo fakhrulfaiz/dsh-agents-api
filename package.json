@@ -29,6 +29,7 @@
   "files": [
     "lib/*.js",
     "lib/migrations/*.sql",
+    "lib/agent-library/*.md",
     "cordis.patch.yml",
     "lib/types/**/*.d.ts"
   ],

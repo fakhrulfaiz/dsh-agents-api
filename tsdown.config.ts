@@ -16,5 +16,6 @@ export default defineConfig({
     // The Agentry Sandbox client ships as TypeScript source (a linked package); bundle it and its RPC runtime.
     alwaysBundle: [/^@agentry\/sandbox/, /^@connectrpc\//, /^@bufbuild\//, /^zod/],
   },
-  copy: [{ from: 'src/store/migrations/*.sql', to: 'lib/migrations' }],
+  // The built-in agent Library is read at runtime from `lib/agent-library` (see src/agent-import/builtin-library.ts).
+  copy: [{ from: 'src/store/migrations/*.sql', to: 'lib/migrations' }, { from: 'src/agent-import/agent-library/*.md', to: 'lib/agent-library' }],
 })
