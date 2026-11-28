@@ -14,6 +14,7 @@ Package-local reference and change notes for `@agentry/api`.
 
 | Note | Summary |
 | --- | --- |
+| [2026-11-28-port-preview.md](changes/2026-11-28-port-preview.md) | Sandbox port preview: listening ports and an owner-scoped pass-through to a port inside a sandbox |
 | [2026-11-28-snapshots.md](changes/2026-11-28-snapshots.md) | Sandbox snapshots: save, list, poll, restore, delete, create from a snapshot, `snapshot_levels` on providers, `delete_snapshots` on environment delete |
 | [2026-11-27-environment-create-background.md](changes/2026-11-27-environment-create-background.md) | `POST /agents/environments` on the sandbox provider answers `pending` at once and sets up in the background; timed-out creates adopt the sandbox; delete during setup; interrupted setups fail |
 | [2026-11-28-project-folders.md](changes/2026-11-28-project-folders.md) | Project folders: `directory` on sandbox session environments and Project defaults, `directory_unavailable` |

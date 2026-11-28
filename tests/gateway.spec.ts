@@ -1972,6 +1972,12 @@ async function snapshotService() {
         snaps.set(snap.id, snap)
         return send(202, wire(snap))
       }
+      m = /^\/v1\/sandboxes\/([^/]+)\/ports\/(\d+)\/(.*)$/.exec(path)
+      if (m) {
+        if (sandboxes.get(m[1]!)?.owner !== owner) return fail(404, 'not_found', 'sandbox not found')
+        res.writeHead(200, { 'content-type': 'text/html' })
+        return void res.end(`<h1>port ${m[2]!} path ${m[3]!} ${req.method!} ${raw.toString()} auth=${String(req.headers['authorization'])} cookie=${String(req.headers['cookie'])}</h1>`)
+      }
       m = /^\/v1\/sandboxes\/([^/]+)\/restore$/.exec(path)
       if (m && req.method === 'POST') {
         const snap = snaps.get(String(body['snapshot']))
@@ -2065,6 +2071,22 @@ describe('environment snapshots through the gateway', () => {
     expect((await call('/agents/environments/env_missing/snapshots', post({}))).status).toBe(404)
     const local = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({}) })).json()) as { id: string }
     expect((await call(`/agents/environments/${local.id}/snapshots`, post({}))).status).toBe(409)
+  })
+
+  it('passes port preview requests through the service, owner-scoped, without the caller credentials', async () => {
+    const { call, env, svc } = await setup()
+    const r = await fetch((await call(`/agents/environments/${env.id}/ports/8765/a/b.html?x=1`)).url, { method: 'POST', body: 'hi', headers: { 'OpenAI-Beta': 'agents=v1', cookie: 'sid=1', authorization: 'Bearer secret' } })
+    expect(r.status).toBe(200)
+    expect(r.headers.get('content-type')).toBe('text/html')
+    const text = await r.text()
+    expect(text).toContain('port 8765 path a/b.html POST hi')
+    expect(text).not.toContain('secret')
+    expect(text).toContain('cookie=undefined')
+    expect(svc.calls).toContain('POST /v1/sandboxes/' + [...svc.sandboxes.keys()][0]! + '/ports/8765/a/b.html?x=1')
+    expect((await call('/agents/environments/env_missing/ports/8765/')).status).toBe(404)
+    expect((await call(`/agents/environments/${env.id}/ports/99999/`)).status).toBe(400)
+    const local = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({}) })).json()) as { id: string }
+    expect((await call(`/agents/environments/${local.id}/ports/8765/`)).status).toBe(409)
   })
 
   it('scopes snapshots to their owner', async () => {

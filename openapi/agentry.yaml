@@ -2425,6 +2425,76 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/environments/{environment_id}/ports:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/EnvironmentId"
+    get:
+      summary: List ports an app in the sandbox listens on
+      description: TCP ports bound to all addresses (not only 127.0.0.1), for the preview. Sandbox environments only; starts a stopped sandbox.
+      tags:
+        - Environments
+      responses:
+        "200":
+          description: Ports
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        port: { type: integer }
+                      required: [port]
+                required: [object, data]
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The environment is not a sandbox.
+  /v1/agents/environments/{environment_id}/ports/{port}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/EnvironmentId"
+      - $ref: "#/components/parameters/PortNumber"
+    get:
+      summary: Request the root of the app listening on a sandbox port
+      tags:
+        - Environments
+      responses:
+        default:
+          description: The app's response, streamed (any status). 501 `port_preview_unsupported` when the sandbox's place cannot preview ports; 502 `port_unreachable` when nothing answers.
+    post:
+      summary: POST to the app listening on a sandbox port
+      tags:
+        - Environments
+      responses:
+        default:
+          description: The app's response, streamed.
+  /v1/agents/environments/{environment_id}/ports/{port}/{path}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - $ref: "#/components/parameters/EnvironmentId"
+      - $ref: "#/components/parameters/PortNumber"
+      - $ref: "#/components/parameters/FilePath"
+    get:
+      summary: Request a path of the app listening on a sandbox port
+      tags:
+        - Environments
+      responses:
+        default:
+          description: The app's response, streamed.
+    post:
+      summary: POST to a path of the app listening on a sandbox port
+      tags:
+        - Environments
+      responses:
+        default:
+          description: The app's response, streamed.
   /v1/agents/sessions:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -3748,6 +3818,14 @@ components:
       required: true
       schema:
         type: string
+    PortNumber:
+      name: port
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 65535
     FilePath:
       name: path
       in: path

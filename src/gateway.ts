@@ -47,6 +47,7 @@ import { mountAgentInstructions } from './mount-instructions.ts'
 import { AGENTRY_PRESET_ID } from './preset.ts'
 import { normalizeWorkspaceSubdir, shellQuote } from './sandbox/workspace-subdir.ts'
 import { copyIntoSandboxUploads, MAX_ARTIFACT_BYTES, providerRows, type AgentrySandboxProvider } from './sandbox/agentry-sandbox-provider.ts'
+import { LISTING_SCRIPT, parseListeningPorts } from './sandbox/ports.ts'
 import { sandboxCredentials, sandboxStartErrorIn, type SandboxPresets } from './sandbox/presets.ts'
 import { runInEnvd, SandboxApiError, type EnvdClient } from '@agentry/sandbox/client'
 import { createAgentrySkillProvider, SkillInvalidations } from './skills/provider.ts'
@@ -502,6 +503,11 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents/environments/:environment_id/snapshots', handler: (req, res, _url, params, p) => this.saveSnapshot(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/:environment_id/snapshots', handler: (_req, res, _url, params, p) => this.listEnvironmentSnapshots(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/environments/:environment_id/restore', handler: (req, res, _url, params, p) => this.restoreSnapshot(req, res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/:environment_id/ports', handler: (_req, res, _url, params, p) => this.listEnvironmentPorts(res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/:environment_id/ports/:port', handler: (req, res, url, params, p) => this.proxyEnvironmentPort(req, res, url, params, p.owner) },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/ports/:port', handler: (req, res, url, params, p) => this.proxyEnvironmentPort(req, res, url, params, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/:environment_id/ports/:port/*path', handler: (req, res, url, params, p) => this.proxyEnvironmentPort(req, res, url, params, p.owner) },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/ports/:port/*path', handler: (req, res, url, params, p) => this.proxyEnvironmentPort(req, res, url, params, p.owner) },
       { method: 'POST', pattern: '/agents/environments/:environment_id/terminals', handler: (req, res, _url, params, p) => this.openTerminal(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/:environment_id/terminals/:terminal_id/stream', handler: (req, res, _url, params, p) => this.streamTerminal(req, res, params, p.owner) },
       { method: 'POST', pattern: '/agents/environments/:environment_id/terminals/:terminal_id/input', handler: (req, res, _url, params, p) => this.terminalCall(req, res, params, p.owner, 'input') },
@@ -3060,6 +3066,50 @@ export class AgentsGateway {
     if (error instanceof TerminalError) json(res, error.status, { error: { type: 'invalid_request_error', code: error.code, message: error.message } })
     else if (error instanceof SandboxApiError) json(res, error.status >= 400 ? error.status : 502, { error: { type: 'invalid_request_error', code: error.code, message: errorMessage(error) } })
     else json(res, 502, { error: { type: 'invalid_request_error', code: 'terminal_unavailable', message: errorMessage(error) } })
+  }
+
+  /** `GET /agents/environments/{id}/ports`: ports an app in the sandbox listens on (all addresses), for the preview. */
+  private async listEnvironmentPorts(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const target = await this.snapshotTarget(res, params, owner)
+    if (!target) return
+    try {
+      await target.provider.api(owner).start(target.sandboxId)
+      const run = await target.provider.exec(target.record, LISTING_SCRIPT, { timeoutMs: 10_000 })
+      json(res, 200, { object: 'list', data: parseListeningPorts(run.stdout).map(port => ({ port })) })
+    } catch (e: unknown) {
+      this.sandboxFailure(res, e)
+    }
+  }
+
+  /** `GET|POST /agents/environments/{id}/ports/{port}/{path}`: the app's response, streamed (no buffering either way). */
+  private async proxyEnvironmentPort(req: IncomingMessage, res: ServerResponse, url: URL, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const target = await this.snapshotTarget(res, params, owner)
+    if (!target) return
+    const port = Number(routeParam(params, 'port'))
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return badRequest(res, 'Port must be a number from 1 to 65535')
+    const abort = new AbortController()
+    res.on('close', () => { if (!res.writableEnded) abort.abort() })
+    // Only headers that describe the request itself; the caller's credentials never reach the app.
+    const headers: Record<string, string> = {}
+    for (const name of ['accept', 'accept-language', 'content-type', 'content-length', 'range', 'if-none-match', 'if-modified-since', 'user-agent']) {
+      const v = req.headers[name]
+      if (typeof v === 'string') headers[name] = v
+    }
+    try {
+      const withPath = (params['path'] ?? '').split('/').map(encodeURIComponent).join('/')
+      const up = await target.provider.proxyPort(owner, target.sandboxId, port, `${withPath}${url.search}`, {
+        method: req.method ?? 'GET', headers, signal: abort.signal, ...(req.method === 'POST' ? { body: req } : {}),
+      })
+      const out: Record<string, string | string[]> = {}
+      up.headers.forEach((v, k) => { if (!['connection', 'keep-alive', 'transfer-encoding', 'content-encoding', 'content-length'].includes(k)) out[k] = v })
+      if (up.headers.get('content-encoding') === null && up.headers.get('content-length')) out['content-length'] = up.headers.get('content-length')!
+      res.writeHead(up.status, out)
+      if (!up.body) return void res.end()
+      await pipeline(Readable.fromWeb(up.body as unknown as NodeReadableStream), res).catch(() => {})
+    } catch (e: unknown) {
+      if (!res.headersSent) this.sandboxFailure(res, e)
+      else res.destroy()
+    }
   }
 
   private async openTerminal(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {

@@ -36,6 +36,11 @@ export interface AgentrySandboxProvider extends SandboxProvider {
   api(owner: string): SandboxApi
   /** The service's download of a files-only snapshot, as the raw response (stream it; do not buffer). Throws SandboxApiError on a refusal. */
   downloadSnapshot(owner: string, snapshotId: string, signal?: AbortSignal): Promise<Response>
+  /**
+   * Sends a request to a port inside the sandbox through the service and answers the raw response, whatever its status
+   * (stream it; do not buffer). Throws SandboxApiError only when the service cannot be reached.
+   */
+  proxyPort(owner: string, sandboxId: string, port: number, target: string, init: { method: string; headers: Record<string, string>; body?: Readable; signal?: AbortSignal }): Promise<Response>
   /** Streams an archive to the service as a new files-only snapshot; answers the snapshot. Throws SandboxApiError on a refusal. */
   importSnapshot(owner: string, body: Readable, opts: { name?: string; contentLength?: number; signal?: AbortSignal }): Promise<WireSnapshot>
   /** Workspace files with size and modification time, skipping `.git` and `node_modules` (at most 5000). */
@@ -204,6 +209,21 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
       const res = await fetch(`${opts.url.replace(/\/+$/, '')}/v1/snapshots/${encodeURIComponent(snapshotId)}/download`, { headers: serviceHeaders(owner), ...(signal ? { signal } : {}) })
       if (!res.ok) throw await serviceError(res)
       return res
+    },
+
+    async proxyPort(owner, sandboxId, port, target, init) {
+      const url = `${opts.url.replace(/\/+$/, '')}/v1/sandboxes/${encodeURIComponent(sandboxId)}/ports/${String(port)}/${target}`
+      try {
+        return await fetch(url, {
+          method: init.method,
+          headers: { ...init.headers, ...serviceHeaders(owner) },
+          ...(init.body ? { body: Readable.toWeb(init.body) as unknown as ReadableStream, duplex: 'half' } : {}),
+          redirect: 'manual',
+          ...(init.signal ? { signal: init.signal } : {}),
+        } as RequestInit)
+      } catch (e) {
+        throw new SandboxApiError(0, 'unreachable', `Agentry Sandbox is not reachable: ${(e as Error).message}`)
+      }
     },
 
     async importSnapshot(owner, body, o) {
