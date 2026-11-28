@@ -26,6 +26,11 @@ describe('agent import parser', () => {
     expect(notes).toContain('Dropped tools this server does not have: NotebookEdit, TodoWrite.')
   })
 
+  it('reads Agentry library hints: title, subagents, browser and apps', () => {
+    const { draft } = parseAgentDefinition(md('name: e2e-runner\ntitle: E2E runner\ndescription: d\ntools: read, bash\nsubagents: true\nbrowser: true\napps: gmail, googlecalendar'), CATALOG)
+    expect(draft).toMatchObject({ name: 'E2E runner', host_tools: { allow: ['read', 'bash'] }, multi_agent: { enabled: true }, browser: true, apps: { gmail: 'all', googlecalendar: 'all' } })
+  })
+
   it('sets no tool mask without a tools line', () => {
     expect(parseAgentDefinition(md('name: helper\ndescription: d'), CATALOG).draft.host_tools).toBeUndefined()
   })

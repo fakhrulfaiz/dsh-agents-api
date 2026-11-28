@@ -81,6 +81,7 @@ import { OwnerSecrets } from './secrets/owner-secrets.ts'
 import { ComposioConnectorsApi } from './connectors/composio-routes.ts'
 import { AgentImportApi } from './agent-import/routes.ts'
 import { DEFAULT_IMPORT_HOSTS } from './agent-import/fetch.ts'
+import { LibrarySourcesApi } from './agent-import/library.ts'
 import { BRIDGE_HOST_CWD, browserPorts, BROWSER_PROBE_COMMAND, browserMcpTool, browserMode, normalizeBrowserDefault, type BrowserMode, mountBrowserGuidance, validateBrowserField, type BrowserSandbox } from './mount-browser.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
@@ -417,6 +418,11 @@ export class AgentsGateway {
       hosts: options.importHosts ?? DEFAULT_IMPORT_HOSTS,
       catalog: async () => new Set((await this.hostToolSchemas()).map(schema => schema.name)),
     })
+    const libraryApi = new LibrarySourcesApi({
+      github: options.skillsGithub ?? DEFAULT_GITHUB,
+      hosts: options.importHosts ?? DEFAULT_IMPORT_HOSTS,
+      store: () => this.store,
+    })
     const connectorsApi = new ComposioConnectorsApi({
       secrets: this.ownerSecrets,
       mcpUrl: this.composio.mcpUrl ?? DEFAULT_COMPOSIO_MCP_URL,
@@ -572,6 +578,7 @@ export class AgentsGateway {
       ...scheduleApi.routes(),
       ...connectorsApi.routes(),
       ...importApi.routes(),
+      ...libraryApi.routes(),
       ...this.skillInstallApi.routes(),
       ...skillsApi.routes(),
       ...this.commandsApi.routes(),

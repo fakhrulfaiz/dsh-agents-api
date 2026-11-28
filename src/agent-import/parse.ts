@@ -2,6 +2,8 @@
  * Agent definitions to a draft `CreateAgentParams` (nothing is saved here):
  *
  * - Claude Code / ECC agent files: YAML front matter (`name`, `description`, `tools`, `model`) and a Markdown body (the prompt).
+ *   Agentry's own library files add optional hints: `title` (display name), `subagents: true`, `browser: true|false`
+ *   and `apps` (Composio toolkit slugs, each granted in full).
  * - Agentry agent JSON (the `GET /agents/{id}` shape; `id`, timestamps and masked MCP tools are dropped).
  */
 import { parse as parseYaml } from 'yaml'
@@ -89,8 +91,9 @@ function fromMarkdown(text: string, catalog: ReadonlySet<string>): ParsedAgent |
   const instructions = body.trim()
   checkInstructions(instructions)
   const notes: string[] = []
+  const title = typeof data['title'] === 'string' && data['title'].trim() !== '' ? data['title'].trim() : undefined
   const draft: AgentDraft = {
-    name: titleFromSlug(data['name']),
+    name: title ?? titleFromSlug(data['name']),
     instructions,
     metadata: { description: data['description'].trim().slice(0, 512) },
   }
@@ -110,6 +113,10 @@ function fromMarkdown(text: string, catalog: ReadonlySet<string>): ParsedAgent |
     draft.host_tools = { allow: [...allow] }
     if (dropped.length > 0) notes.push(`Dropped tools this server does not have: ${dropped.join(', ')}.`)
   }
+  if (data['subagents'] === true) draft.multi_agent = { enabled: true }
+  if (typeof data['browser'] === 'boolean') draft.browser = data['browser']
+  const apps = toolList(data['apps'])?.filter(slug => /^[a-z0-9][a-z0-9_-]{0,63}$/u.test(slug))
+  if (apps !== undefined && apps.length > 0) draft.apps = Object.fromEntries(apps.map(slug => [slug, 'all' as const]))
   if (typeof data['model'] === 'string' && data['model'].trim() !== '') {
     notes.push(`The file asks for model "${data['model'].trim()}"; the agent uses your default model instead. Pick one in the form.`)
   }

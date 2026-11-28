@@ -311,6 +311,16 @@ export interface SecretCollection {
   delete(owner: OwnerId, name: string): Promise<boolean>
 }
 
+/** One agent library source of an owner: a label and a GitHub folder or gist link (`/agents/library/sources`). */
+export interface LibrarySource {
+  id: string
+  object: 'library.source'
+  label: string
+  url: string
+  /** Epoch seconds. */
+  created_at: number
+}
+
 export interface Store {
   /**
    * Record an owner. Idempotent.
@@ -324,6 +334,7 @@ export interface Store {
   files: FileCollection
   skills: SkillCollection
   secrets: SecretCollection
+  librarySources: OwnedCollection<LibrarySource>
   sessions: {
     /**
      * @param row - new index row; its owner must exist.
@@ -531,6 +542,7 @@ export function guardStore(store: Store): Store {
     agents: guardCollection(store.agents),
     templates: guardCollection(store.templates),
     environments: guardCollection(store.environments),
+    librarySources: guardCollection(store.librarySources),
     projects: guardProjects(store.projects),
     sessions: {
       insert: guard(sessions.insert.bind(sessions)),

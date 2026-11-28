@@ -15,6 +15,7 @@ Package-local reference and change notes for `@agentry/api`.
 | Note | Summary |
 | --- | --- |
 | [2026-11-28-session-start-speed.md](changes/2026-11-28-session-start-speed.md) | Parallel MCP mounts, opt-in per-server timing, measurement recipe, and deferred caching / prompt-prefix work |
+| [2026-11-28-agent-library.md](changes/2026-11-28-agent-library.md) | Agent Library sources: per-owner GitHub folder or gist sources, cached listings through the import fetch, library hints in the import parser |
 | [2026-11-28-agent-import.md](changes/2026-11-28-agent-import.md) | Agent import: drafts from Claude Code / ECC agent files and Agentry JSON, by GitHub or gist link or pasted text |
 | [2026-11-28-owner-connectors.md](changes/2026-11-28-owner-connectors.md) | Owner connector keys: sealed per-owner Composio keys, key and connections routes, mount-time Composio tool on every session |
 | [2026-11-28-port-preview.md](changes/2026-11-28-port-preview.md) | Sandbox port preview: listening ports and an owner-scoped pass-through to a port inside a sandbox |

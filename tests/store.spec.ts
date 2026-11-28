@@ -46,7 +46,7 @@ const harnesses: Array<[string, Harness]> = [
       const client = new pg.Client({ connectionString: await contractUrl() })
       await client.connect()
       try {
-        await client.query('truncate admin_audit, owner_secrets, skills, files, sessions, projects, environments, environment_templates, agents, owners')
+        await client.query('truncate admin_audit, library_sources, owner_secrets, skills, files, sessions, projects, environments, environment_templates, agents, owners')
       } finally {
         await client.end()
       }
@@ -531,19 +531,19 @@ describe.each(harnesses)('Projects store (%s)', (_name, harness) => {
 describe('Postgres migrations', () => {
   it('migrations apply from empty', async () => {
     const url = await postgres!.createDatabase('empty')
-    expect(await migrate(url)).toEqual({ applied: ['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql', '0006-owner-secrets.sql'] })
+    expect(await migrate(url)).toEqual({ applied: ['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql', '0006-owner-secrets.sql', '0007-library-sources.sql'] })
     expect(await migrate(url)).toEqual({ applied: [] })
   })
 
   it('migrations are idempotent under concurrent start', async () => {
     const url = await postgres!.createDatabase('concurrent')
     const results = await Promise.all([migrate(url), migrate(url)])
-    expect(results.flatMap(result => result.applied)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql', '0006-owner-secrets.sql'])
+    expect(results.flatMap(result => result.applied)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql', '0006-owner-secrets.sql', '0007-library-sources.sql'])
     const client = new pg.Client({ connectionString: url })
     await client.connect()
     try {
       const rows = await client.query<{ name: string }>('select name from schema_migrations')
-      expect(rows.rows.map(row => row.name)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql', '0006-owner-secrets.sql'])
+      expect(rows.rows.map(row => row.name)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql', '0006-owner-secrets.sql', '0007-library-sources.sql'])
     } finally {
       await client.end()
     }
@@ -557,7 +557,7 @@ describe('Postgres migrations', () => {
         "select table_name from information_schema.tables where table_schema = 'public' order by table_name",
       )
       expect(tables.rows.map(row => row.table_name)).toEqual([
-        'admin_audit', 'agents', 'environment_templates', 'environments', 'files', 'owner_secrets', 'owners', 'projects', 'schema_migrations', 'sessions', 'skills',
+        'admin_audit', 'agents', 'environment_templates', 'environments', 'files', 'library_sources', 'owner_secrets', 'owners', 'projects', 'schema_migrations', 'sessions', 'skills',
       ])
       const indexes = await client.query<{ indexdef: string }>(
         "select indexdef from pg_indexes where schemaname = 'public' and indexname like '%\\_idx' order by indexname",
@@ -568,6 +568,7 @@ describe('Postgres migrations', () => {
         '(owner_id, created_at DESC)',
         '(owner_id, session_id, attachment_id)',
         '(owner_id, status, created_at)',
+        '(owner_id, created_at DESC)',
         '(owner_id, created_at DESC)',
         '(owner_id, status, pinned, created_at DESC)',
         '(owner_id, created_at DESC)',

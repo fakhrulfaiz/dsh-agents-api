@@ -22,6 +22,7 @@ import {
   type FileRow,
   decodeSessionCursor,
   encodeSessionCursor,
+  type LibrarySource,
   type OwnedCollection,
   type ProjectCollection,
   type SessionIndexPatch,
@@ -32,7 +33,7 @@ import {
 
 /** Owned-collection table plus the columns copied out of `body`. */
 interface OwnedTable<T> {
-  table: 'agents' | 'environment_templates' | 'environments' | 'projects'
+  table: 'agents' | 'environment_templates' | 'environments' | 'projects' | 'library_sources'
   columns: readonly string[]
   values: (value: T) => unknown[]
 }
@@ -41,7 +42,7 @@ interface OwnedTable<T> {
  * @param table - table without copied columns.
  * @returns its spec.
  */
-function plainTable<T>(table: 'agents' | 'environment_templates'): OwnedTable<T> {
+function plainTable<T>(table: 'agents' | 'environment_templates' | 'library_sources'): OwnedTable<T> {
   return { table, columns: [], values: () => [] }
 }
 
@@ -390,6 +391,7 @@ export async function openPostgresStore(url: string, onIdleClientError?: (error:
     agents: ownedCollection(pool, plainTable<OAIAgent>('agents')),
     templates: ownedCollection(pool, plainTable<EnvironmentTemplate>('environment_templates')),
     environments: ownedCollection(pool, ENVIRONMENTS),
+    librarySources: ownedCollection(pool, plainTable<LibrarySource>('library_sources')),
     projects: projectCollection(pool),
     files: fileCollection(pool),
     skills: skillCollection(pool),

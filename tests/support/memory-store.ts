@@ -17,6 +17,7 @@ import {
   type FileRow,
   decodeSessionCursor,
   encodeSessionCursor,
+  type LibrarySource,
   type OwnedCollection,
   type ProjectCollection,
   type SessionIndexPatch,
@@ -61,6 +62,7 @@ export class MemoryStore implements Store {
   readonly agents: OwnedCollection<OAIAgent> = this.#collection<OAIAgent>()
   readonly templates: OwnedCollection<EnvironmentTemplate> = this.#collection<EnvironmentTemplate>()
   readonly environments: OwnedCollection<EnvironmentRecord> = this.#collection<EnvironmentRecord>()
+  readonly librarySources: OwnedCollection<LibrarySource> = this.#collection<LibrarySource>()
 
   readonly #projects = new Map<string, Entry<OAIProject>>()
 
