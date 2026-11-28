@@ -18,7 +18,7 @@ Session create already answers early (see `2026-11-27-fast-session-create.md`), 
 Recipe (not yet measured against this change — see below):
 
 1. Start the dev stack with the flag: `AGENTRY_DEBUG_TIMING=1 scripts/dev.sh` (start Agentry Sandbox first when `AGENTRY_SANDBOX_URL` is set, as the launcher says).
-2. Create a lean session: a saved agent with no `mcp` tools whose Composio grants allow no apps (so the owner connector is skipped), for example `POST /v1/agents/sessions` with `{"agent":{"instructions":"Reply briefly."},"input":"Say OK"}` and headers `Authorization: Bearer $AGENTRY_DEV_KEY`, `OpenAI-Beta: agents=v1`, `content-type: application/json`. Time create to first reply.
+2. Create a lean session: an inline agent with no `mcp` tools and `apps: {}` (no Composio apps allowed, so the owner connector is skipped), for example `POST /v1/agents/sessions` with `{"agent":{"model":"deepseek-chat","instructions":"Reply briefly.","apps":{}},"input":"Say OK"}` and headers `Authorization: Bearer $AGENTRY_DEV_KEY`, `OpenAI-Beta: agents=v1`, `content-type: application/json`. Omitting `apps` would leave grants unrestricted and still mount the owner's Composio tool. Time create to first reply.
 3. Create a full session the same way with the owner's normal agent (its Composio connector plus any other configured MCP tool). Time create to first reply and note the `[agentry-timing]` line in the API process output.
 4. Read `Input` and `Cached` token counts for the first turn in the web app's Trajectory Inspector (they come from `input_tokens` and `input_tokens_details.cached_tokens` on the turn). A single run is a sample, not a benchmark claim; repeat a few times if the numbers matter.
 
