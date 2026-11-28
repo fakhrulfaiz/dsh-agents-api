@@ -21,6 +21,7 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 | `GET` `POST` `DELETE` | `/agents/environments/{id}` | Retrieve (status `failed` when the directory is gone), rename (`POST {"name"}`, extension; empty clears it), or delete one environment and its directory |
 | `POST` `GET` | `/agents/environments/{id}/files` | Write or list files in the environment workspace |
 | `GET` | `/agents/environments/{id}/files/{path}` | Read one environment file |
+| `GET` | `/agents/environments/{id}/folders` | Sub-folders of one workspace folder (`path`, relative; empty = root) for a folder picker; 404 when the folder is missing |
 | `POST` | `/agents/files` | Upload one file (`multipart/form-data`, part `file`). See [File attachments](#file-attachments) |
 | `GET` | `/agents/files` | List the caller's uploaded files, newest first (`limit`, `after`, `status`) |
 | `GET` | `/agents/files/{file_id}/content` | Download a staged or attached file of the caller |

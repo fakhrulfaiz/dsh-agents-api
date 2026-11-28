@@ -7,3 +7,7 @@
 - Projects: `project.environment.directory` is validated on create and update, and flows into new chats through `resolveProjectDefaults` unchanged.
 - This is a starting folder, not isolation: the agent may leave it. Separation needs a separate environment.
 - Resume after a restart reuses the cwd from the session log, so a resumed session keeps its folder (not covered by a dedicated test).
+
+## Listing folders (follow-up)
+
+`GET /agents/environments/{id}/folders?path=<relative folder>` answers `{ object: 'list', path, data: [{ name, path }], has_more }` with the folder's immediate sub-directories. `path` is checked with the same rules as `directory`. Sandbox providers run a small `sh` loop (no `find -printf`), starting a stopped sandbox first; the `local` provider reads the directory. Symlinks are skipped, a missing folder is 404.

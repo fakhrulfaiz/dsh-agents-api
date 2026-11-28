@@ -5,6 +5,7 @@ Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
 ## Unreleased
 
+- 2026-11-28: `GET /v1/agents/environments/{id}/folders?path=` lists one workspace folder's immediate sub-folders (`{name, path}`, sorted ignoring case, at most 500 with `has_more`; dot-folders included, symlinks skipped) for the web app's folder picker. `path` follows the Project folder rules (400 when bad), a missing folder answers 404, a stopped sandbox is started first.
 - 2026-11-28: Project folders. A `sandbox` session environment (and a Project's default `environment`) takes an optional `directory`: a folder inside the environment's workspace. The session's working directory is that folder, created with `mkdir -p` as the agent user first (a stopped sandbox is started; local environments use the host), and the stored environment keeps `directory`. A starting folder, not isolation. Invalid folders answer 400 (also on project create and update), a failed `mkdir` 409 `directory_unavailable`. See `docs/changes/2026-11-28-project-folders.md`.
 - 2026-11-28: The dev profile (`cordis.patch.yml`) can also accept Keycloak tokens next to the dev key: set `AGENTRY_KEYCLOAK_ISSUER` (and optionally `AGENTRY_KEYCLOAK_AUDIENCE`, default `agentry-api`) before `scripts/dev.sh`. Unset, nothing changes. Used for the web app's Keycloak live check.
 ## 0.3.0 — 2026-11-28

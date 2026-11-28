@@ -7,7 +7,7 @@
  * captured as an agent id.
  */
 
-import { mkdir, readFile, stat } from 'node:fs/promises'
+import { mkdir, readdir, readFile, stat } from 'node:fs/promises'
 import { isAbsolute, join, posix } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -486,6 +486,7 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents/environments/:environment_id/files', handler: (req, res, _url, params, p) => this.writeEnvironmentFile(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/:environment_id/files/*path', handler: (_req, res, _url, params, p) => this.readEnvironmentFile(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/:environment_id/files', handler: (_req, res, url, params, p) => this.listEnvironmentFiles(res, url, params, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/:environment_id/folders', handler: (_req, res, url, params, p) => this.listEnvironmentFolders(res, url, params, p.owner) },
       { method: 'POST', pattern: '/agents/environments/:environment_id/start', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'start') },
       { method: 'POST', pattern: '/agents/environments/:environment_id/stop', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'stop') },
       { method: 'POST', pattern: '/agents/environments/:environment_id/reset', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'reset') },
@@ -3174,6 +3175,64 @@ export class AgentsGateway {
       json(res, 200, { object: 'list', data, has_more: page.has_more, ...(page.next !== undefined ? { next: page.next } : {}) })
     } catch (error: unknown) {
       badRequest(res, errorMessage(error))
+    }
+  }
+
+  /** `GET /agents/environments/{id}/folders?path=`: the immediate sub-folders of one workspace folder. */
+  private async listEnvironmentFolders(res: ServerResponse, url: URL, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!record) {
+      notFound(res, 'environment not found')
+      return
+    }
+    const folder = normalizeWorkspaceSubdir(url.searchParams.get('path') ?? undefined)
+    if (typeof folder === 'object') {
+      badRequest(res, folder.error)
+      return
+    }
+    const provider = this.providerOr400(res, record)
+    if (provider === undefined) return
+    const root = record.provider_metadata['workspace_directory']
+    if (root === undefined) {
+      badRequest(res, `environment ${record.id} has no workspace`)
+      return
+    }
+    const dir = folder === undefined ? root : posix.join(root, folder)
+    try {
+      let names: string[]
+      if (provider.kind === 'local') {
+        try {
+          names = (await readdir(dir, { withFileTypes: true })).filter(e => e.isDirectory()).map(e => e.name)
+        } catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ENOTDIR') {
+            notFound(res, `folder not found: ${folder ?? ''}`)
+            return
+          }
+          throw error
+        }
+      } else {
+        const sandbox = provider as Partial<AgentrySandboxProvider>
+        if (typeof sandbox.exec !== 'function') {
+          badRequest(res, `sandbox provider "${provider.kind}" cannot list folders`)
+          return
+        }
+        const sandboxId = record.provider_metadata['sandbox_id']
+        if (typeof sandbox.api === 'function' && sandboxId !== undefined) await sandbox.api(owner).start(sandboxId)
+        const script = `cd -- ${shellQuote(dir)} 2>/dev/null || exit 44; for d in .[!.]* ..?* *; do if [ -d "$d" ] && [ ! -L "$d" ]; then printf '%s\\n' "$d"; fi; done`
+        const result = await sandbox.exec(record, script)
+        if (result.code === 44) {
+          notFound(res, `folder not found: ${folder ?? ''}`)
+          return
+        }
+        if (result.code !== 0) throw new Error(result.stderr.trim().slice(-500) || `exit code ${String(result.code)}`)
+        names = result.stdout.split('\n').filter(n => n !== '')
+      }
+      names.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()) || (a < b ? -1 : a > b ? 1 : 0))
+      const limit = 500
+      const data = names.slice(0, limit).map(name => ({ name, path: folder === undefined ? name : `${folder}/${name}` }))
+      json(res, 200, { object: 'list', path: folder ?? '', data, has_more: names.length > limit })
+    } catch (error: unknown) {
+      json(res, 503, { error: { type: 'server_error', code: 'sandbox_unavailable', message: errorMessage(error) } })
     }
   }
 

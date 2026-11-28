@@ -1890,6 +1890,33 @@ describe('project folders on sandbox environments', () => {
     expect(scripts).toEqual([`mkdir -p -- '/workspace/it'\\''s here'`])
   })
 
+  it('lists sub-folders of the local workspace, sorted, folders only', async () => {
+    const { mkdir: makeDir, writeFile } = await import('node:fs/promises')
+    const { call, workspace } = await folderGateway(() => ({ code: 0, stdout: '', stderr: '' }))
+    await makeDir(join(workspace, 'beta/inner'), { recursive: true })
+    await makeDir(join(workspace, 'Alpha'), { recursive: true })
+    await makeDir(join(workspace, '.hidden'), { recursive: true })
+    await writeFile(join(workspace, 'note.txt'), 'x')
+    const root = await (await call('/agents/environments/env_local/folders')).json() as { data: { name: string }[] }
+    expect(root).toMatchObject({ object: 'list', path: '', has_more: false })
+    const names = root.data.map(d => d.name)
+    expect(names).not.toContain('note.txt')
+    expect(names.filter(n => ['.hidden', 'Alpha', 'beta'].includes(n))).toEqual(['.hidden', 'Alpha', 'beta'])
+    const nested = await (await call('/agents/environments/env_local/folders?path=./beta/')).json()
+    expect(nested).toMatchObject({ path: 'beta', data: [{ name: 'inner', path: 'beta/inner' }] })
+    expect((await call('/agents/environments/env_local/folders?path=../x')).status).toBe(400)
+    expect((await call('/agents/environments/env_local/folders?path=nope')).status).toBe(404)
+    expect((await call('/agents/environments/env_missing/folders')).status).toBe(404)
+  })
+
+  it('lists sandbox folders through exec and maps exit 44 to 404', async () => {
+    const { call, scripts } = await folderGateway(script => (script.includes("'/workspace/gone'") ? { code: 44, stdout: '', stderr: '' } : { code: 0, stdout: 'zed\napple\n', stderr: '' }))
+    const ok = await call('/agents/environments/env_fake/folders?path=a%20b')
+    expect(await ok.json()).toEqual({ object: 'list', path: 'a b', has_more: false, data: [{ name: 'apple', path: 'a b/apple' }, { name: 'zed', path: 'a b/zed' }] })
+    expect(scripts[0]).toContain("cd -- '/workspace/a b'")
+    expect((await call('/agents/environments/env_fake/folders?path=gone')).status).toBe(404)
+  })
+
   it('rejects a project whose folder every chat would refuse', async () => {
     const { call } = await folderGateway(() => ({ code: 0, stdout: '', stderr: '' }))
     const env = { type: 'sandbox', environment_id: 'env_local', directory: '/etc' }
