@@ -24,6 +24,8 @@ import { join } from 'node:path'
 import { loadBuiltins, type BuiltinSkill } from './skills/resolve.ts'
 import { ComposioRelay, RELAY_ROUTE_PATH, relayEnabled } from './composio-relay.ts'
 import { DEFAULT_APPROVAL_VERBS } from './mount-composio.ts'
+import { DEFAULT_COMPOSIO_MCP_URL } from './mount-owner-composio.ts'
+import { validateSecretsKey } from './secrets/owner-secrets.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -196,6 +198,13 @@ export interface Config extends RuntimeConfigInput {
     approvalVerbs?: string[]
     /** Extra tool slugs that always ask first (default none). */
     approvalSlugs?: string[]
+    /** Composio's MCP endpoint, for owners' stored keys (default `https://connect.composio.dev/mcp`). */
+    mcpUrl?: string
+  }
+  /** Sealing of per-owner secrets (connector keys). Without `key` the key routes answer 501 `secrets_disabled`. */
+  secrets?: {
+    /** At least 32 bytes (`AGENTRY_SECRETS_KEY`, for example `openssl rand -base64 48`). Changing it makes stored keys unreadable. */
+    key?: string
   }
   /** The web browser (Playwright MCP). It runs only inside Agentry Sandbox chats; there is no host browser. */
   browser?: {
@@ -235,7 +244,7 @@ export type ResolvedConfig = Omit<Config, 'auth' | 'prefix' | 'database' | 'code
   browser: { default: 'auto' | 'on' | 'off' | boolean; liveFps: number }
   skills: { cacheTtlSeconds: number; dir: string; builtinDir: string; workspaceSkills: boolean }
   commands: { cacheTtlSeconds: number; allow: string[] }
-  composio: { serverLabel: string; approvalVerbs: string[]; approvalSlugs: string[] }
+  composio: { serverLabel: string; approvalVerbs: string[]; approvalSlugs: string[]; mcpUrl: string }
   uploads: UploadsConfig
   prefix: string
   database: { url: string }
@@ -298,7 +307,11 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
     serverLabel: z.string().default('composio'),
     approvalVerbs: z.array(z.string()).default([...DEFAULT_APPROVAL_VERBS]),
     approvalSlugs: z.array(z.string()).default([]),
-  }).default({ serverLabel: 'composio', approvalVerbs: [...DEFAULT_APPROVAL_VERBS], approvalSlugs: [] }),
+    mcpUrl: z.string().default(DEFAULT_COMPOSIO_MCP_URL),
+  }).default({ serverLabel: 'composio', approvalVerbs: [...DEFAULT_APPROVAL_VERBS], approvalSlugs: [], mcpUrl: DEFAULT_COMPOSIO_MCP_URL }),
+  secrets: z.object({
+    key: z.string(),
+  }).default(ABSENT),
   uploads: z.object({
     dir: z.string(),
     maxFileBytes: z.number().default(25 * 1024 * 1024),
@@ -345,6 +358,7 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
   const commandsTtl = (config.commands as { cacheTtlSeconds: number }).cacheTtlSeconds
   if (!Number.isFinite(commandsTtl) || commandsTtl < 0) throw new Error('agents-api: "commands.cacheTtlSeconds" must be a finite number >= 0')
   validateUploads(config.uploads as UploadsConfig)
+  validateSecretsKey((config.secrets as { key?: string } | undefined | null)?.key ?? undefined)
   if (config.codebox !== undefined && config.codebox !== null) throw new CodeboxRemovedError('the "codebox" config block')
   if (config.dataDir !== undefined && config.dataDir !== null) {
     throw new Error('agents-api: "dataDir" was removed; agents, environments, and the session index live in Postgres (database.url)')
@@ -494,6 +508,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     builtinSkills: () => builtinSkills,
     skillsRoot: config.skills.dir,
     composio: config.composio,
+    secretsKey: config.secrets?.key ?? undefined,
     ...(relay === undefined ? {} : { composioRelay: relay }),
     browserDefault: config.browser.default,
     browserLiveFps: config.browser.liveFps,

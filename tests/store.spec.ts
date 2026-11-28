@@ -46,7 +46,7 @@ const harnesses: Array<[string, Harness]> = [
       const client = new pg.Client({ connectionString: await contractUrl() })
       await client.connect()
       try {
-        await client.query('truncate admin_audit, skills, files, sessions, projects, environments, environment_templates, agents, owners')
+        await client.query('truncate admin_audit, owner_secrets, skills, files, sessions, projects, environments, environment_templates, agents, owners')
       } finally {
         await client.end()
       }
@@ -531,19 +531,19 @@ describe.each(harnesses)('Projects store (%s)', (_name, harness) => {
 describe('Postgres migrations', () => {
   it('migrations apply from empty', async () => {
     const url = await postgres!.createDatabase('empty')
-    expect(await migrate(url)).toEqual({ applied: ['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql'] })
+    expect(await migrate(url)).toEqual({ applied: ['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql', '0006-owner-secrets.sql'] })
     expect(await migrate(url)).toEqual({ applied: [] })
   })
 
   it('migrations are idempotent under concurrent start', async () => {
     const url = await postgres!.createDatabase('concurrent')
     const results = await Promise.all([migrate(url), migrate(url)])
-    expect(results.flatMap(result => result.applied)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql'])
+    expect(results.flatMap(result => result.applied)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql', '0006-owner-secrets.sql'])
     const client = new pg.Client({ connectionString: url })
     await client.connect()
     try {
       const rows = await client.query<{ name: string }>('select name from schema_migrations')
-      expect(rows.rows.map(row => row.name)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql'])
+      expect(rows.rows.map(row => row.name)).toEqual(['0001-initial.sql', '0002-session-config.sql', '0003-files.sql', '0004-skills.sql', '0005-projects.sql', '0006-owner-secrets.sql'])
     } finally {
       await client.end()
     }
@@ -557,7 +557,7 @@ describe('Postgres migrations', () => {
         "select table_name from information_schema.tables where table_schema = 'public' order by table_name",
       )
       expect(tables.rows.map(row => row.table_name)).toEqual([
-        'admin_audit', 'agents', 'environment_templates', 'environments', 'files', 'owners', 'projects', 'schema_migrations', 'sessions', 'skills',
+        'admin_audit', 'agents', 'environment_templates', 'environments', 'files', 'owner_secrets', 'owners', 'projects', 'schema_migrations', 'sessions', 'skills',
       ])
       const indexes = await client.query<{ indexdef: string }>(
         "select indexdef from pg_indexes where schemaname = 'public' and indexname like '%\\_idx' order by indexname",
@@ -606,6 +606,26 @@ function skillRow(owner: OwnerId, name: string, extra: Partial<SkillRow> = {}): 
     content_hash: 'h', has_scripts: false, status: 'active', created_at: 1_000, updated_at: 1_000, ...extra,
   }
 }
+
+describe.each(harnesses)('Owner secret store (%s)', (_name, harness) => {
+  it('put, get, replace and delete, scoped to the owner', async () => {
+    const store = await harness.fresh()
+    await store.ensureOwner(A)
+    await store.ensureOwner(B)
+    const first = await store.secrets.put(A, 'composio', { sealed: 's1', last4: '1111' })
+    expect(first).toMatchObject({ sealed: 's1', last4: '1111' })
+    expect(await store.secrets.get(A, 'composio')).toEqual(first)
+    const second = await store.secrets.put(A, 'composio', { sealed: 's2', last4: '2222' })
+    expect(second).toMatchObject({ sealed: 's2', last4: '2222', created_at: first.created_at })
+    expect(second.updated_at).toBeGreaterThanOrEqual(first.updated_at)
+    expect(await store.secrets.get(B, 'composio')).toBeUndefined()
+    expect(await store.secrets.get(A, 'openai')).toBeUndefined()
+    expect(await store.secrets.delete(B, 'composio')).toBe(false)
+    expect(await store.secrets.delete(A, 'composio')).toBe(true)
+    expect(await store.secrets.delete(A, 'composio')).toBe(false)
+    expect(await store.secrets.get(A, 'composio')).toBeUndefined()
+  })
+})
 
 describe.each(harnesses)('Skill store (%s)', (_name, harness) => {
   it('insert then get round-trips every field', async () => {

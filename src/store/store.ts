@@ -292,6 +292,25 @@ export interface SkillCollection {
   deleteStagedBefore(cutoff: number): Promise<SkillRow[]>
 }
 
+/** One sealed owner secret; `sealed` is opened only by `OwnerSecrets`. */
+export interface SecretRow {
+  sealed: string
+  last4: string
+  /** Epoch seconds. */
+  created_at: number
+  /** Epoch seconds. */
+  updated_at: number
+}
+
+/** Sealed per-owner secrets, keyed by (owner, name). */
+export interface SecretCollection {
+  get(owner: OwnerId, name: string): Promise<SecretRow | undefined>
+  /** Insert or replace; `created_at` is kept on replace. */
+  put(owner: OwnerId, name: string, value: { sealed: string; last4: string }): Promise<SecretRow>
+  /** @returns true when a row was removed. */
+  delete(owner: OwnerId, name: string): Promise<boolean>
+}
+
 export interface Store {
   /**
    * Record an owner. Idempotent.
@@ -304,6 +323,7 @@ export interface Store {
   projects: ProjectCollection
   files: FileCollection
   skills: SkillCollection
+  secrets: SecretCollection
   sessions: {
     /**
      * @param row - new index row; its owner must exist.
@@ -524,6 +544,11 @@ export function guardStore(store: Store): Store {
     },
     files: guardFiles(store.files),
     skills: guardSkills(store.skills),
+    secrets: {
+      get: guard(store.secrets.get.bind(store.secrets)),
+      put: guard(store.secrets.put.bind(store.secrets)),
+      delete: guard(store.secrets.delete.bind(store.secrets)),
+    },
     audit: guard(store.audit.bind(store)),
     close: () => store.close(),
   }

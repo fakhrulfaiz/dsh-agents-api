@@ -8,6 +8,7 @@
  * column is the insertion time and orders `list`.
  */
 
+import { secretCollection } from './postgres-secrets.ts'
 import { skillCollection } from './postgres-skills.ts'
 import pg from 'pg'
 import type { OwnerId } from '../auth/authenticator.ts'
@@ -392,6 +393,7 @@ export async function openPostgresStore(url: string, onIdleClientError?: (error:
     projects: projectCollection(pool),
     files: fileCollection(pool),
     skills: skillCollection(pool),
+    secrets: secretCollection(pool),
     sessions: {
       async insert(row) {
         await pool.query(

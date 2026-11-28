@@ -67,8 +67,8 @@ const unreachable = { url: 'postgres://agentry@127.0.0.1:1/agentry' }
 describe('apply', () => {
   it('registers the prefix handler and ignores events for unknown sessions', async () => {
     const { ctx, register, listeners, byName, effects } = fakeContext()
-    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60, dir: '/tmp/agentry-skills', builtinDir: '/tmp/builtins', workspaceSkills: false }, commands: { cacheTtlSeconds: 60, allow: ["goal", "plan", "compact", "export"] }, composio: { serverLabel: 'composio', approvalVerbs: ['SEND'], approvalSlugs: [] }, browser: { default: false, liveFps: 4 }, uploads: uploadsOff })
-    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60, dir: '/tmp/agentry-skills', builtinDir: '/tmp/builtins', workspaceSkills: false }, commands: { cacheTtlSeconds: 60, allow: ["goal", "plan", "compact", "export"] }, composio: { serverLabel: 'composio', approvalVerbs: ['SEND'], approvalSlugs: [] }, browser: { default: false, liveFps: 4 }, uploads: uploadsOff })
+    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60, dir: '/tmp/agentry-skills', builtinDir: '/tmp/builtins', workspaceSkills: false }, commands: { cacheTtlSeconds: 60, allow: ["goal", "plan", "compact", "export"] }, composio: { serverLabel: 'composio', approvalVerbs: ['SEND'], approvalSlugs: [], mcpUrl: 'https://connect.composio.dev/mcp' }, browser: { default: false, liveFps: 4 }, uploads: uploadsOff })
+    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60, dir: '/tmp/agentry-skills', builtinDir: '/tmp/builtins', workspaceSkills: false }, commands: { cacheTtlSeconds: 60, allow: ["goal", "plan", "compact", "export"] }, composio: { serverLabel: 'composio', approvalVerbs: ['SEND'], approvalSlugs: [], mcpUrl: 'https://connect.composio.dev/mcp' }, browser: { default: false, liveFps: 4 }, uploads: uploadsOff })
     expect(register).toHaveBeenCalledTimes(6)
     // Per apply: four approval-bridge listeners (two answerers, session/event, session/disposed), the six gateway listeners (session/event, tools/pre-execute for sandbox changes, tools/pre-execute and tools/post-execute for browser take-over, commands/change, session/disposed), and the schedule resolver.
     expect(listeners).toHaveLength(22)
@@ -79,7 +79,7 @@ describe('apply', () => {
 
   it('keeps /v1 at 503 store_unavailable and logs a named error when the database is unreachable', async () => {
     const { ctx, routes, effects, errors } = fakeContext()
-    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60, dir: '/tmp/agentry-skills', builtinDir: '/tmp/builtins', workspaceSkills: false }, commands: { cacheTtlSeconds: 60, allow: ["goal", "plan", "compact", "export"] }, composio: { serverLabel: 'composio', approvalVerbs: ['SEND'], approvalSlugs: [] }, browser: { default: false, liveFps: 4 }, uploads: uploadsOff })
+    apply(ctx, { auth, prefix: '/v1', workspaces: '/tmp/agentry-apply-spec', database: unreachable, skills: { cacheTtlSeconds: 60, dir: '/tmp/agentry-skills', builtinDir: '/tmp/builtins', workspaceSkills: false }, commands: { cacheTtlSeconds: 60, allow: ["goal", "plan", "compact", "export"] }, composio: { serverLabel: 'composio', approvalVerbs: ['SEND'], approvalSlugs: [], mcpUrl: 'https://connect.composio.dev/mcp' }, browser: { default: false, liveFps: 4 }, uploads: uploadsOff })
     await Promise.all(effects)
     expect(errors).toEqual([expect.objectContaining({ name: 'StoreStartError' })])
     const response = await call(routes.get('/v1')!, '/v1/agents')

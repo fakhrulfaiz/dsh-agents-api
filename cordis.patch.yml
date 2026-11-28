@@ -12,6 +12,9 @@
           url: !!js process.env.AGENTRY_DATABASE_URL
         uploads:
           dir: !!js process.env.AGENTRY_UPLOADS_DIR ?? `${process.env.HOME}/.dsh/agentry-uploads`
+        # Seals each owner's connector keys (Composio). At least 32 bytes; unset, the key routes answer 501.
+        secrets:
+          key: !!js process.env.AGENTRY_SECRETS_KEY
         auth:
           mode: development
           devKey:
@@ -36,9 +39,12 @@
         assetRoot: !!js (process.env.AGENTRY_OFFICE_RUNTIME ?? `${process.env.HOME}/.dsh/office-runtime/primary-runtime`) + '/../office-skills'
         node: !!js (process.env.AGENTRY_OFFICE_RUNTIME ?? `${process.env.HOME}/.dsh/office-runtime/primary-runtime`) + '/dependencies/node/bin/node'
 
-# Composio Connect (phase 0, single user): one profile-wide MCP server, tools
-# appear as mcp__composio__*. The consumer key stays in the harness
+# Composio Connect, profile-wide fallback for single-user setups: one MCP server,
+# tools appear as mcp__composio__*. The consumer key stays in the harness
 # environment (COMPOSIO_API_KEY), never in agent records or session config.
+# Each owner's own key (POST /v1/agents/connectors/composio) is mounted per
+# session under the same label and shadows this row. Multi-user deployments
+# must leave COMPOSIO_API_KEY empty.
 - insert:
     - id: mcp-composio
       name: '@deepseek-ai/dsh-mcp-client'

@@ -10,6 +10,8 @@ import {
   RESUMABLE_STATUSES,
   SkillNameTakenError,
   type SkillCollection,
+  type SecretCollection,
+  type SecretRow,
   type SkillRow,
   type FileCollection,
   type FileRow,
@@ -115,6 +117,23 @@ export class MemoryStore implements Store {
       if (entry === undefined || entry.owner !== owner) return 0
       return [...this.#sessions.values()].filter(row => row.ownerId === owner && row.projectId === id).length
     },
+  }
+
+  readonly #secrets = new Map<string, SecretRow>()
+  readonly secrets: SecretCollection = {
+    get: (owner, name) => this.#async(() => {
+      const row = this.#secrets.get(`${owner}\0${name}`)
+      return row === undefined ? undefined : { ...row }
+    }),
+    put: (owner, name, value) => this.#async(() => {
+      this.#requireOwner(owner)
+      const id = `${owner}\0${name}`
+      const now = Math.floor(Date.now() / 1000)
+      const row: SecretRow = { ...value, created_at: this.#secrets.get(id)?.created_at ?? now, updated_at: now }
+      this.#secrets.set(id, row)
+      return { ...row }
+    }),
+    delete: (owner, name) => this.#async(() => this.#secrets.delete(`${owner}\0${name}`)),
   }
 
   readonly #skills = new Map<string, SkillRow>()
@@ -359,6 +378,15 @@ export class MemoryStore implements Store {
 
   async close(): Promise<void> {
     this.#closed = true
+  }
+
+  #async<T>(run: () => T): Promise<T> {
+    try {
+      this.#check()
+      return Promise.resolve(run())
+    } catch (error: unknown) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+    }
   }
 
   #check(): void {

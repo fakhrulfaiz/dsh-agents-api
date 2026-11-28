@@ -15,7 +15,7 @@ import type { ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { ownerId } from '../src/auth/authenticator.ts'
 import { createLocalProvider } from '../src/environment/local.ts'
-import { AgentsGateway } from '../src/gateway.ts'
+import { AgentsGateway, type GatewayOptions } from '../src/gateway.ts'
 import { createSessionHistory } from '../src/history/session-history.ts'
 import { SessionRegistry } from '../src/session-registry.ts'
 import { MemoryStore } from './support/memory-store.ts'
@@ -66,7 +66,7 @@ interface Process {
  * @param failResume - message `agents.resume` rejects with.
  * @param failFollowup - make every agent's `followup` throw.
  */
-async function startProcess(store: MemoryStore, query: FakeSessionQuery, failResume?: string, failFollowup = false): Promise<Process> {
+async function startProcess(store: MemoryStore, query: FakeSessionQuery, failResume?: string, failFollowup = false, extra: Partial<GatewayOptions> = {}): Promise<Process> {
   const agents: Process['agents'] = new Map()
   const tools: Process['tools'] = []
   const plugins: unknown[] = []
@@ -112,7 +112,7 @@ async function startProcess(store: MemoryStore, query: FakeSessionQuery, failRes
     logger,
   } as unknown as Context
   const registry = new SessionRegistry()
-  const api = new AgentsGateway(ctx, openAuthenticator, '/v1', store, registry, testGatewayOptions(environments, query))
+  const api = new AgentsGateway(ctx, openAuthenticator, '/v1', store, registry, { ...testGatewayOptions(environments, query), ...extra })
   const server = createServer((req, res) => {
     void api.handle(req, res)
   })
@@ -689,5 +689,64 @@ describe('MCP secrets across restart', () => {
     expect(await (await fetch(`${second.origin}/v1/agents/sessions/${id}`)).text()).not.toContain(secret)
     const replay = await readStream(await fetch(`${second.origin}/v1/agents/sessions/${id}/events`, { headers: { 'last-event-id': '0' } }), text => frameIds(text).length >= 1)
     expect(replay).not.toContain(secret)
+  })
+})
+
+describe('owner Composio key at mount time', () => {
+  const SECRETS = { secretsKey: 'k'.repeat(48) }
+  const K1 = 'ck_first_key_1111'
+  const K2 = 'ck_second_key_2222'
+  const composioMounts = (plugins: unknown[]) => plugins.filter(p => (p as { serverName?: string }).serverName === 'composio') as Array<{ headers?: Record<string, string>; failOnStartupError?: boolean }>
+  const saveKey = (origin: string, key: string) => fetch(`${origin}/v1/agents/connectors/composio`, { method: 'POST', body: JSON.stringify({ key }) })
+
+  it('mounts the stored key on a schedule-style create and the current key on resume, never saving it', async () => {
+    const store = new MemoryStore()
+    const query = new FakeSessionQuery()
+    const first = await startProcess(store, query, undefined, false, SECRETS)
+    expect((await saveKey(first.origin, K1)).status).toBe(200)
+    const agent = await (await fetch(`${first.origin}/v1/agents`, { method: 'POST', body: JSON.stringify({ model: 'deepseek-chat', name: 'Mailer' }) })).json() as { id: string }
+    const session = await first.api.createIdleSession(OWNER, { agent_id: agent.id })
+    const mounted = composioMounts(first.plugins)
+    expect(mounted).toHaveLength(1)
+    expect(mounted[0]).toMatchObject({ headers: { 'x-consumer-api-key': K1 }, failOnStartupError: false })
+
+    const row = await store.sessions.get(session.id, 'any')
+    expect(JSON.stringify(row)).not.toContain(K1)
+    expect(JSON.stringify(row?.body)).not.toContain('composio')
+    expect(await (await fetch(`${first.origin}/v1/agents/sessions/${session.id}`)).text()).not.toContain(K1)
+    const events = await readStream(await fetch(`${first.origin}/v1/agents/sessions/${session.id}/events`, { headers: { 'last-event-id': '0' } }), () => false, 150)
+    expect(events).not.toContain(K1)
+
+    // Replaced key, then a restart: the resumed agent mounts the new key.
+    expect((await saveKey(first.origin, K2)).status).toBe(200)
+    first.feed(session.id, logEvent('turn/start', { turn: 1 }, 1))
+    query.crash()
+    const second = await startProcess(store, query, undefined, false, SECRETS)
+    await second.api.resumeSession((await store.sessions.get(session.id, 'any'))!)
+    expect(composioMounts(second.plugins).map(p => p.headers?.['x-consumer-api-key'])).toEqual([K2])
+    expect(JSON.stringify(first.logger.warn.mock.calls) + JSON.stringify(second.logger.warn.mock.calls)).not.toContain(K2)
+  })
+
+  it('adds no second composio tool when the session already has one, and none without a key', async () => {
+    const store = new MemoryStore()
+    const query = new FakeSessionQuery()
+    const process = await startProcess(store, query, undefined, false, SECRETS)
+    await createSession(process.origin)
+    expect(composioMounts(process.plugins)).toEqual([])
+    await saveKey(process.origin, K1)
+    await createSession(process.origin, { agent: { model: 'deepseek-chat', tools: [{ type: 'mcp', server_label: 'composio', transport: { type: 'http', server_url: 'https://example.com/mcp', headers: { 'x-consumer-api-key': 'ck_own_0000' } } }] } })
+    expect(composioMounts(process.plugins).map(p => p.headers?.['x-consumer-api-key'])).toEqual(['ck_own_0000'])
+  })
+
+  it('skips the owner tool for agents that allow no apps, and mounts it for some apps', async () => {
+    const store = new MemoryStore()
+    const process = await startProcess(store, new FakeSessionQuery(), undefined, false, SECRETS)
+    await saveKey(process.origin, K1)
+    const lean = await (await fetch(`${process.origin}/v1/agents`, { method: 'POST', body: JSON.stringify({ model: 'deepseek-chat', name: 'Lean', apps: {} }) })).json() as { id: string }
+    await process.api.createIdleSession(OWNER, { agent_id: lean.id })
+    expect(composioMounts(process.plugins)).toEqual([])
+    const mail = await (await fetch(`${process.origin}/v1/agents`, { method: 'POST', body: JSON.stringify({ model: 'deepseek-chat', name: 'Mail', apps: { gmail: 'all' } }) })).json() as { id: string }
+    await process.api.createIdleSession(OWNER, { agent_id: mail.id })
+    expect(composioMounts(process.plugins)).toHaveLength(1)
   })
 })

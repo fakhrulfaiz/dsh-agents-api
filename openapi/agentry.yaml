@@ -651,6 +651,112 @@ paths:
           $ref: "#/components/responses/Unauthenticated"
         "404":
           $ref: "#/components/responses/NotFound"
+  /v1/agents/connectors/composio:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    get:
+      summary: The caller's Composio key status
+      description: Agentry extension. Whether the caller has a stored Composio consumer key and its last four characters. Never returns the key.
+      tags:
+        - Agents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorKeyStatus"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "501":
+          $ref: "#/components/responses/SecretsDisabled"
+    post:
+      summary: Save or replace the caller's Composio key
+      description: Agentry extension. The key is sealed (AES-256-GCM, bound to the owner) and mounted as the `composio` MCP tool whenever one of the caller's sessions is created or resumed, scheduled runs included. It is never written to a session's saved configuration. A live chat keeps the key it started with.
+      tags:
+        - Agents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key:
+                  type: string
+                  description: Composio consumer key, starts with `ck_`.
+              required: [key]
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorKeyStatus"
+        "400":
+          description: "`invalid_key`: the key does not start with `ck_`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "501":
+          $ref: "#/components/responses/SecretsDisabled"
+    delete:
+      summary: Remove the caller's Composio key
+      description: Agentry extension. Sessions started afterwards have no Composio tools (or the deployment's profile-wide connector, when one is configured).
+      tags:
+        - Agents
+      responses:
+        "200":
+          description: Removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorKeyStatus"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "501":
+          $ref: "#/components/responses/SecretsDisabled"
+  /v1/agents/connectors/composio/connections:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    get:
+      summary: The caller's connected Composio accounts
+      description: Agentry extension. Reads the caller's accounts for each toolkit with one `COMPOSIO_MANAGE_CONNECTIONS` list call, using the stored key.
+      tags:
+        - Agents
+      parameters:
+        - name: toolkits
+          in: query
+          required: true
+          description: Comma-separated toolkit slugs, for example `gmail,github` (at most 500).
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorConnections"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "409":
+          description: "`connector_key_missing`: no key is stored for the caller."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: "`connector_unavailable`: Composio refused the key (`error.reason: rejected`) or could not be reached (`unavailable`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /v1/agents/skills:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -3922,6 +4028,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    SecretsDisabled:
+      description: "`secrets_disabled`: the server has no `secrets.key` (`AGENTRY_SECRETS_KEY`), so it cannot store connector keys."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     StoreUnavailable:
       description: The Postgres store is opening, failed to start, or a database call failed. `error.code` is `store_unavailable`.
       content:
@@ -3929,6 +4041,47 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
   schemas:
+    ConnectorKeyStatus:
+      type: object
+      properties:
+        object:
+          const: connector.key
+        configured:
+          type: boolean
+        last4:
+          type: [string, "null"]
+          description: Last four characters of the stored key; null when none.
+        updated_at:
+          type: [integer, "null"]
+          description: Unix seconds of the last save; null when none.
+      required: [object, configured, last4, updated_at]
+    ConnectorConnections:
+      type: object
+      properties:
+        object:
+          const: connector.connections
+        data:
+          type: object
+          description: Toolkit slug to whether one account is active, and its accounts.
+          additionalProperties:
+            type: object
+            properties:
+              connected:
+                type: boolean
+              accounts:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    alias:
+                      type: [string, "null"]
+                    status:
+                      type: string
+                  required: [id, alias, status]
+            required: [connected, accounts]
+      required: [object, data]
     AgentSkill:
       type: object
       properties:

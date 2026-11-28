@@ -76,6 +76,9 @@ import { mountScheduleGuidance } from './mount-schedule-guidance.ts'
 import { mountFunctionTools, validateMountableTools } from './mount-function-tools.ts'
 import type { ComposioRelay } from './composio-relay.ts'
 import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mcp-tools.ts'
+import { COMPOSIO_SECRET, DEFAULT_COMPOSIO_MCP_URL, grantsAllowNoApps, ownerComposioTool } from './mount-owner-composio.ts'
+import { OwnerSecrets } from './secrets/owner-secrets.ts'
+import { ComposioConnectorsApi } from './connectors/composio-routes.ts'
 import { BRIDGE_HOST_CWD, browserPorts, BROWSER_PROBE_COMMAND, browserMcpTool, browserMode, normalizeBrowserDefault, type BrowserMode, mountBrowserGuidance, validateBrowserField, type BrowserSandbox } from './mount-browser.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
@@ -187,7 +190,11 @@ export interface GatewayOptions {
   /** Folder of installed skills (`skills.dir`); absent disables the Agentry skill provider's installed skills. */
   skillsRoot?: string
   /** Composio grant enforcement and send approvals (`composio` config). */
-  composio?: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
+  composio?: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[]; mcpUrl?: string }
+  /** `secrets.key`: seals owners' connector keys; absent means the key routes answer 501 and no owner key is mounted. */
+  secretsKey?: string | undefined
+  /** Fetch for Composio connection lookups (tests point it at a fake). */
+  composioFetch?: typeof fetch
   /** Relay that Composio MCP tools are pointed at so agent setup does not wait for the connector (`composio-relay.ts`). */
   composioRelay?: ComposioRelay
   /** What agents without a `browser` value do (`browser.default`: auto, on or off; `true`/`false` mean on/off; default auto). */
@@ -324,7 +331,8 @@ export class AgentsGateway {
   private readonly deliverablesCache = new DeliverablesCache<DeliverableEntry>(500)
   private readonly skillsGithub: GithubDeps | undefined
   private readonly composioRelay: ComposioRelay | undefined
-  private readonly composio: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[] }
+  private readonly composio: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[]; mcpUrl?: string }
+  private readonly ownerSecrets: OwnerSecrets
   private readonly browserDefault: BrowserMode
   private readonly sandboxHasBrowser: (envd: EnvdClient) => Promise<boolean>
   /** Auto-mode probe results by sandbox id; forgotten when the sandbox is reset or deleted. */
@@ -396,6 +404,12 @@ export class AgentsGateway {
     this.browserRecorder = new BrowserRecorder(this.browserLive, { log: (message) => { this.ctx.logger.info(message) } })
     this.startBrowserRelay = options.startBrowserRelay ?? startRelay
     this.skillInstallApi = new SkillInstallApi(this.installDeps(), options.skillsGithub)
+    this.ownerSecrets = new OwnerSecrets({ key: options.secretsKey, store: () => this.store, warn: message => this.ctx.logger.warn(message) })
+    const connectorsApi = new ComposioConnectorsApi({
+      secrets: this.ownerSecrets,
+      mcpUrl: this.composio.mcpUrl ?? DEFAULT_COMPOSIO_MCP_URL,
+      ...(options.composioFetch === undefined ? {} : { fetch: options.composioFetch }),
+    })
     const skillsApi = new SkillsApi({
       skills: options.skills,
       resolveTarget: (owner, sessionId) => this.resolveSkillTarget(owner, sessionId),
@@ -543,6 +557,7 @@ export class AgentsGateway {
       { method: 'GET', pattern: '/agents/sessions/:session_id', handler: (_req, res, _url, params, p) => this.getSession(res, params, p.owner) },
       { method: 'DELETE', pattern: '/agents/sessions/:session_id', handler: (_req, res, _url, params, p) => this.deleteSession(res, params, p.owner) },
       ...scheduleApi.routes(),
+      ...connectorsApi.routes(),
       ...this.skillInstallApi.routes(),
       ...skillsApi.routes(),
       ...this.commandsApi.routes(),
@@ -2086,6 +2101,10 @@ export class AgentsGateway {
       mountScheduleGuidance(agentCtx)
       mountFunctionTools(agentCtx, functionTools, pending)
       const mcpTools = mcpToolsFrom(resolved.tools)
+      // The owner's stored Composio key: built here on every create and resume, never saved with the session.
+      // Agents that allow no app skip it, so they start without contacting Composio.
+      const ownerTool = grantsAllowNoApps(effectiveGrants(resolved)) ? undefined : ownerComposioTool(mcpTools, await this.ownerComposioKey(owner), this.composio.mcpUrl ?? DEFAULT_COMPOSIO_MCP_URL, this.composio.serverLabel)
+      if (ownerTool !== undefined) mcpTools.push(ownerTool)
       await mountMcpTools(agentCtx, this.composioRelay === undefined ? mcpTools : this.composioRelay.rewriteAll(mcpTools), cwd)
       await this.mountBrowser(agentCtx, resolved, sandbox === undefined ? undefined : { ...sandbox, sessionId })
       mountComposio(agentCtx, {
@@ -2096,6 +2115,19 @@ export class AgentsGateway {
         serverLabel: this.composio.serverLabel,
       })
       mountComposioAppTools(agentCtx, { serverLabel: this.composio.serverLabel, grants: effectiveGrants(resolved) })
+    }
+  }
+
+  /**
+   * The owner's stored Composio key for mounting; a store or unsealing failure means none (logged without the key).
+   * @param owner - session owner.
+   */
+  private async ownerComposioKey(owner: OwnerId): Promise<string | undefined> {
+    try {
+      return await this.ownerSecrets.get(owner, COMPOSIO_SECRET)
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`agents-api: the Composio key of owner ${owner} could not be read: ${error instanceof Error ? error.name : 'error'}`)
+      return undefined
     }
   }
 
