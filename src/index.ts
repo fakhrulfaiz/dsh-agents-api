@@ -26,6 +26,7 @@ import { ComposioRelay, RELAY_ROUTE_PATH, relayEnabled } from './composio-relay.
 import { DEFAULT_APPROVAL_VERBS } from './mount-composio.ts'
 import { DEFAULT_COMPOSIO_MCP_URL } from './mount-owner-composio.ts'
 import { validateSecretsKey } from './secrets/owner-secrets.ts'
+import { DEFAULT_IMPORT_HOSTS } from './agent-import/fetch.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -201,6 +202,11 @@ export interface Config extends RuntimeConfigInput {
     /** Composio's MCP endpoint, for owners' stored keys (default `https://connect.composio.dev/mcp`). */
     mcpUrl?: string
   }
+  /** Agent import (`POST /agents/import`). */
+  agents?: {
+    /** Hosts import links may point at, https only (default github.com, raw.githubusercontent.com, gist.github.com, gist.githubusercontent.com). */
+    importHosts?: string[]
+  }
   /** Sealing of per-owner secrets (connector keys). Without `key` the key routes answer 501 `secrets_disabled`. */
   secrets?: {
     /** At least 32 bytes (`AGENTRY_SECRETS_KEY`, for example `openssl rand -base64 48`). Changing it makes stored keys unreadable. */
@@ -312,6 +318,9 @@ export const Config: z<Config, ResolvedConfig> = z.transform(z.object({
   secrets: z.object({
     key: z.string(),
   }).default(ABSENT),
+  agents: z.object({
+    importHosts: z.array(z.string()).default([...DEFAULT_IMPORT_HOSTS]),
+  }).default({ importHosts: [...DEFAULT_IMPORT_HOSTS] }),
   uploads: z.object({
     dir: z.string(),
     maxFileBytes: z.number().default(25 * 1024 * 1024),
@@ -509,6 +518,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     skillsRoot: config.skills.dir,
     composio: config.composio,
     secretsKey: config.secrets?.key ?? undefined,
+    importHosts: config.agents?.importHosts ?? DEFAULT_IMPORT_HOSTS,
     ...(relay === undefined ? {} : { composioRelay: relay }),
     browserDefault: config.browser.default,
     browserLiveFps: config.browser.liveFps,

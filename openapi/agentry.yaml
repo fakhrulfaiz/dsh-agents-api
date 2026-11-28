@@ -651,6 +651,91 @@ paths:
           $ref: "#/components/responses/Unauthenticated"
         "404":
           $ref: "#/components/responses/NotFound"
+  /v1/agents/import:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    post:
+      summary: Read an agent definition into a draft
+      description: Agentry extension. Reads a Claude Code / ECC agent file (front matter plus Markdown prompt) or an Agentry agent JSON from pasted `text` or a `url` (https on GitHub or gists by default, `agents.importHosts`; 256 KB, 10 s, redirects only onto allowed hosts). Answers a draft for the agent form, or for a GitHub folder link the agent files in it. Nothing is saved.
+      tags:
+        - Agents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Exactly one of `url` and `text`.
+              properties:
+                url:
+                  type: string
+                text:
+                  type: string
+      responses:
+        "200":
+          description: A draft, or a folder's candidates.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      object:
+                        const: agent.import.draft
+                      draft:
+                        type: object
+                        description: "`CreateAgentParams` without a required `model`."
+                      source:
+                        type: object
+                        properties:
+                          url:
+                            type: string
+                          format:
+                            type: string
+                            enum: [ecc, agentry]
+                        required: [format]
+                      notes:
+                        type: array
+                        items:
+                          type: string
+                    required: [object, draft, source, notes]
+                  - type: object
+                    properties:
+                      object:
+                        const: agent.import.candidates
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            name:
+                              type: string
+                            description:
+                              type: string
+                            url:
+                              type: string
+                          required: [name, description, url]
+                    required: [object, data]
+        "400":
+          description: "`bad_request` (neither or both fields), `import_unrecognized`, `import_too_large`, or `import_host_not_allowed`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          description: "`import_not_found`: nothing at that link."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: "`import_fetch_failed`: the link could not be read."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /v1/agents/connectors/composio:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"

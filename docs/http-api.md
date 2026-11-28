@@ -185,6 +185,15 @@ POST /agents/sessions/{id}/events   (or `input` of POST /agents/sessions)
 - Item parts: a user message item lists `input_text` (omitted when the message had no text) and then one part per file: `{ "type": "input_image" | "input_file", "file_id", "filename", "bytes", "media_type", "width"?, "height"? }`. `file_id` is absent for a file that was not uploaded through this API. The same parts appear after a restart, because they are derived from the Session log and the `files` table.
 - Limits and the staging directory come from the `uploads` config ([README](../README.md#configuration)). Without `uploads.dir` the upload route answers `501`.
 
+## Agent import
+
+`POST /agents/import` with `{ "url" }` or `{ "text" }` (exactly one) reads an agent definition into a draft for the agent form; nothing is saved. Write-up: [changes/2026-11-28-agent-import.md](changes/2026-11-28-agent-import.md).
+
+- Formats: a Claude Code / ECC agent file (YAML front matter `name`, `description`, `tools`, `model`, then the prompt) or an Agentry agent JSON (the `GET /agents/{id}` shape).
+- Answer: `{ "object": "agent.import.draft", "draft", "source": { "url"?, "format": "ecc" | "agentry" }, "notes": [] }`, or for a GitHub folder link `{ "object": "agent.import.candidates", "data": [{ "name", "description", "url" }] }` (up to 200 `.md` files with a `name`).
+- Links: `https` on `agents.importHosts` only (default `github.com`, `raw.githubusercontent.com`, `gist.github.com`, `gist.githubusercontent.com`); `…/blob/…` reads the raw file, `…/tree/…` lists the folder through the GitHub contents API; redirects are followed only onto allowed hosts; 256 KB; 10 s.
+- Errors: 400 `bad_request`, `import_unrecognized`, `import_too_large`, `import_host_not_allowed`; 404 `import_not_found`; 502 `import_fetch_failed`.
+
 ## Connector keys (Composio)
 
 Each owner's Composio consumer key lives in the API, sealed (AES-256-GCM under a key derived with HKDF from `secrets.key` / `AGENTRY_SECRETS_KEY`, with the owner id and name as authenticated data). Write-up: [changes/2026-11-28-owner-connectors.md](changes/2026-11-28-owner-connectors.md).

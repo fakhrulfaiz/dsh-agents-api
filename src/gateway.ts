@@ -67,7 +67,7 @@ import type { DeliverableEntry } from './history/deliverables.ts'
 import { mountSkillTools } from './skills/tools.ts'
 import { effectiveGrants, validateAppGrants } from './composio-grants.ts'
 import { DEFAULT_APPROVAL_VERBS, mountComposio } from './mount-composio.ts'
-import type { GithubDeps } from './skills/github.ts'
+import { DEFAULT_GITHUB, type GithubDeps } from './skills/github.ts'
 import { resolveAgentSkills, validateSkillSelection, type BuiltinSkill } from './skills/resolve.ts'
 import { mountAgentTools } from './mount-agent-tools.ts'
 import { mountSandboxTools } from './mount-sandbox-tools.ts'
@@ -79,6 +79,8 @@ import { AgentsApiMcpConfigError, mcpToolsFrom, mountMcpTools } from './mount-mc
 import { COMPOSIO_SECRET, DEFAULT_COMPOSIO_MCP_URL, grantsAllowNoApps, ownerComposioTool } from './mount-owner-composio.ts'
 import { OwnerSecrets } from './secrets/owner-secrets.ts'
 import { ComposioConnectorsApi } from './connectors/composio-routes.ts'
+import { AgentImportApi } from './agent-import/routes.ts'
+import { DEFAULT_IMPORT_HOSTS } from './agent-import/fetch.ts'
 import { BRIDGE_HOST_CWD, browserPorts, BROWSER_PROBE_COMMAND, browserMcpTool, browserMode, normalizeBrowserDefault, type BrowserMode, mountBrowserGuidance, validateBrowserField, type BrowserSandbox } from './mount-browser.ts'
 import { PendingFunctionCalls } from './pending-function-calls.ts'
 import { ScheduleApi } from './schedules.ts'
@@ -193,6 +195,8 @@ export interface GatewayOptions {
   composio?: { serverLabel: string; approvalVerbs: readonly string[]; approvalSlugs: readonly string[]; mcpUrl?: string }
   /** `secrets.key`: seals owners' connector keys; absent means the key routes answer 501 and no owner key is mounted. */
   secretsKey?: string | undefined
+  /** Hosts agent-import links may point at (`agents.importHosts`; default GitHub and gists). */
+  importHosts?: readonly string[]
   /** Fetch for Composio connection lookups (tests point it at a fake). */
   composioFetch?: typeof fetch
   /** Relay that Composio MCP tools are pointed at so agent setup does not wait for the connector (`composio-relay.ts`). */
@@ -405,6 +409,11 @@ export class AgentsGateway {
     this.startBrowserRelay = options.startBrowserRelay ?? startRelay
     this.skillInstallApi = new SkillInstallApi(this.installDeps(), options.skillsGithub)
     this.ownerSecrets = new OwnerSecrets({ key: options.secretsKey, store: () => this.store, warn: message => this.ctx.logger.warn(message) })
+    const importApi = new AgentImportApi({
+      github: options.skillsGithub ?? DEFAULT_GITHUB,
+      hosts: options.importHosts ?? DEFAULT_IMPORT_HOSTS,
+      catalog: async () => new Set((await this.hostToolSchemas()).map(schema => schema.name)),
+    })
     const connectorsApi = new ComposioConnectorsApi({
       secrets: this.ownerSecrets,
       mcpUrl: this.composio.mcpUrl ?? DEFAULT_COMPOSIO_MCP_URL,
@@ -558,6 +567,7 @@ export class AgentsGateway {
       { method: 'DELETE', pattern: '/agents/sessions/:session_id', handler: (_req, res, _url, params, p) => this.deleteSession(res, params, p.owner) },
       ...scheduleApi.routes(),
       ...connectorsApi.routes(),
+      ...importApi.routes(),
       ...this.skillInstallApi.routes(),
       ...skillsApi.routes(),
       ...this.commandsApi.routes(),
