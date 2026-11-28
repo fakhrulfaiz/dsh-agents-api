@@ -45,6 +45,8 @@ export interface AgentrySandboxProvider extends SandboxProvider {
   importSnapshot(owner: string, body: Readable, opts: { name?: string; contentLength?: number; signal?: AbortSignal }): Promise<WireSnapshot>
   /** Workspace files with size and modification time, skipping `.git` and `node_modules` (at most 5000). */
   listEntries(record: EnvironmentRecord): Promise<WorkspaceEntry[]>
+  /** Watch workspace changes; yields batches of workspace-relative paths. */
+  watch(record: EnvironmentRecord, signal: AbortSignal): AsyncIterable<string[]>
   /** Whether a workspace-relative path exists in the sandbox. */
   /**
    * After a create that timed out client-side: find the sandbox the service made for it (same name, created since
@@ -91,6 +93,16 @@ export interface WorkspaceEntry {
 const SKIP_DIRS = new Set(['.git', 'node_modules'])
 const MAX_ENTRIES = 5000
 const UPLOADS = 'uploads'
+
+/** Workspace-relative watch path, or `undefined` when the event should be ignored. */
+export function normalizeSandboxWatchPath(dir: string, name: string): string | undefined {
+  const raw = name.replace(/\\/g, '/')
+  const abs = raw.startsWith('/') ? raw : posix.join(dir, raw)
+  const rel = posix.relative(dir, abs)
+  if (!rel || rel === '.' || rel.startsWith('..')) return undefined
+  if (rel.split('/').some((seg) => SKIP_DIRS.has(seg))) return undefined
+  return rel
+}
 
 /** `name-N.ext` for the Nth retry. */
 function numbered(name: string, n: number): string {
@@ -371,6 +383,22 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
         }
       }
       return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    },
+
+    watch(record, signal) {
+      const { id, dir } = meta(record)
+      const envd = api(ownerOf(record)).envd(id)
+      const stream = envd.filesystem.watchDir({ path: dir, recursive: true }, { headers: envd.userHeaders(AGENT), signal })
+      const normalize = normalizeSandboxWatchPath
+      async function* iter(): AsyncIterable<string[]> {
+        for await (const msg of stream) {
+          if (signal.aborted) return
+          if (msg.event.case !== 'filesystem') continue
+          const rel = normalize(dir, msg.event.value.name)
+          if (rel) yield [rel]
+        }
+      }
+      return iter()
     },
 
     async fileSize(record, path) {
