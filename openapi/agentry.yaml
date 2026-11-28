@@ -1910,6 +1910,52 @@ paths:
                 required: [object, data]
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "502": { description: The sandbox service answered with an error. }
+  /v1/agents/environments/snapshots/import:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    post:
+      operationId: importEnvironmentSnapshot
+      summary: Upload a files-only snapshot
+      description: "Extension. The body is the tar archive (`.tar.gz`, or a plain `.tar`), streamed to the sandbox service, which checks every entry (no absolute paths, `..`, links out of the workspace or device files) and the size limit. Answers the new `ready` snapshot with `environment_id: null`; use it to restore into an environment or start a new one. Agentry Sandbox only."
+      tags: [Environments]
+      parameters:
+        - { name: name, in: query, required: false, schema: { type: string, maxLength: 200 }, description: A name for the snapshot. }
+      requestBody:
+        required: true
+        content:
+          application/gzip: { schema: { type: string, format: binary } }
+          application/octet-stream: { schema: { type: string, format: binary } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnvironmentSnapshot" }
+        "400": { description: Not a valid archive or an unsafe entry; the service's message passes through. }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "413": { description: The archive is larger than the service allows. }
+        "429": { description: The per-owner snapshot limit is reached. }
+        "502": { description: The sandbox service answered with an error. }
+  /v1/agents/environments/snapshots/{snapshot_id}/content:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: snapshot_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: downloadEnvironmentSnapshot
+      summary: Download a files-only snapshot
+      description: "Extension. Streams the snapshot's tar.gz as an attachment. 400 for a disk or memory snapshot, 409 `snapshot_not_ready` while it saves."
+      tags: [Environments]
+      responses:
+        "200":
+          description: The archive.
+          content:
+            application/gzip: { schema: { type: string, format: binary } }
+        "400": { description: Not a files-only snapshot. }
+        "404": { description: Snapshot not found (or another owner's). }
+        "409": { description: The snapshot is not ready. }
   /v1/agents/environments/snapshots/{snapshot_id}:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -5022,7 +5068,7 @@ components:
       properties:
         id: { type: string }
         object: { const: snapshot }
-        environment_id: { type: [string, "null"], description: "The environment it was taken from; null once that environment was deleted." }
+        environment_id: { type: [string, "null"], description: "The environment it was taken from; null once that environment was deleted, and for an uploaded snapshot." }
         place: { type: string, description: "`service` for files kept on the sandbox service host, else the place that holds it." }
         level: { $ref: "#/components/schemas/SnapshotLevel" }
         name: { type: string }

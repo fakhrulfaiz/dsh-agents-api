@@ -22,6 +22,8 @@ Requests should send `OpenAI-Beta: agents=v1`. Paths below are relative to the c
 | `POST` `GET` | `/agents/environments/{id}/snapshots` | Extension. Save a snapshot of a sandbox environment (`{name?, level?: workspace\|disk\|memory, stop_first?}`, 202 `saving`) or list the environment's snapshots, newest first. Poll `GET /agents/environments/snapshots/{id}` until `ready` or `failed`. See [changes/2026-11-28-snapshots.md](changes/2026-11-28-snapshots.md) |
 | `GET` | `/agents/environments/snapshots` | Extension. Every snapshot of the owner, including those whose environment was deleted (`environment_id: null`) |
 | `GET` `DELETE` | `/agents/environments/snapshots/{id}` | Extension. Retrieve (poll) or delete one snapshot |
+| `GET` | `/agents/environments/snapshots/{id}/content` | Extension. Download a files-only (workspace) snapshot as `.tar.gz`, streamed (400 for disk or memory snapshots, 409 while saving) |
+| `POST` | `/agents/environments/snapshots/import?name=` | Extension. Upload a `.tar.gz` (or `.tar`) as a new files-only snapshot, streamed; 201 with `environment_id: null`; 400 unsafe or invalid archive, 413 too large |
 | `POST` | `/agents/environments/{id}/restore` | Extension. `{snapshot_id}`: put a snapshot back (workspace files in place; disk and memory rebuild the sandbox). Answers the environment |
 | `POST` `GET` | `/agents/environments/{id}/files` | Write or list files in the environment workspace |
 | `GET` | `/agents/environments/{id}/files/{path}` | Read one environment file |

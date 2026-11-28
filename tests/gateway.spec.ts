@@ -1932,7 +1932,9 @@ describe('project folders on sandbox environments', () => {
 
 /** A stand-in sandbox service with in-memory sandboxes and snapshots, owner-scoped by `X-Agentry-Owner`. */
 async function snapshotService() {
-  type Snap = { id: string; object: 'snapshot'; sandbox_id: string; place: string; level: string; name: string; state: string; size_bytes: number | null; error: string | null; created_at: number; expires_at: number | null; owner: string }
+  type Snap = { id: string; object: 'snapshot'; sandbox_id: string | null; place: string; level: string; name: string; state: string; size_bytes: number | null; error: string | null; created_at: number; expires_at: number | null; owner: string }
+  const uploads: { owner: string; name: string | null; type: string; bytes: Buffer }[] = []
+  const archive = Buffer.concat([Buffer.from([0x1f, 0x8b]), Buffer.alloc(300, 7)])
   const sandboxes = new Map<string, { id: string; owner: string; snapshot?: string }>()
   const snaps = new Map<string, Snap>()
   const calls: string[] = []
@@ -1945,7 +1947,8 @@ async function snapshotService() {
       const url = new URL(req.url ?? '/', 'http://x')
       const chunks: Buffer[] = []
       for await (const c of req) chunks.push(c as Buffer)
-      const body = chunks.length > 0 ? JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown> : {}
+      const raw = Buffer.concat(chunks)
+      const body = ((): Record<string, unknown> => { try { return raw.length > 0 ? JSON.parse(raw.toString()) as Record<string, unknown> : {} } catch { return {} } })()
       const send = (status: number, data: unknown) => { res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(data)) }
       const fail = (status: number, code: string, message: string) => send(status, { error: { code, message } })
       const path = url.pathname
@@ -1979,6 +1982,22 @@ async function snapshotService() {
         const only = url.searchParams.get('sandbox')
         return send(200, { data: [...snaps.values()].filter(s => s.owner === owner && (only === null || s.sandbox_id === only)).map(wire) })
       }
+      if (path === '/v1/snapshots/import' && req.method === 'POST') {
+        uploads.push({ owner, name: url.searchParams.get('name'), type: String(req.headers['content-type']), bytes: raw })
+        if (raw.toString() === 'bad') return fail(400, 'invalid_request', 'not a valid tar.gz archive')
+        const snap: Snap = { id: `snap_${hex()}`, object: 'snapshot', sandbox_id: null, place: 'service', level: 'workspace', name: url.searchParams.get('name') ?? 'Uploaded', state: 'ready', size_bytes: raw.length, error: null, created_at: 100 + n, expires_at: null, owner }
+        snaps.set(snap.id, snap)
+        return send(201, wire(snap))
+      }
+      m = /^\/v1\/snapshots\/([^/]+)\/download$/.exec(path)
+      if (m && req.method === 'GET') {
+        const snap = snaps.get(m[1]!)
+        if (!snap || snap.owner !== owner) return fail(404, 'not_found', 'snapshot not found')
+        if (snap.level !== 'workspace') return fail(400, 'invalid_request', 'only a files-only snapshot can be downloaded')
+        if (snap.state !== 'ready') return fail(409, 'snapshot_not_ready', 'The snapshot is saving')
+        res.writeHead(200, { 'content-type': 'application/gzip', 'content-length': String(archive.length), 'content-disposition': `attachment; filename="${snap.name}.tar.gz"` })
+        return void res.end(archive)
+      }
       m = /^\/v1\/snapshots\/([^/]+)$/.exec(path)
       if (m) {
         const snap = snaps.get(m[1]!)
@@ -1991,7 +2010,7 @@ async function snapshotService() {
   })
   servers.push(server)
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
-  return { url: `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`, snaps, calls, sandboxes }
+  return { url: `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`, snaps, calls, sandboxes, uploads, archive }
 }
 
 describe('environment snapshots through the gateway', () => {
@@ -2054,6 +2073,44 @@ describe('environment snapshots through the gateway', () => {
     expect((await call(`/agents/environments/snapshots/snap_${'a'.repeat(32)}`)).status).toBe(404)
     expect((await call(`/agents/environments/snapshots/snap_${'a'.repeat(32)}`, { method: 'DELETE' })).status).toBe(404)
     expect(((await (await call('/agents/environments/snapshots')).json()) as { data: unknown[] }).data).toEqual([])
+  })
+
+  it('streams a files-only snapshot download with the service headers; owner-scoped; refusals pass through', async () => {
+    const { call, env, svc } = await setup()
+    const snap = (await (await call(`/agents/environments/${env.id}/snapshots`, post({ name: 'my files' }))).json()) as { id: string }
+    expect((await call(`/agents/environments/snapshots/${snap.id}/content`)).status).toBe(409)
+    svc.snaps.get(snap.id)!.state = 'ready'
+    const res = await call(`/agents/environments/snapshots/${snap.id}/content`)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toBe('application/gzip')
+    expect(res.headers.get('content-disposition')).toBe('attachment; filename="my files.tar.gz"')
+    expect(res.headers.get('content-length')).toBe(String(svc.archive.length))
+    expect(Buffer.from(await res.arrayBuffer()).equals(svc.archive)).toBe(true)
+    const disk = (await (await call(`/agents/environments/${env.id}/snapshots`, post({ level: 'disk' }))).json()) as { id: string }
+    svc.snaps.get(disk.id)!.state = 'ready'
+    expect((await call(`/agents/environments/snapshots/${disk.id}/content`)).status).toBe(400)
+    svc.snaps.set('snap_' + 'a'.repeat(32), { id: 'snap_' + 'a'.repeat(32), object: 'snapshot', sandbox_id: 'sbx_x', place: 'service', level: 'workspace', name: 'theirs', state: 'ready', size_bytes: 1, error: null, created_at: 1, expires_at: null, owner: 'someone-else' })
+    expect((await call(`/agents/environments/snapshots/snap_${'a'.repeat(32)}/content`)).status).toBe(404)
+  })
+
+  it('streams an upload to the service as a new snapshot with no environment; refusals pass through', async () => {
+    const { call, svc } = await setup()
+    const bytes = Buffer.concat([Buffer.from([0x1f, 0x8b]), Buffer.alloc(200_000, 3)])
+    const res = await call('/agents/environments/snapshots/import?name=Mine', { method: 'POST', body: bytes, headers: { 'content-type': 'application/gzip' } })
+    expect(res.status).toBe(201)
+    const snap = (await res.json()) as Record<string, unknown>
+    expect(snap).toMatchObject({ object: 'snapshot', environment_id: null, name: 'Mine', state: 'ready', level: 'workspace' })
+    expect(snap).not.toHaveProperty('sandbox_id')
+    expect(svc.uploads).toHaveLength(1)
+    expect(svc.uploads[0]).toMatchObject({ name: 'Mine', type: 'application/gzip' })
+    expect(svc.uploads[0]!.bytes.equals(bytes)).toBe(true)
+    // It is listed (no environment) and downloadable.
+    expect(((await (await call('/agents/environments/snapshots')).json()) as { data: { environment_id: string | null }[] }).data).toMatchObject([{ environment_id: null }])
+    expect((await call(`/agents/environments/snapshots/${snap['id'] as string}/content`)).status).toBe(200)
+    const bad = await call('/agents/environments/snapshots/import', { method: 'POST', body: 'bad', headers: { 'content-type': 'application/gzip' } })
+    expect(bad.status).toBe(400)
+    expect(JSON.stringify(await bad.json())).toContain('not a valid tar.gz')
+    expect((await call(`/agents/environments/snapshots/import?name=${'x'.repeat(201)}`, { method: 'POST', body: bytes })).status).toBe(400)
   })
 
   it('restores into the environment and answers it; unknown snapshots are 404', async () => {

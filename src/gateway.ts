@@ -11,6 +11,9 @@ import { mkdir, readdir, readFile, stat } from 'node:fs/promises'
 import { isAbsolute, join, posix } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { pipeline } from 'node:stream/promises'
+import { Readable } from 'node:stream'
+import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type { ScheduleService } from '@deepseek-ai/dsh-schedule'
@@ -483,6 +486,8 @@ export class AgentsGateway {
       { method: 'GET', pattern: '/agents/environments/runtimes', handler: async (_req, res) => { json(res, 200, await readRuntimeInfo(this.runtimeInfoPath)) } },
       { method: 'GET', pattern: '/agents/environments/providers', handler: async (_req, res) => { json(res, 200, { object: 'list', data: await providerRows(this.sandboxes) }) } },
       { method: 'GET', pattern: '/agents/environments/snapshots', handler: (_req, res, _url, _params, p) => this.listAllSnapshots(res, p.owner) },
+      { method: 'POST', pattern: '/agents/environments/snapshots/import', handler: (req, res, url, _params, p) => this.importSnapshot(req, res, url, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/snapshots/:snapshot_id/content', handler: (req, res, _url, params, p) => this.downloadSnapshot(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/snapshots/:snapshot_id', handler: (_req, res, _url, params, p) => this.snapshotCall(res, p.owner, params, 'get') },
       { method: 'DELETE', pattern: '/agents/environments/snapshots/:snapshot_id', handler: (_req, res, _url, params, p) => this.snapshotCall(res, p.owner, params, 'delete') },
       { method: 'POST', pattern: '/agents/environments', handler: (req, res, _url, _params, p) => this.createEnvironment(req, res, p.owner) },
@@ -2910,7 +2915,7 @@ export class AgentsGateway {
     }
     try {
       const [snaps, ids] = await Promise.all([provider.api(owner).listSnapshots(), this.environmentsBySandbox(owner)])
-      json(res, 200, { object: 'list', data: newestFirst(snaps).map(s => snapshotJson(s, ids.get(s.sandbox_id) ?? null)) })
+      json(res, 200, { object: 'list', data: newestFirst(snaps).map(s => snapshotJson(s, (s.sandbox_id ? ids.get(s.sandbox_id) : undefined) ?? null)) })
     } catch (e: unknown) {
       this.sandboxFailure(res, e)
     }
@@ -2931,7 +2936,47 @@ export class AgentsGateway {
         return
       }
       const snap = await provider.api(owner).getSnapshot(id)
-      json(res, 200, snapshotJson(snap, (await this.environmentsBySandbox(owner)).get(snap.sandbox_id) ?? null))
+      json(res, 200, snapshotJson(snap, (snap.sandbox_id ? (await this.environmentsBySandbox(owner)).get(snap.sandbox_id) : undefined) ?? null))
+    } catch (e: unknown) {
+      this.sandboxFailure(res, e)
+    }
+  }
+
+  /** `GET /agents/environments/snapshots/{id}/content`: streams a files-only snapshot's tar.gz from the service (never held in memory). */
+  private async downloadSnapshot(_req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const provider = this.snapshotProvider()
+    if (provider === undefined) return notFound(res, 'snapshot not found')
+    const id = routeParam(params, 'snapshot_id')
+    const abort = new AbortController()
+    res.on('close', () => { if (!res.writableEnded) abort.abort() })
+    try {
+      const up = await provider.downloadSnapshot(owner, id, abort.signal)
+      const headers: Record<string, string> = { 'content-type': 'application/gzip', 'cache-control': 'no-store' }
+      for (const h of ['content-length', 'content-disposition']) {
+        const v = up.headers.get(h)
+        if (v) headers[h] = v
+      }
+      res.writeHead(200, headers)
+      if (!up.body) return void res.end()
+      await pipeline(Readable.fromWeb(up.body as unknown as NodeReadableStream), res).catch(() => {})
+    } catch (e: unknown) {
+      if (!res.headersSent) this.sandboxFailure(res, e)
+      else res.destroy()
+    }
+  }
+
+  /** `POST /agents/environments/snapshots/import?name=`: streams an uploaded tar.gz to the service as a new files-only snapshot (201). */
+  private async importSnapshot(req: IncomingMessage, res: ServerResponse, url: URL, owner: OwnerId): Promise<void> {
+    const provider = this.snapshotProvider()
+    if (provider === undefined) return notFound(res, 'snapshot not found')
+    const name = url.searchParams.get('name') ?? undefined
+    if (name !== undefined && name.length > 200) return badRequest(res, 'Query "name" must be at most 200 characters')
+    const len = req.headers['content-length']
+    const abort = new AbortController()
+    req.on('aborted', () => abort.abort())
+    try {
+      const snap = await provider.importSnapshot(owner, req, { ...(name ? { name } : {}), ...(typeof len === 'string' && /^\d+$/.test(len) ? { contentLength: Number(len) } : {}), signal: abort.signal })
+      json(res, 201, snapshotJson(snap, null))
     } catch (e: unknown) {
       this.sandboxFailure(res, e)
     }

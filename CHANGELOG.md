@@ -5,6 +5,8 @@ Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
 ## Unreleased
 
+- 2026-11-28: Download and upload for files-only snapshots. `GET /v1/agents/environments/snapshots/{id}/content` streams the snapshot's tar.gz from the sandbox service (attachment headers kept; 400 for disk/memory snapshots, 409 while saving; owner-scoped) and `POST /v1/agents/environments/snapshots/import?name=` streams an uploaded tar to the service and answers the new snapshot (201, `environment_id: null`; the service's archive checks, size limit and quota answers pass through). Neither buffers the file in memory. Snapshots with no source sandbox list with `environment_id: null`.
+
 - 2026-11-28: Sandbox snapshots. `POST`/`GET /v1/agents/environments/{id}/snapshots` save (202 `saving`) and list an environment's snapshots, `GET /agents/environments/snapshots` lists all of the owner's (including ones whose environment was deleted, `environment_id: null`), `GET`/`DELETE /agents/environments/snapshots/{id}` poll and delete one, `POST /agents/environments/{id}/restore {snapshot_id}` puts one back, and `POST /agents/environments` takes `snapshot_id` to start from one. Providers list `snapshot_levels` (per place and overall). Deleting an environment keeps its snapshots unless `?delete_snapshots=true`. Service refusals (`snapshots_off`, unsupported level, quota) pass through in plain words. See `docs/changes/2026-11-28-snapshots.md`.
 
 ## 0.4.0 — 2026-11-28

@@ -12,7 +12,8 @@
  */
 import { mkdir, rmdir } from 'node:fs/promises'
 import { join, posix } from 'node:path'
-import { createSandboxApi, SandboxApiError, type SandboxApi, type WireBackend, type WireSandbox, type WireSnapshotLevel, type WireTemplate } from '@agentry/sandbox/client'
+import { Readable } from 'node:stream'
+import { createSandboxApi, SandboxApiError, type SandboxApi, type WireBackend, type WireSandbox, type WireSnapshot, type WireSnapshotLevel, type WireTemplate } from '@agentry/sandbox/client'
 import type { OwnerId } from '../auth/authenticator.ts'
 import { directorySegment } from '../environment/local.ts'
 import type { CreateEnvironmentInput, EnvironmentCreateResult } from '../environment/provider.ts'
@@ -33,6 +34,10 @@ export interface AgentrySandboxProvider extends SandboxProvider {
   availability(): Promise<{ available: true; version: string; default_image?: WireBackend['default_image']; places: SandboxPlaceRow[] } | { available: false; reason: string; places: SandboxPlaceRow[] }>
   /** The service client for one owner (start, stop, reset, envd). */
   api(owner: string): SandboxApi
+  /** The service's download of a files-only snapshot, as the raw response (stream it; do not buffer). Throws SandboxApiError on a refusal. */
+  downloadSnapshot(owner: string, snapshotId: string, signal?: AbortSignal): Promise<Response>
+  /** Streams an archive to the service as a new files-only snapshot; answers the snapshot. Throws SandboxApiError on a refusal. */
+  importSnapshot(owner: string, body: Readable, opts: { name?: string; contentLength?: number; signal?: AbortSignal }): Promise<WireSnapshot>
   /** Workspace files with size and modification time, skipping `.git` and `node_modules` (at most 5000). */
   listEntries(record: EnvironmentRecord): Promise<WorkspaceEntry[]>
   /** Whether a workspace-relative path exists in the sandbox. */
@@ -161,6 +166,11 @@ export function toServiceTemplate(t: EnvironmentTemplateConfig | undefined): Wir
 const statusOf = (s: WireSandbox['state']): EnvironmentStatus => (s === 'failed' ? 'failed' : s === 'deleting' ? 'cleanup' : s === 'provisioning' ? 'pending' : 'connected')
 
 export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): AgentrySandboxProvider {
+  const serviceHeaders = (owner: string) => ({ Authorization: `Bearer ${opts.key}`, 'X-Agentry-Owner': owner })
+  const serviceError = async (res: Response) => {
+    const err = (await res.json().catch(() => undefined) as { error?: { code?: string; message?: string } } | undefined)?.error
+    return new SandboxApiError(res.status, err?.code ?? 'error', err?.message ?? `Agentry Sandbox answered ${String(res.status)}`)
+  }
   const api = (owner: string) => createSandboxApi({ url: opts.url, key: opts.key, owner })
   // Status and availability are read on page loads: answer within seconds, not the 180 s create budget.
   const quickApi = (owner: string) => createSandboxApi({ url: opts.url, key: opts.key, owner, timeoutMs: QUICK_TIMEOUT_MS })
@@ -189,6 +199,30 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
     capabilities: { templateFields: ['image', 'packages', 'setup_commands', 'env', 'network', 'files', 'resources', 'gpus'], files: true, exec: true },
 
     api,
+
+    async downloadSnapshot(owner, snapshotId, signal) {
+      const res = await fetch(`${opts.url.replace(/\/+$/, '')}/v1/snapshots/${encodeURIComponent(snapshotId)}/download`, { headers: serviceHeaders(owner), ...(signal ? { signal } : {}) })
+      if (!res.ok) throw await serviceError(res)
+      return res
+    },
+
+    async importSnapshot(owner, body, o) {
+      const url = `${opts.url.replace(/\/+$/, '')}/v1/snapshots/import${o.name ? `?name=${encodeURIComponent(o.name)}` : ''}`
+      let res: Response
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: { ...serviceHeaders(owner), 'content-type': 'application/gzip', ...(o.contentLength !== undefined ? { 'content-length': String(o.contentLength) } : {}) },
+          body: Readable.toWeb(body) as unknown as ReadableStream,
+          duplex: 'half',
+          ...(o.signal ? { signal: o.signal } : {}),
+        } as RequestInit)
+      } catch (e) {
+        throw new SandboxApiError(0, 'unreachable', `Agentry Sandbox is not reachable: ${(e as Error).message}`)
+      }
+      if (!res.ok) throw await serviceError(res)
+      return await res.json() as WireSnapshot
+    },
 
     async availability() {
       try {

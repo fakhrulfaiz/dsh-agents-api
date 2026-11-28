@@ -21,6 +21,17 @@ Decisions:
 - Service refusals (400 level the place lacks, 409 `snapshot_not_ready`, 429 quota) pass through unchanged; `snapshots_off` reads "Snapshots are not set up on this service."
 - Restore closes the environment's terminals and browser (a rebuild drops them). It is not refused during a chat turn, like reset.
 - The name of a deleted environment is not kept (the service does not give it); clients show the snapshot's own name.
-- Not built: download/upload of snapshots, scheduled snapshots, renaming.
+- Download and upload of files-only snapshots: see below. Not built: scheduled snapshots, renaming.
 
 Tests: `tests/gateway.spec.ts` ("environment snapshots through the gateway") against a stand-in service.
+
+## Download and upload (files-only), added 2026-11-28
+
+| Route | Does |
+|---|---|
+| `GET /agents/environments/snapshots/{id}/content` | streams the tar.gz (`Content-Type: application/gzip`, the service's `Content-Length` and `Content-Disposition`); 400 not files-only, 409 not ready, 404 unknown or another owner's |
+| `POST /agents/environments/snapshots/import?name=` | streams the request body to the service's `POST /v1/snapshots/import`; 201 with the snapshot (`environment_id: null`); 400 bad or unsafe archive, 413 too large, 429 over the snapshot limit |
+
+Both pass the file through (`Readable.fromWeb` / `Readable.toWeb`, no buffering) and go through the provider's `downloadSnapshot` / `importSnapshot`, which call the service with the owner header. An aborted client request aborts the upstream call. Uploaded snapshots have no environment; any owner's list shows them with `environment_id: null`.
+
+Tests: `tests/gateway.spec.ts` (download headers and bytes, refusals, owner scoping, upload bytes and name, pass-through errors).
