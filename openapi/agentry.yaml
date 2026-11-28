@@ -1542,7 +1542,15 @@ paths:
                                   isolated: { type: boolean }
                                   gpu: { type: boolean }
                                 required: [reset, keepFilesOnReset, isolated, gpu]
-                            required: [id, name, kind, default, available, capabilities]
+                              snapshot_levels:
+                                type: array
+                                description: The snapshot levels a sandbox on this place can take.
+                                items: { $ref: "#/components/schemas/SnapshotLevel" }
+                            required: [id, name, kind, default, available, capabilities, snapshot_levels]
+                        snapshot_levels:
+                          type: array
+                          description: Sandbox provider only. The levels any available place can take; empty means snapshots are off.
+                          items: { $ref: "#/components/schemas/SnapshotLevel" }
                         capabilities:
                           type: object
                           properties:
@@ -1846,8 +1854,15 @@ paths:
           $ref: "#/components/responses/StoreUnavailable"
     delete:
       summary: Delete an environment and its workspace
+      description: Snapshots of the environment are kept (they can still start a new environment) unless `delete_snapshots=true`, which deletes them first (Agentry Sandbox only).
       tags:
         - Environments
+      parameters:
+        - name: delete_snapshots
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: Extension. Also delete the environment's snapshots.
       responses:
         "200":
           description: OK
@@ -1874,6 +1889,140 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StoreUnavailable"
+  /v1/agents/environments/snapshots:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+    get:
+      operationId: listAllEnvironmentSnapshots
+      summary: List every snapshot of the caller
+      description: "Extension. Includes snapshots whose environment was deleted (`environment_id: null`). Newest first."
+      tags: [Environments]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { const: list }
+                  data: { type: array, items: { $ref: "#/components/schemas/EnvironmentSnapshot" } }
+                required: [object, data]
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "502": { description: The sandbox service answered with an error. }
+  /v1/agents/environments/snapshots/{snapshot_id}:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: snapshot_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getEnvironmentSnapshot
+      summary: Retrieve one snapshot (poll while `saving`)
+      tags: [Environments]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnvironmentSnapshot" }
+        "404": { description: Snapshot not found (or another owner's). }
+    delete:
+      operationId: deleteEnvironmentSnapshot
+      summary: Delete one snapshot
+      tags: [Environments]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  object: { const: snapshot.deleted }
+                  deleted: { const: true }
+                required: [id, object, deleted]
+        "404": { description: Snapshot not found (or another owner's). }
+  /v1/agents/environments/{environment_id}/snapshots:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: saveEnvironmentSnapshot
+      summary: Save a snapshot of an Agentry Sandbox environment
+      description: "Answers 202 with the snapshot in `saving`; poll `GET /agents/environments/snapshots/{id}` until `ready` or `failed`. The service's 400 (`snapshots_off`, a level the place lacks), 409 and 429 (per-owner quota) messages pass through."
+      tags: [Environments]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, description: At most 80 characters. }
+                level: { $ref: "#/components/schemas/SnapshotLevel" }
+                stop_first: { type: boolean, description: Stop the sandbox while a place-made (disk or memory) snapshot is taken. }
+      responses:
+        "202":
+          description: The snapshot, `saving`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnvironmentSnapshot" }
+        "400": { description: "Bad field, `snapshots_off`, or a level the place lacks." }
+        "404": { description: Environment not found. }
+        "409": { description: "The environment has no sandbox (`environment_not_snapshotable`)." }
+        "429": { description: Snapshot quota reached. }
+    get:
+      operationId: listEnvironmentSnapshots
+      summary: List an environment's snapshots, newest first
+      tags: [Environments]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { const: list }
+                  data: { type: array, items: { $ref: "#/components/schemas/EnvironmentSnapshot" } }
+                required: [object, data]
+        "404": { description: Environment not found. }
+        "409": { description: "The environment has no sandbox (`environment_not_snapshotable`)." }
+  /v1/agents/environments/{environment_id}/restore:
+    parameters:
+      - $ref: "#/components/parameters/OpenAIBeta"
+      - name: environment_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: restoreEnvironmentSnapshot
+      summary: Put a snapshot back into an environment
+      description: A `workspace` snapshot replaces the workspace files in place; `disk` and `memory` rebuild the sandbox (same place only). Terminals and the browser of the environment close.
+      tags: [Environments]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                snapshot_id: { type: string }
+              required: [snapshot_id]
+      responses:
+        "200":
+          description: The environment, as `GET` answers it.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400": { description: Bad `snapshot_id` or a snapshot this place cannot restore. }
+        "404": { description: Environment or snapshot not found. }
+        "409": { description: "`snapshot_not_ready`, or the environment has no sandbox." }
   /v1/agents/environments/{environment_id}/start:
     parameters:
       - $ref: "#/components/parameters/OpenAIBeta"
@@ -4864,6 +5013,25 @@ components:
         - provider
         - provider_metadata
         - created_at
+    SnapshotLevel:
+      type: string
+      enum: [workspace, disk, memory]
+      description: "`workspace` is the files of the workspace folder; `disk` the whole filesystem (installed software included); `memory` disk plus running programs."
+    EnvironmentSnapshot:
+      type: object
+      properties:
+        id: { type: string }
+        object: { const: snapshot }
+        environment_id: { type: [string, "null"], description: "The environment it was taken from; null once that environment was deleted." }
+        place: { type: string, description: "`service` for files kept on the sandbox service host, else the place that holds it." }
+        level: { $ref: "#/components/schemas/SnapshotLevel" }
+        name: { type: string }
+        state: { type: string, enum: [saving, ready, failed] }
+        size_bytes: { type: [integer, "null"] }
+        error: { type: [string, "null"] }
+        created_at: { type: integer }
+        expires_at: { type: [integer, "null"] }
+      required: [id, object, environment_id, place, level, name, state, size_bytes, error, created_at, expires_at]
     CreateEnvironmentRequest:
       type: object
       properties:
@@ -4882,6 +5050,9 @@ components:
         place:
           type: string
           description: Extension. Id of the Agentry Sandbox place to create on (see `places` in `GET /agents/environments/providers`). Sandbox provider only; 400 for any other. Overrides the template's `place`.
+        snapshot_id:
+          type: string
+          description: Extension. Start from this snapshot (`snap_...`, the caller's, `ready`). Sandbox provider only. A `workspace` snapshot unpacks over the template's files on any place; a `disk` or `memory` one needs the place that took it (defaults to it).
       description: "`template_id` and `session_id` must belong to the caller."
     WriteEnvironmentFileRequest:
       description: The OpenAI Agents API file create params (`inline` with base64 `data`, or `file_id`), or the earlier `{path, content | content_base64}`. A `file_id` is accepted but answers 400 until Files API copying exists.

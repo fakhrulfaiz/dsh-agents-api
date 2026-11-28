@@ -1929,3 +1929,175 @@ describe('project folders on sandbox environments', () => {
     expect(await chat.json()).toMatchObject({ environment: { directory: 'biology' } })
   })
 })
+
+/** A stand-in sandbox service with in-memory sandboxes and snapshots, owner-scoped by `X-Agentry-Owner`. */
+async function snapshotService() {
+  type Snap = { id: string; object: 'snapshot'; sandbox_id: string; place: string; level: string; name: string; state: string; size_bytes: number | null; error: string | null; created_at: number; expires_at: number | null; owner: string }
+  const sandboxes = new Map<string, { id: string; owner: string; snapshot?: string }>()
+  const snaps = new Map<string, Snap>()
+  const calls: string[] = []
+  let n = 0
+  const hex = () => String(++n).padStart(32, '0')
+  const wire = ({ owner: _o, ...s }: Snap) => s
+  const server = createServer((req, res) => {
+    void (async () => {
+      const owner = String(req.headers['x-agentry-owner'])
+      const url = new URL(req.url ?? '/', 'http://x')
+      const chunks: Buffer[] = []
+      for await (const c of req) chunks.push(c as Buffer)
+      const body = chunks.length > 0 ? JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown> : {}
+      const send = (status: number, data: unknown) => { res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(data)) }
+      const fail = (status: number, code: string, message: string) => send(status, { error: { code, message } })
+      const path = url.pathname
+      calls.push(`${req.method} ${path}${url.search}`)
+      const sandboxWire = (s: { id: string }) => ({ id: s.id, object: 'sandbox', name: 'x', state: 'running', backend: 'local', place: 'local', gpus: 0, template_id: null, image: 'img', workspace_path: '/workspace', error: null, created_at: 1, started_at: 1, last_used_at: 1 })
+      if (path === '/v1/backends') return send(200, { data: [{ id: 'local', name: 'Local', default: true, kind: 'docker', available: true, version: '1', capabilities: { reset: true, keepFilesOnReset: true, isolated: true, gpu: false }, snapshots: ['workspace', 'disk'] }] })
+      if (path === '/v1/sandboxes' && req.method === 'POST') {
+        const id = `sbx_${hex()}`
+        const snap = typeof body['snapshot'] === 'string' ? snaps.get(body['snapshot']) : undefined
+        if (typeof body['snapshot'] === 'string' && (!snap || snap.owner !== owner)) return fail(404, 'not_found', 'snapshot not found')
+        sandboxes.set(id, { id, owner, ...(snap ? { snapshot: snap.id } : {}) })
+        return send(201, sandboxWire({ id }))
+      }
+      let m = /^\/v1\/sandboxes\/([^/]+)$/.exec(path)
+      if (m && req.method === 'GET') return sandboxes.get(m[1]!)?.owner === owner ? send(200, sandboxWire({ id: m[1]! })) : fail(404, 'not_found', 'sandbox not found')
+      if (m && req.method === 'DELETE') { sandboxes.delete(m[1]!); return send(204, undefined) }
+      m = /^\/v1\/sandboxes\/([^/]+)\/snapshots$/.exec(path)
+      if (m && req.method === 'POST') {
+        if (body['level'] === 'memory') return fail(400, 'invalid_request', 'This place takes workspace, disk snapshots, not memory.')
+        const snap: Snap = { id: `snap_${hex()}`, object: 'snapshot', sandbox_id: m[1]!, place: 'service', level: String(body['level'] ?? 'workspace'), name: String(body['name'] ?? 'snapshot'), state: 'saving', size_bytes: null, error: null, created_at: 100 + n, expires_at: null, owner }
+        snaps.set(snap.id, snap)
+        return send(202, wire(snap))
+      }
+      m = /^\/v1\/sandboxes\/([^/]+)\/restore$/.exec(path)
+      if (m && req.method === 'POST') {
+        const snap = snaps.get(String(body['snapshot']))
+        if (!snap || snap.owner !== owner) return fail(404, 'not_found', 'snapshot not found')
+        return send(200, sandboxWire({ id: m[1]! }))
+      }
+      if (path === '/v1/snapshots') {
+        const only = url.searchParams.get('sandbox')
+        return send(200, { data: [...snaps.values()].filter(s => s.owner === owner && (only === null || s.sandbox_id === only)).map(wire) })
+      }
+      m = /^\/v1\/snapshots\/([^/]+)$/.exec(path)
+      if (m) {
+        const snap = snaps.get(m[1]!)
+        if (!snap || snap.owner !== owner) return fail(404, 'not_found', 'snapshot not found')
+        if (req.method === 'DELETE') { snaps.delete(snap.id); return send(204, undefined) }
+        return send(200, wire(snap))
+      }
+      fail(404, 'not_found', 'no route')
+    })()
+  })
+  servers.push(server)
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+  return { url: `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`, snaps, calls, sandboxes }
+}
+
+describe('environment snapshots through the gateway', () => {
+  const setup = async () => {
+    const svc = await snapshotService()
+    const { createAgentrySandboxProvider } = await import('../src/sandbox/agentry-sandbox-provider.ts')
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const registry = new SandboxRegistry('local')
+    registry.register(createLocalProvider(join(tmpdir(), 'agentry-gateway-spec-snap')))
+    registry.register(createAgentrySandboxProvider({ url: svc.url, key: 'k', workspacesRoot: join(tmpdir(), 'agentry-gateway-spec-snap') }))
+    const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', new MemoryStore(), new SessionRegistry(), testGatewayOptions(registry))
+    const base = await listen((req, res) => api.handle(req, res))
+    const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+    const env = await createSettled(call, JSON.stringify({ provider: 'sandbox', name: 'Box' }))
+    return { svc, call, env }
+  }
+  const post = (body: unknown) => ({ method: 'POST', body: JSON.stringify(body) })
+
+  it('lists snapshot levels per place and provider', async () => {
+    const { call } = await setup()
+    const rows = (await (await call('/agents/environments/providers')).json()) as { data: { name: string; snapshot_levels?: string[]; places?: { snapshot_levels: string[] }[] }[] }
+    const sandbox = rows.data.find(p => p.name === 'sandbox')!
+    expect(sandbox.snapshot_levels).toEqual(['workspace', 'disk'])
+    expect(sandbox.places![0]!.snapshot_levels).toEqual(['workspace', 'disk'])
+  })
+
+  it('saves (202 saving), polls, lists newest first, and deletes', async () => {
+    const { call, env, svc } = await setup()
+    const first = await call(`/agents/environments/${env.id}/snapshots`, post({ name: 'one' }))
+    expect(first.status).toBe(202)
+    const snap = (await first.json()) as Record<string, unknown>
+    expect(snap).toMatchObject({ object: 'snapshot', environment_id: env.id, name: 'one', state: 'saving', level: 'workspace' })
+    expect(snap).not.toHaveProperty('sandbox_id')
+    expect(snap).not.toHaveProperty('owner')
+    svc.snaps.get(snap['id'] as string)!.state = 'ready'
+    const second = (await (await call(`/agents/environments/${env.id}/snapshots`, post({ name: 'two', level: 'disk', stop_first: true }))).json()) as { id: string }
+    expect(((await (await call(`/agents/environments/snapshots/${snap['id'] as string}`)).json()) as { state: string }).state).toBe('ready')
+    const list = (await (await call(`/agents/environments/${env.id}/snapshots`)).json()) as { data: { id: string }[] }
+    expect(list.data.map(s => s.id)).toEqual([second.id, snap['id']])
+    const del = await call(`/agents/environments/snapshots/${second.id}`, { method: 'DELETE' })
+    expect(await del.json()).toEqual({ id: second.id, object: 'snapshot.deleted', deleted: true })
+    expect(((await (await call(`/agents/environments/${env.id}/snapshots`)).json()) as { data: unknown[] }).data).toHaveLength(1)
+  })
+
+  it('passes the service refusals through and rejects bad fields', async () => {
+    const { call, env } = await setup()
+    const refused = await call(`/agents/environments/${env.id}/snapshots`, post({ level: 'memory' }))
+    expect(refused.status).toBe(400)
+    expect(JSON.stringify(await refused.json())).toContain('not memory')
+    expect((await call(`/agents/environments/${env.id}/snapshots`, post({ level: 'tape' }))).status).toBe(400)
+    expect((await call(`/agents/environments/${env.id}/snapshots`, post({ name: 'x'.repeat(81) }))).status).toBe(400)
+    expect((await call('/agents/environments/env_missing/snapshots', post({}))).status).toBe(404)
+    const local = (await (await call('/agents/environments', { method: 'POST', body: JSON.stringify({}) })).json()) as { id: string }
+    expect((await call(`/agents/environments/${local.id}/snapshots`, post({}))).status).toBe(409)
+  })
+
+  it('scopes snapshots to their owner', async () => {
+    const { call, svc } = await setup()
+    svc.snaps.set('snap_' + 'a'.repeat(32), { id: 'snap_' + 'a'.repeat(32), object: 'snapshot', sandbox_id: 'sbx_x', place: 'service', level: 'workspace', name: 'theirs', state: 'ready', size_bytes: 1, error: null, created_at: 1, expires_at: null, owner: 'someone-else' })
+    expect((await call(`/agents/environments/snapshots/snap_${'a'.repeat(32)}`)).status).toBe(404)
+    expect((await call(`/agents/environments/snapshots/snap_${'a'.repeat(32)}`, { method: 'DELETE' })).status).toBe(404)
+    expect(((await (await call('/agents/environments/snapshots')).json()) as { data: unknown[] }).data).toEqual([])
+  })
+
+  it('restores into the environment and answers it; unknown snapshots are 404', async () => {
+    const { call, env } = await setup()
+    const snap = (await (await call(`/agents/environments/${env.id}/snapshots`, post({}))).json()) as { id: string }
+    const restored = await call(`/agents/environments/${env.id}/restore`, post({ snapshot_id: snap.id }))
+    expect(restored.status).toBe(200)
+    expect(await restored.json()).toMatchObject({ id: env.id, sandbox: { state: 'running' } })
+    expect((await call(`/agents/environments/${env.id}/restore`, post({ snapshot_id: `snap_${'b'.repeat(32)}` }))).status).toBe(404)
+    expect((await call(`/agents/environments/${env.id}/restore`, post({ snapshot_id: 'nope' }))).status).toBe(400)
+  })
+
+  it('keeps snapshots when the environment is deleted, lists them without an environment, and starts a new environment from one', async () => {
+    const { call, env, svc } = await setup()
+    const snap = (await (await call(`/agents/environments/${env.id}/snapshots`, post({ name: 'keep' }))).json()) as { id: string }
+    svc.snaps.get(snap.id)!.state = 'ready'
+    expect((await call(`/agents/environments/${env.id}`, { method: 'DELETE' })).status).toBe(200)
+    const all = (await (await call('/agents/environments/snapshots')).json()) as { data: { id: string; environment_id: string | null }[] }
+    expect(all.data).toMatchObject([{ id: snap.id, environment_id: null }])
+    const fresh = await createSettled(call, JSON.stringify({ provider: 'sandbox', snapshot_id: snap.id }))
+    expect(fresh.status).toBe('connected')
+    expect([...svc.sandboxes.values()].some(s => s.snapshot === snap.id)).toBe(true)
+  })
+
+  it('refuses a snapshot that is saving, missing or malformed when creating', async () => {
+    const { call, env } = await setup()
+    const snap = (await (await call(`/agents/environments/${env.id}/snapshots`, post({}))).json()) as { id: string }
+    const saving = await call('/agents/environments', post({ provider: 'sandbox', snapshot_id: snap.id }))
+    expect(saving.status).toBe(400)
+    expect(JSON.stringify(await saving.json())).toContain('still being saved')
+    expect((await call('/agents/environments', post({ provider: 'sandbox', snapshot_id: `snap_${'c'.repeat(32)}` }))).status).toBe(404)
+    expect((await call('/agents/environments', post({ provider: 'sandbox', snapshot_id: 'x' }))).status).toBe(400)
+  })
+
+  it('deletes the environment\'s snapshots with it only on request', async () => {
+    const { call, env, svc } = await setup()
+    await call(`/agents/environments/${env.id}/snapshots`, post({}))
+    await call(`/agents/environments/${env.id}/snapshots`, post({}))
+    const other = await createSettled(call, JSON.stringify({ provider: 'sandbox' }))
+    await call(`/agents/environments/${other.id}/snapshots`, post({}))
+    expect((await call(`/agents/environments/${env.id}?delete_snapshots=true`, { method: 'DELETE' })).status).toBe(200)
+    expect(svc.snaps.size).toBe(1)
+    expect([...svc.snaps.values()][0]!.sandbox_id).toBe(other.provider_metadata ? (other.provider_metadata as Record<string, string>)['sandbox_id'] : undefined)
+    expect((await call(`/agents/environments/${other.id}`, { method: 'DELETE' })).status).toBe(200)
+    expect(svc.snaps.size).toBe(1)
+  })
+})

@@ -5,6 +5,8 @@ Detailed write-ups live under [`docs/changes/`](docs/changes/).
 
 ## Unreleased
 
+- 2026-11-28: Sandbox snapshots. `POST`/`GET /v1/agents/environments/{id}/snapshots` save (202 `saving`) and list an environment's snapshots, `GET /agents/environments/snapshots` lists all of the owner's (including ones whose environment was deleted, `environment_id: null`), `GET`/`DELETE /agents/environments/snapshots/{id}` poll and delete one, `POST /agents/environments/{id}/restore {snapshot_id}` puts one back, and `POST /agents/environments` takes `snapshot_id` to start from one. Providers list `snapshot_levels` (per place and overall). Deleting an environment keeps its snapshots unless `?delete_snapshots=true`. Service refusals (`snapshots_off`, unsupported level, quota) pass through in plain words. See `docs/changes/2026-11-28-snapshots.md`.
+
 ## 0.4.0 — 2026-11-28
 
 - 2026-11-28: `GET /v1/agents/environments/{id}/folders?path=` lists one workspace folder's immediate sub-folders (`{name, path}`, sorted ignoring case, at most 500 with `has_more`; dot-folders included, symlinks skipped) for the web app's folder picker. `path` follows the Project folder rules (400 when bad), a missing folder answers 404, a stopped sandbox is started first.

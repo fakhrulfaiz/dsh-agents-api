@@ -12,7 +12,7 @@
  */
 import { mkdir, rmdir } from 'node:fs/promises'
 import { join, posix } from 'node:path'
-import { createSandboxApi, SandboxApiError, type SandboxApi, type WireBackend, type WireSandbox, type WireTemplate } from '@agentry/sandbox/client'
+import { createSandboxApi, SandboxApiError, type SandboxApi, type WireBackend, type WireSandbox, type WireSnapshotLevel, type WireTemplate } from '@agentry/sandbox/client'
 import type { OwnerId } from '../auth/authenticator.ts'
 import { directorySegment } from '../environment/local.ts'
 import type { CreateEnvironmentInput, EnvironmentCreateResult } from '../environment/provider.ts'
@@ -68,6 +68,8 @@ export interface SandboxPlaceRow {
   reason?: string
   gpus?: { count: number; models: string[] }
   capabilities: { reset: boolean; keepFilesOnReset: boolean; isolated: boolean; gpu: boolean }
+  /** The snapshot levels a sandbox here can take (the service's `snapshots`; empty when none). */
+  snapshot_levels: WireSnapshotLevel[]
 }
 
 export interface WorkspaceEntry {
@@ -200,6 +202,7 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
           ...(b.available ? {} : { reason: b.reason ?? 'the place is unavailable' }),
           ...(b.gpus ? { gpus: b.gpus } : {}),
           capabilities: { reset: b.capabilities.reset, keepFilesOnReset: b.capabilities.keepFilesOnReset, isolated: b.capabilities.isolated, gpu: b.capabilities.gpu },
+          snapshot_levels: b.snapshots ?? [],
         }))
         const main = backends.find((b) => b.default) ?? backends[0]
         if (!main) return { available: false, reason: 'Agentry Sandbox has no place', places }
@@ -222,7 +225,7 @@ export function createAgentrySandboxProvider(opts: AgentrySandboxOptions): Agent
       try {
         const place = input.place ?? input.template?.place
         const mount = (await sharesMachine(place)) ? dir : (opts.sharedWorkspace ?? '/workspace')
-        const s = await api(owner).create({ name: input.name ?? environmentId, template, workspace_path: mount, ...(place ? { place } : {}) })
+        const s = await api(owner).create({ name: input.name ?? environmentId, template, workspace_path: mount, ...(place ? { place } : {}), ...(input.snapshot_id ? { snapshot: input.snapshot_id } : {}) })
         return { status: statusOf(s.state), workspacePath: mount, handle: { sandbox_id: s.id, workspace_directory: mount, host_placeholder: dir, image: s.image, owner } }
       } catch (e) {
         return { status: 'failed' as const, workspacePath: dir, error: (e as Error).message }
@@ -425,6 +428,9 @@ export async function providerRows(registry: { list(): { name: string; capabilit
   return Promise.all(registry.list().map(async ({ name, ...rest }) => {
     const p = registry.get(name) as Partial<AgentrySandboxProvider> | undefined
     const a = typeof p?.availability === 'function' ? await p.availability() : { available: true as const }
-    return { object: 'sandbox.provider', name, ...rest, ...a }
+    // What any available place can take, so a client knows whether to offer snapshots at all.
+    const places = 'places' in a ? a.places : []
+    const snapshot_levels = (['workspace', 'disk', 'memory'] as const).filter(l => places.some(x => x.available && x.snapshot_levels.includes(l)))
+    return { object: 'sandbox.provider', name, ...rest, ...a, ...(places.length > 0 ? { snapshot_levels } : {}) }
   }))
 }

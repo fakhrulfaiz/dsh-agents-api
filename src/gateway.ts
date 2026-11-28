@@ -57,6 +57,7 @@ import { mountBrowserRecordingTools } from './mount-browser-recording.ts'
 import { parseInputEvents } from './sandbox/browser-input.ts'
 import { browserLookNote, browserToolGate, type BrowserGateDecision } from './sandbox/browser-control.ts'
 import { forgetWorkspaceAlias, workspaceOf } from './sandbox/workspace-alias.ts'
+import { newestFirst, snapshotJson, snapshotMessage } from './sandbox/snapshots.ts'
 import { DeliverablesCache } from './history/deliverables-cache.ts'
 import type { DeliverableEntry } from './history/deliverables.ts'
 import { mountSkillTools } from './skills/tools.ts'
@@ -481,6 +482,9 @@ export class AgentsGateway {
       { method: 'DELETE', pattern: '/agents/environments/templates/:template_id', handler: (_req, res, _url, params, p) => this.deleteTemplate(res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/runtimes', handler: async (_req, res) => { json(res, 200, await readRuntimeInfo(this.runtimeInfoPath)) } },
       { method: 'GET', pattern: '/agents/environments/providers', handler: async (_req, res) => { json(res, 200, { object: 'list', data: await providerRows(this.sandboxes) }) } },
+      { method: 'GET', pattern: '/agents/environments/snapshots', handler: (_req, res, _url, _params, p) => this.listAllSnapshots(res, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/snapshots/:snapshot_id', handler: (_req, res, _url, params, p) => this.snapshotCall(res, p.owner, params, 'get') },
+      { method: 'DELETE', pattern: '/agents/environments/snapshots/:snapshot_id', handler: (_req, res, _url, params, p) => this.snapshotCall(res, p.owner, params, 'delete') },
       { method: 'POST', pattern: '/agents/environments', handler: (req, res, _url, _params, p) => this.createEnvironment(req, res, p.owner) },
       { method: 'GET', pattern: '/agents/environments', handler: (_req, res, url, _params, p) => this.listEnvironments(res, url, p.owner) },
       { method: 'POST', pattern: '/agents/environments/:environment_id/files', handler: (req, res, _url, params, p) => this.writeEnvironmentFile(req, res, params, p.owner) },
@@ -490,6 +494,9 @@ export class AgentsGateway {
       { method: 'POST', pattern: '/agents/environments/:environment_id/start', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'start') },
       { method: 'POST', pattern: '/agents/environments/:environment_id/stop', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'stop') },
       { method: 'POST', pattern: '/agents/environments/:environment_id/reset', handler: (req, res, _url, params, p) => this.environmentAction(req, res, params, p.owner, 'reset') },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/snapshots', handler: (req, res, _url, params, p) => this.saveSnapshot(req, res, params, p.owner) },
+      { method: 'GET', pattern: '/agents/environments/:environment_id/snapshots', handler: (_req, res, _url, params, p) => this.listEnvironmentSnapshots(res, params, p.owner) },
+      { method: 'POST', pattern: '/agents/environments/:environment_id/restore', handler: (req, res, _url, params, p) => this.restoreSnapshot(req, res, params, p.owner) },
       { method: 'POST', pattern: '/agents/environments/:environment_id/terminals', handler: (req, res, _url, params, p) => this.openTerminal(req, res, params, p.owner) },
       { method: 'GET', pattern: '/agents/environments/:environment_id/terminals/:terminal_id/stream', handler: (req, res, _url, params, p) => this.streamTerminal(req, res, params, p.owner) },
       { method: 'POST', pattern: '/agents/environments/:environment_id/terminals/:terminal_id/input', handler: (req, res, _url, params, p) => this.terminalCall(req, res, params, p.owner, 'input') },
@@ -497,7 +504,7 @@ export class AgentsGateway {
       { method: 'DELETE', pattern: '/agents/environments/:environment_id/terminals/:terminal_id', handler: (_req, res, _url, params, p) => this.terminalCall(undefined, res, params, p.owner, 'close') },
       { method: 'GET', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.getEnvironment(res, params, p.owner) },
       { method: 'POST', pattern: '/agents/environments/:environment_id', handler: (req, res, _url, params, p) => this.updateEnvironment(req, res, params, p.owner) },
-      { method: 'DELETE', pattern: '/agents/environments/:environment_id', handler: (_req, res, _url, params, p) => this.deleteEnvironment(res, params, p.owner) },
+      { method: 'DELETE', pattern: '/agents/environments/:environment_id', handler: (_req, res, url, params, p) => this.deleteEnvironment(res, params, p.owner, url) },
       { method: 'POST', pattern: '/agents/sessions', handler: (req, res, url, _params, p) => this.createSession(req, res, url, p.owner) },
       { method: 'GET', pattern: '/agents/sessions', handler: (_req, res, url, _params, p) => this.listSessions(res, url, p.owner) },
       { method: 'GET', pattern: '/agents/sessions/:session_id/artifacts/*path', handler: (_req, res, url, params, p) => this.getArtifact(res, params, p.owner, url.searchParams.get('download') === '1') },
@@ -2603,15 +2610,17 @@ export class AgentsGateway {
    */
   async provisionEnvironment(owner: OwnerId, raw: Record<string, unknown>, inline?: EnvironmentTemplateConfig, opts: { background?: boolean } = {}): Promise<SdkEnvironment> {
     const fail = (message: string, code = 'bad_request'): never => { throw new AgentsApiRequestError(message, 400, code) }
-    const body = raw as { template_id?: string; session_id?: string; image?: string; provider?: string; name?: unknown; place?: unknown }
+    const body = raw as { template_id?: string; session_id?: string; image?: string; provider?: string; name?: unknown; place?: unknown; snapshot_id?: unknown }
     if (body.name !== undefined && (typeof body.name !== 'string' || body.name.trim().length > 80)) fail('Field "name" must be a string of at most 80 characters')
     if (body.place !== undefined && (typeof body.place !== 'string' || body.place.trim() === '')) fail('Field "place" must be a non-empty string')
+    if (body.snapshot_id !== undefined && (typeof body.snapshot_id !== 'string' || !/^snap_[0-9a-f]{32}$/.test(body.snapshot_id))) fail('Field "snapshot_id" must be a snapshot id')
     const input: CreateEnvironmentInput = {
       ...(typeof body.place === 'string' ? { place: body.place.trim() } : {}),
       ...(typeof body.template_id === 'string' ? { template_id: body.template_id } : {}),
       ...(typeof body.session_id === 'string' ? { session_id: body.session_id } : {}),
       ...(typeof body.image === 'string' ? { image: body.image } : {}),
       ...(typeof body.name === 'string' && body.name.trim() !== '' ? { name: body.name.trim() } : {}),
+      ...(typeof body.snapshot_id === 'string' ? { snapshot_id: body.snapshot_id } : {}),
     }
     let templateProvider: string | undefined
     if (input.template_id !== undefined) {
@@ -2632,6 +2641,20 @@ export class AgentsGateway {
       fail(errorMessage(error))
     }
     if (input.place !== undefined && provider.kind !== 'sandbox') fail(`sandbox provider "${provider.kind}" has no places; "place" applies to the sandbox provider only`)
+    if (input.snapshot_id !== undefined) {
+      if (provider.kind !== 'sandbox') fail('A snapshot starts a sandbox environment only')
+      // Look the snapshot up now so a wrong, foreign or unfinished one answers here, not as a failed environment later.
+      try {
+        const snap = await (provider as AgentrySandboxProvider).api(owner).getSnapshot(input.snapshot_id)
+        if (snap.state !== 'ready') fail(snap.state === 'saving' ? 'That snapshot is still being saved.' : 'That snapshot did not finish saving.', 'snapshot_not_ready')
+        // A disk or memory snapshot only starts a sandbox on the place that took it.
+        if (snap.level !== 'workspace' && input.place === undefined) input.place = snap.place
+      } catch (error: unknown) {
+        if (error instanceof AgentsApiRequestError) throw error
+        if (error instanceof SandboxApiError) throw new AgentsApiRequestError(snapshotMessage(error), error.status === 404 ? 404 : 400, error.code === 'not_found' ? 'resource_not_found' : error.code)
+        throw error
+      }
+    }
     // A template the provider cannot fully apply is stored, but nothing is provisioned from it: never ignore fields silently.
     const unsupported = input.template === undefined ? [] : unsupportedFields(input.template, provider)
     if (unsupported.length > 0) fail(`sandbox provider "${provider.kind}" cannot apply template fields: ${unsupported.join(', ')}`, 'sandbox_template_unsupported')
@@ -2798,6 +2821,141 @@ export class AgentsGateway {
       ...(error !== undefined ? { error } : status === 'failed' && record.error !== undefined ? { error: record.error } : {}),
     }
     json(res, 200, await this.environmentJson(owner, await this.store.environments.update(owner, record.id, next) ?? next))
+  }
+
+  /** The Agentry Sandbox provider, or `undefined` when none is registered. */
+  private snapshotProvider(): AgentrySandboxProvider | undefined {
+    const p = this.sandboxes.get('sandbox') as Partial<AgentrySandboxProvider> | undefined
+    return typeof p?.api === 'function' ? p as AgentrySandboxProvider : undefined
+  }
+
+  /** The environment's sandbox for a snapshot route, or the error response already sent. */
+  private async snapshotTarget(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<{ record: EnvironmentRecord; provider: AgentrySandboxProvider; sandboxId: string } | undefined> {
+    const record = await this.store.environments.get(owner, routeParam(params, 'environment_id'))
+    if (!record) {
+      notFound(res, 'environment not found')
+      return undefined
+    }
+    const provider = this.snapshotProvider()
+    const sandboxId = record.provider_metadata['sandbox_id']
+    if (provider === undefined || record.provider !== 'sandbox' || sandboxId === undefined) {
+      json(res, 409, { error: { type: 'invalid_request_error', code: 'environment_not_snapshotable', message: 'This environment does not take snapshots.' } })
+      return undefined
+    }
+    return { record, provider, sandboxId }
+  }
+
+  /** Answers a failed service call with its own status and plain message. */
+  private sandboxFailure(res: ServerResponse, e: unknown): void {
+    if (e instanceof SandboxApiError) {
+      json(res, e.status >= 400 ? e.status : 502, { error: { type: 'invalid_request_error', code: e.code === 'not_found' ? 'resource_not_found' : e.code, message: snapshotMessage(e) } })
+      return
+    }
+    json(res, 502, { error: { type: 'invalid_request_error', code: 'sandbox_error', message: errorMessage(e) } })
+  }
+
+  /** Environment ids of the owner's sandboxes, by sandbox id, so a snapshot can name its environment. */
+  private async environmentsBySandbox(owner: OwnerId): Promise<Map<string, string>> {
+    const out = new Map<string, string>()
+    let after: string | undefined
+    for (;;) {
+      const page = await this.store.environments.list(owner, { limit: 100, order: 'asc', ...(after === undefined ? {} : { after }) })
+      for (const env of page.data) {
+        const sandboxId = env.provider_metadata['sandbox_id']
+        if (sandboxId !== undefined) out.set(sandboxId, env.id)
+      }
+      if (!page.has_more || page.data.length === 0) return out
+      after = page.data[page.data.length - 1]!.id
+    }
+  }
+
+  /** `POST /agents/environments/{id}/snapshots`: start saving a snapshot (202 `saving`). */
+  private async saveSnapshot(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const target = await this.snapshotTarget(res, params, owner)
+    if (target === undefined) return
+    const body = await readBody(req).catch(() => ({})) as { name?: unknown; level?: unknown; stop_first?: unknown }
+    if (body.name !== undefined && body.name !== null && (typeof body.name !== 'string' || body.name.trim().length > 80)) return badRequest(res, 'Field "name" must be a string of at most 80 characters')
+    if (body.level !== undefined && body.level !== null && body.level !== 'workspace' && body.level !== 'disk' && body.level !== 'memory') return badRequest(res, 'Field "level" must be workspace, disk or memory')
+    if (body.stop_first !== undefined && typeof body.stop_first !== 'boolean') return badRequest(res, 'Field "stop_first" must be a boolean')
+    try {
+      const snap = await target.provider.api(owner).snapshot(target.sandboxId, {
+        ...(typeof body.name === 'string' && body.name.trim() !== '' ? { name: body.name.trim() } : {}),
+        ...(typeof body.level === 'string' ? { level: body.level } : {}),
+        ...(body.stop_first === true ? { stop_first: true } : {}),
+      })
+      json(res, 202, snapshotJson(snap, target.record.id))
+    } catch (e: unknown) {
+      this.sandboxFailure(res, e)
+    }
+  }
+
+  /** `GET /agents/environments/{id}/snapshots`: this environment's snapshots, newest first. */
+  private async listEnvironmentSnapshots(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const target = await this.snapshotTarget(res, params, owner)
+    if (target === undefined) return
+    try {
+      const snaps = await target.provider.api(owner).listSnapshots({ sandbox: target.sandboxId })
+      json(res, 200, { object: 'list', data: newestFirst(snaps).map(s => snapshotJson(s, target.record.id)) })
+    } catch (e: unknown) {
+      this.sandboxFailure(res, e)
+    }
+  }
+
+  /** `GET /agents/environments/snapshots`: every snapshot of the owner, including ones whose environment was deleted. */
+  private async listAllSnapshots(res: ServerResponse, owner: OwnerId): Promise<void> {
+    const provider = this.snapshotProvider()
+    if (provider === undefined) {
+      json(res, 200, { object: 'list', data: [] })
+      return
+    }
+    try {
+      const [snaps, ids] = await Promise.all([provider.api(owner).listSnapshots(), this.environmentsBySandbox(owner)])
+      json(res, 200, { object: 'list', data: newestFirst(snaps).map(s => snapshotJson(s, ids.get(s.sandbox_id) ?? null)) })
+    } catch (e: unknown) {
+      this.sandboxFailure(res, e)
+    }
+  }
+
+  /** `GET` (poll) or `DELETE` one snapshot of the owner. */
+  private async snapshotCall(res: ServerResponse, owner: OwnerId, params: Record<string, string>, action: 'get' | 'delete'): Promise<void> {
+    const provider = this.snapshotProvider()
+    if (provider === undefined) {
+      notFound(res, 'snapshot not found')
+      return
+    }
+    const id = routeParam(params, 'snapshot_id')
+    try {
+      if (action === 'delete') {
+        await provider.api(owner).deleteSnapshot(id)
+        json(res, 200, { id, object: 'snapshot.deleted', deleted: true })
+        return
+      }
+      const snap = await provider.api(owner).getSnapshot(id)
+      json(res, 200, snapshotJson(snap, (await this.environmentsBySandbox(owner)).get(snap.sandbox_id) ?? null))
+    } catch (e: unknown) {
+      this.sandboxFailure(res, e)
+    }
+  }
+
+  /** `POST /agents/environments/{id}/restore {snapshot_id}`: put a snapshot back; answers the environment. */
+  private async restoreSnapshot(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+    const target = await this.snapshotTarget(res, params, owner)
+    if (target === undefined) return
+    const body = await readBody(req).catch(() => ({})) as { snapshot_id?: unknown }
+    if (typeof body.snapshot_id !== 'string' || !/^snap_[0-9a-f]{32}$/.test(body.snapshot_id)) return badRequest(res, 'Field "snapshot_id" must be a snapshot id')
+    try {
+      await target.provider.api(owner).restore(target.sandboxId, body.snapshot_id)
+    } catch (e: unknown) {
+      this.sandboxFailure(res, e)
+      return
+    }
+    // A restore can rebuild the machine: shells and the browser inside it are gone.
+    this.terminals.closeEnvironment(target.record.id)
+    this.browserLive.closeEnvironment(target.record.id)
+    browserPorts.releaseSandbox(target.sandboxId)
+    this.browserProbes.delete(target.sandboxId)
+    forgetWorkspaceAlias(target.sandboxId)
+    await this.getEnvironment(res, params, owner)
   }
 
   /**
@@ -3042,12 +3200,26 @@ export class AgentsGateway {
     }
   }
 
-  private async deleteEnvironment(res: ServerResponse, params: Record<string, string>, owner: OwnerId): Promise<void> {
+  private async deleteEnvironment(res: ServerResponse, params: Record<string, string>, owner: OwnerId, url: URL): Promise<void> {
     const environmentId = routeParam(params, 'environment_id')
     const record = await this.store.environments.get(owner, environmentId)
     if (!record) {
       notFound(res, 'environment not found')
       return
+    }
+    // Snapshots outlive their environment unless the caller asks for them to go too.
+    const sandboxId = record.provider_metadata['sandbox_id']
+    const snapshotProvider = this.snapshotProvider()
+    if (url.searchParams.get('delete_snapshots') === 'true' && sandboxId !== undefined && record.provider === 'sandbox' && snapshotProvider !== undefined) {
+      try {
+        const api = snapshotProvider.api(owner)
+        for (const snap of await api.listSnapshots({ sandbox: sandboxId })) {
+          await api.deleteSnapshot(snap.id).catch((e: unknown) => { if (!(e instanceof SandboxApiError && e.status === 404)) throw e })
+        }
+      } catch (e: unknown) {
+        this.sandboxFailure(res, e)
+        return
+      }
     }
     const settingUp = this.provisioning.get(environmentId)
     if (settingUp !== undefined) {

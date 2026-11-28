@@ -15,6 +15,8 @@ export interface CreateEnvironmentInput {
   place?: string
   /** Extension: a display name (at most 80 characters). */
   name?: string
+  /** Extension: start from this Agentry Sandbox snapshot (`snap_...`; the provider's own, owner-scoped). */
+  snapshot_id?: string
   /** Config of the template named by `template_id`, resolved by the caller within the owner's templates. */
   template?: EnvironmentTemplateConfig
 }
