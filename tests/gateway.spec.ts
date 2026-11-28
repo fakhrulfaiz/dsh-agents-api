@@ -1841,3 +1841,64 @@ describe('environment create in the background', () => {
     expect(await pending).toMatchObject({ status: 'connected' })
   })
 })
+
+describe('project folders on sandbox environments', () => {
+  /** A gateway with the local provider and a fake `sandbox` provider whose `exec` is `exec`. */
+  async function folderGateway(exec: (script: string) => { code: number; stdout: string; stderr: string }) {
+    const { mkdir: makeDir } = await import('node:fs/promises')
+    const { SandboxRegistry } = await import('../src/sandbox/registry.ts')
+    const root = join(tmpdir(), 'agentry-gateway-spec-folders')
+    const local = createLocalProvider(root)
+    const registry = new SandboxRegistry('local')
+    registry.register(local)
+    const scripts: string[] = []
+    registry.register({
+      kind: 'sandbox',
+      capabilities: { templateFields: [], files: false, exec: true },
+      exec: async (_record: unknown, script: string) => { scripts.push(script); return exec(script) },
+    } as never)
+    const store = new MemoryStore()
+    await store.ensureOwner(TEST_OWNER)
+    const api = new AgentsGateway(fakeContext().ctx, openAuthenticator, '/v1', store, new SessionRegistry(), testGatewayOptions(registry))
+    const base = await listen((req, res) => api.handle(req, res))
+    const call = (path: string, init?: RequestInit) => fetch(`${base}/v1${path}`, { ...init, headers: { 'content-type': 'application/json', 'OpenAI-Beta': 'agents=v1' } })
+    const workspace = join(root, 'ws-folder')
+    await makeDir(workspace, { recursive: true })
+    await store.environments.create(TEST_OWNER, { id: 'env_local', object: 'environment', status: 'connected', provider: 'local', provider_metadata: { workspace_directory: workspace }, created_at: 1 })
+    await store.environments.create(TEST_OWNER, { id: 'env_fake', object: 'environment', status: 'connected', provider: 'sandbox', provider_metadata: { workspace_directory: '/workspace' }, created_at: 1 })
+    const session = (environment: object) => call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, environment }) })
+    return { call, session, scripts, workspace }
+  }
+
+  it('creates the folder, keeps it on the stored environment, and refuses bad folders', async () => {
+    const { stat } = await import('node:fs/promises')
+    const { session, workspace } = await folderGateway(() => ({ code: 0, stdout: '', stderr: '' }))
+    const ok = await session({ type: 'sandbox', environment_id: 'env_local', directory: './biology/' })
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toMatchObject({ environment: { type: 'sandbox', environment_id: 'env_local', directory: 'biology' } })
+    expect((await stat(join(workspace, 'biology'))).isDirectory()).toBe(true)
+    const rootOnly = await session({ type: 'sandbox', environment_id: 'env_local', directory: '' })
+    expect((await rootOnly.json() as { environment: object }).environment).toEqual({ type: 'sandbox', environment_id: 'env_local' })
+    expect((await session({ type: 'sandbox', environment_id: 'env_local', directory: '../x' })).status).toBe(400)
+  })
+
+  it('answers 409 directory_unavailable when the mkdir fails in the sandbox', async () => {
+    const { session, scripts } = await folderGateway(() => ({ code: 1, stdout: '', stderr: 'Permission denied' }))
+    const res = await session({ type: 'sandbox', environment_id: 'env_fake', directory: "it's here" })
+    expect(res.status).toBe(409)
+    expect(await res.json()).toMatchObject({ error: { code: 'directory_unavailable', message: expect.stringContaining('Permission denied') } })
+    expect(scripts).toEqual([`mkdir -p -- '/workspace/it'\\''s here'`])
+  })
+
+  it('rejects a project whose folder every chat would refuse', async () => {
+    const { call } = await folderGateway(() => ({ code: 0, stdout: '', stderr: '' }))
+    const env = { type: 'sandbox', environment_id: 'env_local', directory: '/etc' }
+    expect((await call('/agents/projects', { method: 'POST', body: JSON.stringify({ name: 'P', environment: env }) })).status).toBe(400)
+    const good = await call('/agents/projects', { method: 'POST', body: JSON.stringify({ name: 'P', environment: { ...env, directory: 'biology' } }) })
+    expect(good.status).toBe(201)
+    const id = ((await good.json()) as { id: string }).id
+    expect((await call(`/agents/projects/${id}`, { method: 'POST', body: JSON.stringify({ environment: env }) })).status).toBe(400)
+    const chat = await call('/agents/sessions', { method: 'POST', body: JSON.stringify({ agent: { model: 'deepseek-chat' }, project_id: id }) })
+    expect(await chat.json()).toMatchObject({ environment: { directory: 'biology' } })
+  })
+})

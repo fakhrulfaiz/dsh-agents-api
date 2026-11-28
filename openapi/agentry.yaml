@@ -4984,6 +4984,9 @@ components:
           type: string
         template_id:
           type: string
+        directory:
+          type: string
+          description: Folder inside the environment's workspace the session starts in (extension). Relative, no `..`, at most 200 characters and 8 segments; created when missing (400 `bad_request` when invalid, 409 `directory_unavailable` when it cannot be made). Stored on the session's environment.
       required:
         - type
       description: Alias kept for earlier clients. With `environment_id` it attaches that environment to the session; with `template_id` it provisions one.

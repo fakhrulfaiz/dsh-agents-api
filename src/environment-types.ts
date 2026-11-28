@@ -84,10 +84,14 @@ export interface OAISandboxEnvironment {
   type: 'sandbox'
   environment_id?: string
   template_id?: string
+  /** Folder inside the environment's workspace the session starts in (relative, created when missing). */
+  directory?: string
 }
 
 /** Sandbox reference stored on a session after resolution. */
 export interface OAISandboxSessionEnvironment {
   type: 'sandbox'
   environment_id: string
+  /** Folder inside the workspace the session started in. */
+  directory?: string
 }
