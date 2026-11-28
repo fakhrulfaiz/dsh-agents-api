@@ -88,6 +88,8 @@ interface McpClientModule {
 
 /**
  * Translate wire MCP tools into mcp-client configs and mount them on the agent scope.
+ * Independent servers are started together; with AGENTRY_DEBUG_TIMING=1, per-server
+ * and total durations are written to stderr (labels and numbers only).
  * @param agentCtx - agent-scoped Cordis context from `agents.create` setup.
  * @param tools - validated wire MCP tools.
  * @param sessionCwd - session workspace used as stdio cwd.
@@ -98,14 +100,37 @@ export async function mountMcpTools(
   sessionCwd: string,
 ): Promise<void> {
   if (tools.length === 0) return
+  const timingEnabled = process.env['AGENTRY_DEBUG_TIMING'] === '1'
+  const startedAt = performance.now()
   const McpClient = await import('@deepseek-ai/dsh-mcp-client') as unknown as McpClientModule
   const configs = resolveMcpConfigs(McpClient, tools, sessionCwd)
+  const timings: Array<{ label: string; ms: number }> = []
+  const fibers = configs.map(async (config, i) => {
+    const wire = tools[i]
+    if (wire === undefined) {
+      throw new AgentsApiMcpConfigError(`MCP config/tool length mismatch at index ${i}`)
+    }
+    const fiberStart = performance.now()
+    try {
+      // Cordis starts each fiber on plugin(), so independent servers connect in parallel.
+      await agentCtx.plugin(McpClient as never, config as never)
+    } finally {
+      timings.push({ label: wire.server_label, ms: Math.round(performance.now() - fiberStart) })
+    }
+  })
+  try {
+    await Promise.all(fibers)
+  } finally {
+    if (timingEnabled) {
+      const parts = timings.map(timing => `${timing.label}=${timing.ms}ms`).join(', ')
+      process.stderr.write(`[agentry-timing] mcp mounts: ${parts}; total=${Math.round(performance.now() - startedAt)}ms\n`)
+    }
+  }
   for (const [i, config] of configs.entries()) {
     const wire = tools[i]
     if (wire === undefined) {
       throw new AgentsApiMcpConfigError(`MCP config/tool length mismatch at index ${i}`)
     }
-    await agentCtx.plugin(McpClient as never, config as never)
     applyAllowedToolsGuard(agentCtx, config.serverName, wire)
   }
 }
